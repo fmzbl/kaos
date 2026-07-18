@@ -1,0 +1,61 @@
+[package]
+name = "kaos"
+version = "0.0.1"
+edition = "2021"
+description = "An agent orchestrator dressed as a chaos-magick secret society: sigils as prompt engineering, Carroll's equation of magic as the objective."
+license = "GPL-3.0-or-later"
+
+# The core — sigil engine, the Pact, the orchestrator, the benchmarks, the agent
+# loop — is std-only and builds offline and deterministically. All dependencies
+# sit behind the default `tui` and `api` features, so
+# `cargo build --no-default-features` restores a std-only binary (plain line REPL,
+# shell-out backends only). The magick stays in the policy.
+# An empty [workspace] makes kaos its own standalone workspace root, so it is
+# fully independent of the sibling `trick-code` package one directory up.
+[workspace]
+
+[dependencies]
+# The fullscreen TUI. ratatui draws it, crossterm is the terminal backend, and
+# ansi-to-tui renders the themed ANSI that command subprocesses emit into styled
+# ratatui text. Behind the default `tui` feature — `--no-default-features` builds a
+# std-only binary that uses the plain line REPL (for pipes/CI).
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
+ansi-to-tui = { version = "7", optional = true }
+base64 = { version = "0.22", optional = true }
+# Native text clipboard ownership for pane-local selections. OSC-52 remains as
+# a fallback for remote terminals, but VTE/GNOME may ignore it and may consume
+# Ctrl-Shift-C before the application receives the key.
+arboard = { version = "3.6", default-features = false, optional = true }
+# Rebis is the model-interface language.  KAOS is a host of the language; the
+# dependency is deliberately one-way (rebis-lang has no knowledge of KAOS).
+rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+# HTTP providers (OpenAI + Anthropic APIs). ureq is blocking with pure-rust TLS in
+# one crate; serde_json builds/parses the request+response bodies. Behind `api`.
+ureq = { version = "2", features = ["json", "tls"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+default = ["tui", "api"]
+# `tui`: the fullscreen ratatui app. Off ⇒ the plain std-only line REPL.
+tui = [
+    "dep:ratatui",
+    "dep:crossterm",
+    "dep:ansi-to-tui",
+    "dep:base64",
+    "dep:arboard",
+]
+# `api`: OpenAI + Anthropic HTTP providers (API keys). Off ⇒ only the local `claude`
+# CLI and `ollama` are available (both shell out, no HTTP crate).
+api = ["dep:ureq", "dep:serde_json"]
+
+[[bin]]
+name = "kaos"
+path = "src/main.rs"
+
+[lib]
+name = "kaos"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3

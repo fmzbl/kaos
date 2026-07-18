@@ -1,0 +1,33 @@
+; A loop of agents debating Jay-Z vs. Kanye West.
+;
+; Each turn of the loop is one agent's move: it reads the whole thread so far
+; and adds the next rebuttal from whichever side spoke last. The loop keeps
+; running — agent after agent — until the `settled` judge decides both cases
+; are on the table and a fair verdict has emerged. Run it with `/run`.
+
+(# std/loops)
+(# std/canon)
+
+; One exchange: the next voice answers the running discussion and pushes it on.
+(~ exchange (thread)
+  (->
+    thread
+    "You are moderating a debate between a Jay-Z advocate and a Kanye West
+     advocate. Continue the thread with the NEXT single rebuttal, spoken by
+     whichever side did NOT just speak. Make one sharp, specific point about
+     artistry, influence, or cultural legacy — no summarizing, just the next
+     move in the argument."))
+
+; The stop judge: `yes` only once both cases are made and a verdict is reached.
+(~ settled (thread)
+  (yes-no
+    (-> thread
+        "Has this debate aired both artists' strongest cases AND landed on a
+         fair closing verdict? Answer yes or no.")))
+
+; Kick it off, then let the agents loop until it settles.
+(loop
+  "Open the debate: who has the greater legacy in hip-hop, Jay-Z or Kanye
+   West? Give the opening argument for ONE side only."
+  exchange
+  settled)

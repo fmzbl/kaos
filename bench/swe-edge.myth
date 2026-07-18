@@ -1,0 +1,8 @@
+(pipe
+  (gather vote
+    (spread 4 (ask "kaos ties opencode on SWE-bench with Kimi K2.7. Propose ONE minimal, concrete change to kaos Rust that should open an edge, grounded in the mid-band-with-a-gate thesis: extra inference pays only as a sound gate over a model that is right sometimes. Name the file and the mechanism. One idea, the highest-leverage one.")))
+  (ask "Implement exactly that mechanism in kaos Rust. Output a unified diff. Minimal; do not touch tests or unrelated modules.")
+  (gather (check "git reset -q --hard && printf '%s' \"$CANDIDATE\" | git apply - && cargo test -q && cargo build --release -q")
+    (spread 3 (ask "Revise so it builds clean and every cargo test passes. Output the unified diff.")))
+  (gather (check "git reset -q --hard && printf '%s' \"$CANDIDATE\" | git apply - && cargo build --release -q && W=bench/window.txt && ./bench/predict.sh kaos kimi $W preds_kaos.jsonl && ./bench/predict.sh opencode kimi $W preds_oc.jsonl && ./bench/predict.sh kaos kimi $W preds_kaos2.jsonl && K=$(./bench/eval.sh preds_kaos.jsonl kaos-1) && O=$(./bench/eval.sh preds_oc.jsonl oc-1) && K2=$(./bench/eval.sh preds_kaos2.jsonl kaos-2) && echo \"kaos=$K opencode=$O kaos2=$K2\" && [ \"$K\" -gt \"$O\" ] && [ \"$K2\" -gt \"$O\" ]")
+    (spread 3 (ask "The official SWE-bench harness showed no reproducible edge over opencode. Diagnose from the harness output above and revise the patch. Output the unified diff."))))

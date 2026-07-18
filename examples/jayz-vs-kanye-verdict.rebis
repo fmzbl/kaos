@@ -1,0 +1,16 @@
+; Jay-Z vs. Kanye West, settled by a mediator square `[M]`.
+;
+; The two advocate agents run in parallel — each states its case and rebuts
+; the other. Their labeled results flow into the `[...]` mediator, a judge
+; agent that reads both and delivers the verdict. Run it with `/run`.
+
+(["Read both closing statements and deliver the verdict: who has the greater
+   hip-hop legacy, Jay-Z or Kanye West? Name the winner and the decisive reason."]
+
+  (-> "Make the case that JAY-Z has the greater hip-hop legacy."
+      "Now rebut the strongest counterargument a Kanye fan would raise, and
+       close with your single most decisive point.")
+
+  (-> "Make the case that KANYE WEST has the greater hip-hop legacy."
+      "Now rebut the strongest counterargument a Jay-Z fan would raise, and
+       close with your single most decisive point."))
