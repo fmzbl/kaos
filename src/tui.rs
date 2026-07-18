@@ -371,6 +371,9 @@ struct RebisRunEntry {
     parallel: bool,
     /// Captured when submitted so toggling `/chaos` cannot change queued work.
     chaos: bool,
+    /// A running run whose subprocess has been suspended (SIGSTOP) with `p`.
+    /// It stays `Running` but makes no progress until resumed (SIGCONT).
+    paused: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -898,6 +901,7 @@ impl App {
             elapsed: already_finished.then_some(Duration::ZERO),
             parallel,
             chaos: self.rebis_chaos_mode,
+            paused: false,
         });
         self.rebis_run_choice = self.rebis_runs.len() - 1;
         id
@@ -996,8 +1000,11 @@ impl App {
                     "awaiting authority · y once · a sigil · n deny"
                 }
                 RebisRunState::Queued => "queued · u/Delete removes · Tab expands",
+                RebisRunState::Running if run.paused => {
+                    "paused · p resumes · Tab stream · ↑/↓ scroll · ^C stops the run"
+                }
                 RebisRunState::Running => {
-                    "running · Tab stream · ↑/↓ scroll · ⇧↓ tail · Pg scroll · ^C stops the run"
+                    "running · p pauses · Tab stream · ↑/↓ scroll · ⇧↓ tail · ^C stops the run"
                 }
                 RebisRunState::Complete(0) => {
                     "complete · Tab stream · ↑/↓ scroll · ⇧↓ tail · Pg scroll · u/Delete removes"
@@ -1030,6 +1037,79 @@ impl App {
         };
         run.expanded = !run.expanded;
         self.describe_rebis_run_choice();
+        true
+    }
+
+    /// The subprocess of the run with `id`, whether it is the active serial job
+    /// or one of the independent parallel jobs.
+    fn job_child_for_run(&self, id: u64) -> Option<&Arc<Mutex<Child>>> {
+        if let Some(job) = &self.job {
+            if job.rebis_run_id == Some(id) {
+                return Some(&job.child);
+            }
+        }
+        self.parallel_jobs
+            .iter()
+            .find(|job| job.rebis_run_id == Some(id))
+            .map(|job| &job.child)
+    }
+
+    /// Suspend or resume the selected run's subprocess with `p`. A running run
+    /// is stopped with SIGSTOP (it stays alive but makes no progress) and a
+    /// paused run is resumed with SIGCONT. Only a live `Running` run has a
+    /// subprocess to signal; anything else is a no-op with an explanatory note.
+    fn toggle_pause_selected_rebis_run(&mut self) -> bool {
+        self.clamp_rebis_run_choice();
+        let Some(selected) = self.rebis_runs.get(self.rebis_run_choice) else {
+            return false;
+        };
+        if selected.state != RebisRunState::Running {
+            if let Some(workspace) = &mut self.rebis {
+                workspace.message = "only a running run can be paused".to_string();
+            }
+            return false;
+        }
+        let id = selected.id;
+        let resume = selected.paused;
+        let Some(child) = self.job_child_for_run(id) else {
+            if let Some(workspace) = &mut self.rebis {
+                workspace.message = "this run has no live subprocess to pause".to_string();
+            }
+            return false;
+        };
+        let pid = child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .id();
+        // No signal crate: `kill` sends SIGSTOP/SIGCONT to the child process.
+        let signal = if resume { "-CONT" } else { "-STOP" };
+        let sent = Command::new("kill")
+            .arg(signal)
+            .arg(pid.to_string())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !sent {
+            if let Some(workspace) = &mut self.rebis {
+                workspace.message = "could not signal the run's subprocess".to_string();
+            }
+            return false;
+        }
+        if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+            run.paused = !resume;
+            run.output.push(if resume {
+                "resumed     ▶ run continues".to_string()
+            } else {
+                "paused      ⏸ run suspended · p resumes".to_string()
+            });
+        }
+        if let Some(workspace) = &mut self.rebis {
+            workspace.message = if resume {
+                "run resumed".to_string()
+            } else {
+                "run paused · p resumes".to_string()
+            };
+        }
         true
     }
 
@@ -2101,6 +2181,10 @@ impl App {
                 }
                 KeyCode::End => {
                     self.rebis_run_top = self.rebis_run_max_top();
+                    return;
+                }
+                KeyCode::Char('p') if !ctrl => {
+                    self.toggle_pause_selected_rebis_run();
                     return;
                 }
                 KeyCode::Char('u') if !ctrl => {
@@ -3852,6 +3936,9 @@ fn format_run_duration(duration: Duration) -> String {
 }
 
 fn rebis_run_timer(run: &RebisRunEntry) -> String {
+    if run.paused && run.state == RebisRunState::Running {
+        return "PAUSED".to_string();
+    }
     match run.state {
         RebisRunState::AwaitingPermission | RebisRunState::Queued => {
             format!("WAIT {}", format_run_duration(run.queued_at.elapsed()))
@@ -5281,6 +5368,62 @@ mod tests {
         app.pump();
         assert!(app.job.is_none());
         assert_eq!(app.rebis_runs[0].state, RebisRunState::Complete(0));
+    }
+
+    #[test]
+    fn p_suspends_and_resumes_the_selected_run_subprocess() {
+        // The Linux process state character in /proc/<pid>/stat: 'T' is stopped.
+        fn proc_state(pid: u32) -> Option<char> {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            // Field 3 is the state, right after the ")" that closes the comm field.
+            let after = stat.rsplit_once(')')?.1;
+            after.trim_start().chars().next()
+        }
+
+        let mut app = App::new();
+        let request = RunRequest {
+            source: "\"long agent\"".to_string(),
+            input: String::new(),
+            scope: RunScope::Program,
+        };
+        let id = app.register_rebis_run(&request, RebisRunState::Running);
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let (_tx, rx) = mpsc::channel();
+        app.job = Some(Job {
+            child: Arc::new(Mutex::new(child)),
+            rx,
+            label: "pause test".to_string(),
+            claude_session: false,
+            rebis_run_id: Some(id),
+        });
+        app.rebis_run_choice = 0;
+
+        // `p` suspends: the run is flagged paused and the process actually stops.
+        assert!(app.toggle_pause_selected_rebis_run());
+        assert!(app.rebis_runs[0].paused);
+        assert_eq!(
+            proc_state(pid),
+            Some('T'),
+            "the subprocess should be stopped"
+        );
+        assert_eq!(rebis_run_timer(&app.rebis_runs[0]), "PAUSED");
+
+        // `p` again resumes: the flag clears and the process leaves the stopped state.
+        assert!(app.toggle_pause_selected_rebis_run());
+        assert!(!app.rebis_runs[0].paused);
+        assert_ne!(
+            proc_state(pid),
+            Some('T'),
+            "the subprocess should be running"
+        );
+
+        // A run with no live subprocess cannot be paused.
+        app.job = None;
+        assert!(!app.toggle_pause_selected_rebis_run());
+
+        // Clean up the sleeper.
+        let _ = Command::new("kill").arg(pid.to_string()).status();
     }
 
     #[test]
