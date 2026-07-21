@@ -417,7 +417,9 @@ way. It parses first, so an undrawable buffer reports on the status line
 instead of opening an empty window, and the editor runs in its own window while
 the terminal app keeps going.
 
-Tabs hold either a drawing or a conversation. A chat tab browses and resumes
+Tabs hold a drawing, a conversation, or the sigil library. Opening a sigil
+parses it and lays it out as a mandala, so a saved program becomes a drawing
+without a round trip through text. A chat tab browses and resumes
 the same durable sessions `/resume` reads in the terminal app — the same store
 and the same format, so a conversation started in either interface continues in
 the other.
@@ -603,6 +605,7 @@ kaos-core/               no terminal, no window — shared by both front-ends
   src/config.rs          persistent non-secret configuration
   src/theme.rs           the monochrome palette and its two modes
   src/sessions.rs        durable chat transcripts
+  src/sigils.rs          the personal library of saved Rebis programs
   src/tabs.rs            an ordered set of tabs, generic over their content
   src/visual.rs          the mandala model, Rebis codegen and loading
 kaos/                    the application

@@ -57,6 +57,12 @@ impl Default for ChatPane {
 enum Pane {
     Mandala(Doc),
     Chat(ChatPane),
+    /// The personal sigil library — the same `~/.kaos/sigils` the terminal
+    /// explorer browses. Opening one draws it on a new canvas.
+    Sigils {
+        query: String,
+        notice: Option<String>,
+    },
 }
 
 // ── palette ─────────────────────────────────────────────────────────────────
@@ -252,12 +258,10 @@ impl eframe::App for Editor {
         let on_mandala = self.on_mandala();
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(self.ink.ground))
-            .show(ctx, |ui| {
-                if on_mandala {
-                    self.canvas(ui);
-                } else {
-                    self.chat(ui);
-                }
+            .show(ctx, |ui| match self.tabs.active() {
+                Some(Pane::Mandala(_)) => self.canvas(ui),
+                Some(Pane::Chat(_)) => self.chat(ui),
+                _ => self.sigils(ui),
             });
     }
 }
@@ -331,6 +335,15 @@ impl Editor {
                 }
                 if ui.small_button("+ chat").clicked() {
                     self.tabs.open("chat", Pane::Chat(ChatPane::default()));
+                }
+                if ui.small_button("+ sigils").clicked() {
+                    self.tabs.open(
+                        "sigils",
+                        Pane::Sigils {
+                            query: String::new(),
+                            notice: None,
+                        },
+                    );
                 }
                 if let Some(id) = select {
                     self.tabs.select(id);
@@ -426,6 +439,70 @@ impl Editor {
                 let _ = crate::sessions::Store::default_store().save(&chat.session);
             }
         });
+    }
+
+    /// The sigil library. Opening one parses it and lays it out as a drawing,
+    /// so a saved program becomes a mandala without a round trip through text.
+    fn sigils(&mut self, ui: &mut egui::Ui) {
+        let k = self.ink;
+        let Some(Pane::Sigils { query, notice }) = self.tabs.active_mut() else {
+            return;
+        };
+        let mut open: Option<String> = None;
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.colored_label(k.faint, "SIGILS");
+            ui.add(
+                egui::TextEdit::singleline(query)
+                    .desired_width(220.0)
+                    .hint_text("search"),
+            );
+        });
+        if let Some(note) = notice.clone() {
+            ui.colored_label(k.faint, note);
+        }
+        ui.separator();
+        let lib = crate::sigils::Library::default_library();
+        let found = lib.search(query);
+        if found.is_empty() {
+            ui.colored_label(k.faint, "nothing saved yet");
+        }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for e in &found {
+                if ui
+                    .selectable_label(false, format!("{}   {} bytes", e.name, e.bytes))
+                    .clicked()
+                {
+                    open = Some(e.name.clone());
+                }
+            }
+        });
+
+        if let Some(name) = open {
+            match lib.load(&name) {
+                Ok(source) => match Mandala::from_rebis(&source) {
+                    Ok(mandala) => {
+                        self.tabs.open(
+                            name,
+                            Pane::Mandala(Doc {
+                                mandala,
+                                ..Doc::default()
+                            }),
+                        );
+                    }
+                    Err(e) => {
+                        if let Some(Pane::Sigils { notice, .. }) = self.tabs.active_mut() {
+                            *notice = Some(format!("{name}: {e}"));
+                        }
+                    }
+                },
+                Err(e) => {
+                    if let Some(Pane::Sigils { notice, .. }) = self.tabs.active_mut() {
+                        *notice = Some(format!("{name}: {e}"));
+                    }
+                }
+            }
+        }
     }
 
     fn palette(&mut self, ctx: &egui::Context) {
