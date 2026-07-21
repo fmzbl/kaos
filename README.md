@@ -56,16 +56,25 @@ export KAOS_MODEL=claude:sonnet
 kaos
 ```
 
-The [visual mandala editor](#visual-mandala-editor) is an optional feature. It
-draws natively with egui on OpenGL — no webview, and so no system webkit:
+The [visual mandala editor](#visual-mandala-editor) is a separate application.
+It draws natively with egui on OpenGL — no webview, and so no system webkit —
+and it does not need the terminal app installed:
+
+```bash
+cargo install --path kaos-visual
+kaos-visual                 # or: kaos-visual program.rebis
+```
+
+Installed alongside the terminal app it is also reachable as `kaos visual`,
+which is the same code behind a second front door:
 
 ```bash
 cargo install --path . --features visual
-kaos visual
+kaos visual program.rebis
 ```
 
-It is off by default only to keep the ordinary build small; `kaos visual`
-prints this instruction when the feature is absent.
+Both read the same `~/.kaos` — sigils, sessions, and the `/theme` setting are
+shared — but neither requires the other to be present.
 
 The Sisyphus training and benchmark stack is an optional Python component:
 

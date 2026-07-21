@@ -5,6 +5,16 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 description = "The Kaos visual editor: a native egui window over the shared Kaos core."
 
+[lib]
+name = "kaos_visual"
+path = "src/lib.rs"
+
+# The editor stands alone: this binary is the whole application, and it links
+# nothing from the terminal app.
+[[bin]]
+name = "kaos-visual"
+path = "src/main.rs"
+
 [dependencies]
 # Everything this window draws — forms, sessions, sigils, tabs, palette — comes
 # from the core. It has no dependency on the terminal app at all, which is why

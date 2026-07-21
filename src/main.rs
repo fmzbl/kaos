@@ -1370,37 +1370,25 @@ impl rebis_lang::Oracle for DryOracle {
 /// `kaos visual [program-or-file]` — the mandala editor. Draw `o-[]-o`, get
 /// Rebis source; or load an existing program onto the canvas.
 fn visual_cmd(arg: &str) {
-    let arg = arg.trim();
-    // Same convention as `rebis run`: a readable path loads, anything else is
-    // treated as inline source.
-    let source = if arg.is_empty() {
-        None
-    } else {
-        match std::fs::read_to_string(arg) {
-            Ok(text) => Some(text),
-            Err(_) => Some(arg.to_string()),
-        }
-    };
-
     #[cfg(feature = "visual")]
     {
-        let start = match source {
-            None => kaos::visual::Mandala::new(),
-            Some(src) => match kaos::visual::Mandala::from_rebis(&src) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("visual: {e}");
-                    std::process::exit(2);
-                }
-            },
-        };
-        kaos::visual_ui::run(start);
+        // A second front door onto the standalone editor — `kaos-visual` runs
+        // the identical code without this app installed at all.
+        match kaos::visual_ui::open(arg) {
+            Ok(mandala) => kaos::visual_ui::run(mandala),
+            Err(error) => {
+                eprintln!("visual: {error}");
+                std::process::exit(2);
+            }
+        }
     }
     #[cfg(not(feature = "visual"))]
     {
         // Without the window, still report whether the program is drawable.
-        if let Some(src) = source {
-            match kaos::visual::Mandala::from_rebis(&src) {
+        let arg = arg.trim();
+        if !arg.is_empty() {
+            let source = std::fs::read_to_string(arg).unwrap_or_else(|_| arg.to_string());
+            match kaos::visual::Mandala::from_rebis(&source) {
                 Ok(m) => println!("visual: drawable — {} shapes", m.nodes().len()),
                 Err(e) => {
                     eprintln!("visual: {e}");
@@ -1411,7 +1399,8 @@ fn visual_cmd(arg: &str) {
         eprintln!(
             "kaos visual needs the `visual` feature:\n  \
              cargo install --path . --features visual\n\
-             It draws natively with egui; no extra system libraries are needed."
+             Or run the editor on its own:\n  \
+             cargo install --path kaos-visual && kaos-visual"
         );
         std::process::exit(2);
     }

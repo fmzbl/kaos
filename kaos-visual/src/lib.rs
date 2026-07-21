@@ -9,7 +9,9 @@
 //! system libraries beyond the OpenGL and windowing ones any desktop already
 //! has.
 //!
-//! Behind the `visual` feature.
+//! It is its own application. `kaos-visual [program-or-file]` runs the editor
+//! with no terminal app involved; the `kaos visual` subcommand is a second
+//! front door onto the same [`open`] and [`run`] pair.
 
 use eframe::egui;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke as UiStroke, Vec2};
@@ -131,6 +133,21 @@ enum Drag {
     },
     /// Panning the canvas.
     Pan,
+}
+
+/// Resolve what an argument names into a drawing to open.
+///
+/// Same convention as `rebis run`: a readable path loads, anything else is
+/// treated as inline Rebis source, and nothing at all is an empty canvas.
+/// Kept here rather than in a caller so every way of starting the editor
+/// agrees about what its argument means.
+pub fn open(arg: &str) -> Result<Mandala, String> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Ok(Mandala::new());
+    }
+    let source = std::fs::read_to_string(arg).unwrap_or_else(|_| arg.to_string());
+    Mandala::from_rebis(&source).map_err(|e| e.to_string())
 }
 
 /// Open the editor window on `start`. Blocks until the window closes.
