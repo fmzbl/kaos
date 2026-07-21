@@ -417,7 +417,10 @@ way. It parses first, so an undrawable buffer reports on the status line
 instead of opening an empty window, and the editor runs in its own window while
 the terminal app keeps going.
 
-Tabs hold a drawing, a conversation, or the sigil library. Opening a sigil
+Tabs hold a drawing, Rebis source, a conversation, or the sigil library. A
+source tab checks as you type with the same parser the workspace uses, saves to
+the same library, and `draw` lays it out as a mandala; a drawing's `edit as
+text` goes the other way. Opening a sigil
 parses it and lays it out as a mandala, so a saved program becomes a drawing
 without a round trip through text. A chat tab browses and resumes
 the same durable sessions `/resume` reads in the terminal app — the same store

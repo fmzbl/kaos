@@ -63,6 +63,13 @@ enum Pane {
         query: String,
         notice: Option<String>,
     },
+    /// Rebis source, as text. The same buffer the terminal workspace edits and
+    /// the same library it saves to, checked with the same parser.
+    Source {
+        name: String,
+        text: String,
+        notice: Option<String>,
+    },
 }
 
 // ── palette ─────────────────────────────────────────────────────────────────
@@ -261,6 +268,7 @@ impl eframe::App for Editor {
             .show(ctx, |ui| match self.tabs.active() {
                 Some(Pane::Mandala(_)) => self.canvas(ui),
                 Some(Pane::Chat(_)) => self.chat(ui),
+                Some(Pane::Source { .. }) => self.source(ui),
                 _ => self.sigils(ui),
             });
     }
@@ -281,6 +289,18 @@ impl Editor {
                         self.doc_mut().mandala = Mandala::new();
                         self.doc_mut().pending = None;
                         self.doc_mut().selected = None;
+                    }
+                    if ui.button("edit as text").clicked() {
+                        if let Ok(src) = self.doc().mandala.to_rebis() {
+                            self.tabs.open(
+                                "source",
+                                Pane::Source {
+                                    name: String::new(),
+                                    text: src,
+                                    notice: None,
+                                },
+                            );
+                        }
                     }
                     if ui.button("reset view").clicked() {
                         self.doc_mut().view = View::new();
@@ -335,6 +355,16 @@ impl Editor {
                 }
                 if ui.small_button("+ chat").clicked() {
                     self.tabs.open("chat", Pane::Chat(ChatPane::default()));
+                }
+                if ui.small_button("+ source").clicked() {
+                    self.tabs.open(
+                        "source",
+                        Pane::Source {
+                            name: String::new(),
+                            text: String::new(),
+                            notice: None,
+                        },
+                    );
                 }
                 if ui.small_button("+ sigils").clicked() {
                     self.tabs.open(
@@ -499,6 +529,84 @@ impl Editor {
                 Err(e) => {
                     if let Some(Pane::Sigils { notice, .. }) = self.tabs.active_mut() {
                         *notice = Some(format!("{name}: {e}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// A source tab: Rebis as text, checked as you type.
+    ///
+    /// Validation, saving and drawing all go through the same code the
+    /// terminal app uses — `rebis_lang::parse`, `sigils::Library`, and
+    /// `Mandala::from_rebis` — so a program means one thing in both.
+    fn source(&mut self, ui: &mut egui::Ui) {
+        let k = self.ink;
+        let mut draw: Option<String> = None;
+        let mut save: Option<(String, String)> = None;
+        let Some(Pane::Source { name, text, notice }) = self.tabs.active_mut() else {
+            return;
+        };
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.colored_label(k.faint, "NAME");
+            ui.add(
+                egui::TextEdit::singleline(name)
+                    .desired_width(240.0)
+                    .hint_text("team/reviews"),
+            );
+            if ui.button("save").clicked() {
+                save = Some((name.clone(), text.clone()));
+            }
+            if ui.button("draw").clicked() {
+                draw = Some(text.clone());
+            }
+        });
+
+        // The live diagnostic, exactly as the workspace shows it.
+        let status = match rebis_lang::parse(text) {
+            _ if text.trim().is_empty() => String::new(),
+            Ok(_) => "valid".to_string(),
+            Err(e) => e.to_string(),
+        };
+        if let Some(note) = notice.clone() {
+            ui.colored_label(k.faint, note);
+        }
+        ui.colored_label(k.faint, status);
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(text)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(28),
+            );
+        });
+
+        if let Some((name, text)) = save {
+            let result = crate::sigils::Library::default_library().save(&name, &text);
+            if let Some(Pane::Source { notice, .. }) = self.tabs.active_mut() {
+                *notice = Some(match result {
+                    Ok(p) => format!("saved {}", p.display()),
+                    Err(e) => e.to_string(),
+                });
+            }
+        }
+        if let Some(text) = draw {
+            match Mandala::from_rebis(&text) {
+                Ok(mandala) => {
+                    self.tabs.open(
+                        "drawn",
+                        Pane::Mandala(Doc {
+                            mandala,
+                            ..Doc::default()
+                        }),
+                    );
+                }
+                Err(e) => {
+                    if let Some(Pane::Source { notice, .. }) = self.tabs.active_mut() {
+                        *notice = Some(e.to_string());
                     }
                 }
             }
