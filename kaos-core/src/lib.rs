@@ -9,9 +9,11 @@
 //! - [`config`] — the persistent, non-secret settings file.
 //! - [`theme`] — the monochrome palette and its two modes.
 //! - [`sessions`] — durable chat transcripts.
+//! - [`tabs`] — an ordered set of tabs, generic over what they hold.
 //! - [`visual`] — the mandala model, Rebis code generation and loading.
 
 pub mod config;
 pub mod sessions;
+pub mod tabs;
 pub mod theme;
 pub mod visual;

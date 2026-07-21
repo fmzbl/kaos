@@ -35,7 +35,7 @@
 // The front-end-agnostic core lives in its own crate. Re-exported so the app's
 // `crate::config` / `crate::theme` / `crate::sessions` / `crate::visual` paths
 // keep meaning what they always did.
-pub use kaos_core::{config, sessions, theme, visual};
+pub use kaos_core::{config, sessions, tabs, theme, visual};
 
 pub mod adept;
 pub mod agent;

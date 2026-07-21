@@ -417,6 +417,12 @@ way. It parses first, so an undrawable buffer reports on the status line
 instead of opening an empty window, and the editor runs in its own window while
 the terminal app keeps going.
 
+The editor is tabbed: `Ctrl-T` opens a drawing, `Ctrl-Tab` and `Ctrl-←` cycle,
+`Ctrl-W` closes. Each tab keeps its own canvas, viewport and selection, so
+switching back returns you where you were. The tab rules live in
+`kaos-core`'s `tabs` module, generic over what a tab holds, so the terminal app
+can adopt the same behaviour without a second implementation.
+
 The whiteboard has the same three elements as the notation — the circle, the
 square, and the arrow:
 
@@ -592,6 +598,7 @@ kaos-core/               no terminal, no window — shared by both front-ends
   src/config.rs          persistent non-secret configuration
   src/theme.rs           the monochrome palette and its two modes
   src/sessions.rs        durable chat transcripts
+  src/tabs.rs            an ordered set of tabs, generic over their content
   src/visual.rs          the mandala model, Rebis codegen and loading
 kaos/                    the application
 ```

@@ -14,7 +14,18 @@
 use eframe::egui;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke as UiStroke, Vec2};
 
+use crate::tabs::{TabId, Tabs};
 use crate::visual::{Form, Mandala, NodeId, Shape, Stroke, View, NODE_R, NODE_RY};
+
+/// One open drawing. Each tab keeps its own canvas *and its own viewport and
+/// selection*, so switching tabs returns you to exactly where you were.
+#[derive(Default)]
+struct Doc {
+    mandala: Mandala,
+    view: View,
+    pending: Option<NodeId>,
+    selected: Option<NodeId>,
+}
 
 // ── palette ─────────────────────────────────────────────────────────────────
 //
@@ -142,28 +153,44 @@ struct Editor {
     /// all resolve from here, exactly as in the terminal app, so a program
     /// drawn here means the same thing when it is run.
     cwd: std::path::PathBuf,
-    mandala: Mandala,
-    view: View,
+    tabs: Tabs<Doc>,
+    /// The tool is deliberately shared across tabs: it is a mode of working,
+    /// not a property of a drawing.
     tool: Tool,
     drag: Drag,
-    pending: Option<NodeId>,
-    selected: Option<NodeId>,
     notice: Option<String>,
 }
 
 impl Editor {
     fn new(mandala: Mandala) -> Self {
+        let mut tabs = Tabs::new();
+        tabs.open(
+            "mandala",
+            Doc {
+                mandala,
+                ..Doc::default()
+            },
+        );
         Self {
             ink: Ink::load(),
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            mandala,
-            view: View::new(),
+            tabs,
             tool: Tool::Place(Form::Prompt),
             drag: Drag::None,
-            pending: None,
-            selected: None,
             notice: None,
         }
+    }
+
+    /// The open drawing. The editor always keeps at least one tab, so the
+    /// front-end never has to render an empty canvas.
+    fn doc(&self) -> &Doc {
+        self.tabs.active().expect("the editor keeps one tab open")
+    }
+
+    fn doc_mut(&mut self) -> &mut Doc {
+        self.tabs
+            .active_mut()
+            .expect("the editor keeps one tab open")
     }
 }
 
@@ -171,6 +198,7 @@ impl eframe::App for Editor {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_keys(ctx);
         self.header(ctx);
+        self.tab_bar(ctx);
         self.palette(ctx);
         self.side(ctx);
         self.footer(ctx);
@@ -188,18 +216,18 @@ impl Editor {
                 ui.separator();
                 ui.colored_label(
                     self.ink.faint,
-                    format!("{}%", (self.view.zoom * 100.0).round()),
+                    format!("{}%", (self.doc_mut().view.zoom * 100.0).round()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("clear").clicked() {
-                        self.mandala = Mandala::new();
-                        self.pending = None;
-                        self.selected = None;
+                        self.doc_mut().mandala = Mandala::new();
+                        self.doc_mut().pending = None;
+                        self.doc_mut().selected = None;
                     }
                     if ui.button("reset view").clicked() {
-                        self.view = View::new();
+                        self.doc_mut().view = View::new();
                     }
-                    let built = self.mandala.to_rebis();
+                    let built = self.doc_mut().mandala.to_rebis();
                     // Only offer the hand-off when there is source to hand over.
                     ui.add_enabled_ui(built.is_ok(), |ui| {
                         if ui.button("open in terminal").clicked() {
@@ -222,6 +250,40 @@ impl Editor {
         });
     }
 
+    /// The open drawings. Each keeps its own canvas, viewport and selection,
+    /// so switching back returns you exactly where you were.
+    fn tab_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let active = self.tabs.active_id();
+                let mut select: Option<TabId> = None;
+                let mut close: Option<TabId> = None;
+                for tab in self.tabs.iter() {
+                    let on = Some(tab.id) == active;
+                    if ui.selectable_label(on, &tab.title).clicked() {
+                        select = Some(tab.id);
+                    }
+                    // Only the active tab offers its close button, so the bar
+                    // stays quiet and a stray click cannot shut the wrong one.
+                    if on && self.tabs.len() > 1 && ui.small_button("×").clicked() {
+                        close = Some(tab.id);
+                    }
+                    ui.separator();
+                }
+                if ui.small_button("+").clicked() {
+                    let n = self.tabs.len() + 1;
+                    self.tabs.open(format!("mandala {n}"), Doc::default());
+                }
+                if let Some(id) = select {
+                    self.tabs.select(id);
+                }
+                if let Some(id) = close {
+                    self.tabs.close(id);
+                }
+            });
+        });
+    }
+
     fn palette(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("palette")
             .exact_width(180.0)
@@ -233,7 +295,7 @@ impl Editor {
                     let on = self.tool == Tool::Place(form.clone());
                     if ui.selectable_label(on, *label).clicked() {
                         self.tool = Tool::Place(form);
-                        self.pending = None;
+                        self.doc_mut().pending = None;
                     }
                 }
                 ui.add_space(10.0);
@@ -247,7 +309,7 @@ impl Editor {
                 ] {
                     if ui.selectable_label(self.tool == tool, label).clicked() {
                         self.tool = tool;
-                        self.pending = None;
+                        self.doc_mut().pending = None;
                     }
                 }
             });
@@ -258,13 +320,13 @@ impl Editor {
             .exact_width(330.0)
             .show(ctx, |ui| {
                 ui.add_space(6.0);
-                if let Some(id) = self.selected {
-                    if let Some(node) = self.mandala.node(id).cloned() {
+                if let Some(id) = self.doc_mut().selected {
+                    if let Some(node) = self.doc_mut().mandala.node(id).cloned() {
                         ui.colored_label(self.ink.faint, node.form.name().to_uppercase());
                         if node.form.uses_text() {
                             let mut text = node.text.clone();
                             if ui.text_edit_singleline(&mut text).changed() {
-                                self.mandala.set_text(id, text);
+                                self.doc_mut().mandala.set_text(id, text);
                             }
                         }
                         if let Form::Function(params) = &node.form {
@@ -272,7 +334,7 @@ impl Editor {
                             if ui.text_edit_singleline(&mut joined).changed() {
                                 let ps: Vec<String> =
                                     joined.split_whitespace().map(str::to_string).collect();
-                                self.mandala.set_form(id, Form::Function(ps));
+                                self.doc_mut().mandala.set_form(id, Form::Function(ps));
                             }
                             ui.colored_label(self.ink.faint, "parameters, space separated");
                         }
@@ -281,24 +343,26 @@ impl Editor {
                             format!("takes {} arrows", node.form.arity()),
                         );
                         if ui.button("delete shape").clicked() {
-                            self.mandala.remove(id);
-                            self.selected = None;
+                            self.doc_mut().mandala.remove(id);
+                            self.doc_mut().selected = None;
                         }
                         ui.separator();
                     }
                 }
                 ui.colored_label(self.ink.faint, "REBIS");
-                egui::ScrollArea::vertical().show(ui, |ui| match self.mandala.to_rebis() {
-                    Ok(src) => {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(src).monospace().color(self.ink.ink),
-                            )
-                            .wrap(),
-                        );
-                    }
-                    Err(e) => {
-                        ui.colored_label(self.ink.faint, e.to_string());
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    match self.doc_mut().mandala.to_rebis() {
+                        Ok(src) => {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(src).monospace().color(self.ink.ink),
+                                )
+                                .wrap(),
+                            );
+                        }
+                        Err(e) => {
+                            ui.colored_label(self.ink.faint, e.to_string());
+                        }
                     }
                 });
             });
@@ -311,7 +375,7 @@ impl Editor {
                     self.ink.faint,
                     "drag to pan · wheel to zoom · delete removes the selection",
                 );
-                if let Some(id) = self.pending {
+                if let Some(id) = self.doc_mut().pending {
                     ui.colored_label(
                         self.ink.ink,
                         format!("arrow from #{} — click a target", id.0),
@@ -334,13 +398,39 @@ impl Editor {
         if ctx.memory(|m| m.focused()).is_some() {
             return;
         }
+        // Tab cycling and closing go through `Tabs`, so the terminal app can
+        // bind the same behaviour to its own keys without reimplementing it.
+        let (next, prev, close, open) = ctx.input(|i| {
+            (
+                i.modifiers.ctrl && i.key_pressed(egui::Key::Tab),
+                i.modifiers.ctrl && i.key_pressed(egui::Key::ArrowLeft),
+                i.modifiers.ctrl && i.key_pressed(egui::Key::W),
+                i.modifiers.ctrl && i.key_pressed(egui::Key::T),
+            )
+        });
+        if next {
+            self.tabs.next();
+        }
+        if prev {
+            self.tabs.prev();
+        }
+        if open {
+            let n = self.tabs.len() + 1;
+            self.tabs.open(format!("mandala {n}"), Doc::default());
+        }
+        if close && self.tabs.len() > 1 {
+            if let Some(id) = self.tabs.active_id() {
+                self.tabs.close(id);
+            }
+        }
+
         let pressed = ctx.input(|i| i.key_pressed(egui::Key::Delete));
         if !pressed {
             return;
         }
-        if let Some(id) = self.selected.take() {
-            self.mandala.remove(id);
-            self.pending = None;
+        if let Some(id) = self.doc_mut().selected.take() {
+            self.doc_mut().mandala.remove(id);
+            self.doc_mut().pending = None;
         }
     }
 
@@ -357,7 +447,7 @@ impl Editor {
                 if let Some(p) = response.hover_pos() {
                     let (sx, sy) = local(p);
                     let factor = if scroll > 0.0 { 1.1 } else { 1.0 / 1.1 };
-                    self.view.zoom_at(sx, sy, factor);
+                    self.doc_mut().view.zoom_at(sx, sy, factor);
                 }
             }
         }
@@ -367,10 +457,11 @@ impl Editor {
         if response.drag_started() {
             if let Some(p) = response.interact_pointer_pos() {
                 let (sx, sy) = local(p);
-                let (wx, wy) = self.view.to_world(sx, sy);
-                self.drag = match self.mandala.hit(wx, wy) {
+                let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
+                self.drag = match self.doc_mut().mandala.hit(wx, wy) {
                     Some(id) => {
                         let n = self
+                            .doc()
                             .mandala
                             .node(id)
                             .map(|n| (n.x, n.y))
@@ -389,13 +480,13 @@ impl Editor {
                 Drag::Node { id, grab } => {
                     if let Some(p) = response.interact_pointer_pos() {
                         let (sx, sy) = local(p);
-                        let (wx, wy) = self.view.to_world(sx, sy);
-                        self.mandala.move_to(id, wx - grab.0, wy - grab.1);
+                        let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
+                        self.doc_mut().mandala.move_to(id, wx - grab.0, wy - grab.1);
                     }
                 }
                 Drag::Pan => {
                     let d = response.drag_delta();
-                    self.view.pan(f64::from(d.x), f64::from(d.y));
+                    self.doc_mut().view.pan(f64::from(d.x), f64::from(d.y));
                 }
                 Drag::None => {}
             }
@@ -407,7 +498,7 @@ impl Editor {
         if response.clicked() {
             if let Some(p) = response.interact_pointer_pos() {
                 let (sx, sy) = local(p);
-                let (wx, wy) = self.view.to_world(sx, sy);
+                let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
                 self.click(wx, wy);
             }
         }
@@ -416,39 +507,39 @@ impl Editor {
     }
 
     fn click(&mut self, wx: f64, wy: f64) {
-        match (self.mandala.hit(wx, wy), self.tool.clone()) {
+        match (self.doc_mut().mandala.hit(wx, wy), self.tool.clone()) {
             // Clicked a shape.
-            (Some(id), Tool::Flow(form)) => match self.pending {
-                None => self.pending = Some(id),
+            (Some(id), Tool::Flow(form)) => match self.doc_mut().pending {
+                None => self.doc_mut().pending = Some(id),
                 Some(from) => {
-                    if let Some(made) = self.mandala.flow(from, id, form) {
-                        self.selected = Some(made);
+                    if let Some(made) = self.doc_mut().mandala.flow(from, id, form) {
+                        self.doc_mut().selected = Some(made);
                     }
-                    self.pending = None;
+                    self.doc_mut().pending = None;
                 }
             },
-            (Some(id), Tool::Child) => match self.pending {
-                None => self.pending = Some(id),
+            (Some(id), Tool::Child) => match self.doc_mut().pending {
+                None => self.doc_mut().pending = Some(id),
                 Some(from) => {
-                    self.mandala.connect(from, id);
-                    self.pending = None;
+                    self.doc_mut().mandala.connect(from, id);
+                    self.doc_mut().pending = None;
                 }
             },
-            (Some(id), _) => self.selected = Some(id),
+            (Some(id), _) => self.doc_mut().selected = Some(id),
             // Clicked empty canvas.
             (None, Tool::Place(form)) => {
                 let text = default_text(&form);
-                let id = self.mandala.add(form, text, wx, wy);
-                self.selected = Some(id);
+                let id = self.doc_mut().mandala.add(form, text, wx, wy);
+                self.doc_mut().selected = Some(id);
             }
-            (None, Tool::Flow(_) | Tool::Child) => self.pending = None,
-            (None, Tool::Select) => self.selected = None,
+            (None, Tool::Flow(_) | Tool::Child) => self.doc_mut().pending = None,
+            (None, Tool::Select) => self.doc_mut().selected = None,
         }
     }
 
     fn paint(&self, painter: &egui::Painter, origin: Pos2) {
         let k = self.ink;
-        let v = self.view;
+        let v = self.doc().view;
         let zoom = v.zoom as f32;
         // World point to on-screen position.
         let at = |x: f64, y: f64| {
@@ -460,7 +551,8 @@ impl Editor {
         // the edges that feed it must not also be drawn — otherwise the canvas
         // shows `a -> [box] <- b` instead of `a -> b`.
         let is_flow = |id: NodeId| {
-            self.mandala
+            self.doc()
+                .mandala
                 .node(id)
                 .is_some_and(|n| n.shape() == Shape::Arrow)
         };
@@ -470,13 +562,13 @@ impl Editor {
         // its arrow points at.
         let head_of = |mut id: NodeId| {
             for _ in 0..16 {
-                let Some(n) = self.mandala.node(id) else {
+                let Some(n) = self.doc().mandala.node(id) else {
                     break;
                 };
                 if n.shape() != Shape::Arrow {
                     break;
                 }
-                let kids = self.mandala.children(id);
+                let kids = self.doc().mandala.children(id);
                 let [first, second] = kids[..] else { break };
                 id = if n.form == Form::Backflow {
                     first
@@ -488,12 +580,14 @@ impl Editor {
         };
 
         // Arrows first, so shapes paint over their endpoints.
-        for a in self.mandala.arrows() {
+        for a in self.doc().mandala.arrows() {
             if is_flow(a.to) {
                 continue;
             }
-            let (Some(f), Some(t)) = (self.mandala.node(head_of(a.from)), self.mandala.node(a.to))
-            else {
+            let (Some(f), Some(t)) = (
+                self.doc().mandala.node(head_of(a.from)),
+                self.doc().mandala.node(a.to),
+            ) else {
                 continue;
             };
             let (dx, dy) = (t.x - f.x, t.y - f.y);
@@ -516,21 +610,22 @@ impl Editor {
 
         // Flow nodes: one arrow between the two children, no box. `(<- a b)` is
         // `(-> b a)`, so backflow is the same line drawn the other way.
-        for n in self.mandala.nodes() {
+        for n in self.doc().mandala.nodes() {
             if n.shape() != Shape::Arrow {
                 continue;
             }
-            let kids = self.mandala.children(n.id);
+            let kids = self.doc().mandala.children(n.id);
             let [first, second] = kids[..] else { continue };
             let (from, to) = if n.form == Form::Backflow {
                 (second, first)
             } else {
                 (first, second)
             };
-            let (Some(f), Some(t)) = (self.mandala.node(from), self.mandala.node(to)) else {
+            let (Some(f), Some(t)) = (self.doc().mandala.node(from), self.doc().mandala.node(to))
+            else {
                 continue;
             };
-            let hot = self.selected == Some(n.id) || self.pending == Some(n.id);
+            let hot = self.doc().selected == Some(n.id) || self.doc().pending == Some(n.id);
             let (dx, dy) = (t.x - f.x, t.y - f.y);
             let len = (dx * dx + dy * dy).sqrt().max(1.0);
             let (ux, uy) = (dx / len, dy / len);
@@ -556,11 +651,11 @@ impl Editor {
             }
         }
 
-        for n in self.mandala.nodes() {
+        for n in self.doc().mandala.nodes() {
             if n.shape() == Shape::Arrow {
                 continue;
             }
-            let hot = self.selected == Some(n.id) || self.pending == Some(n.id);
+            let hot = self.doc().selected == Some(n.id) || self.doc().pending == Some(n.id);
             let outline = UiStroke::new(
                 if hot { 2.5 } else { 1.5 } * zoom,
                 if hot { k.ink } else { k.faint },
