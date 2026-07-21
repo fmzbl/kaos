@@ -1,0 +1,18 @@
+[package]
+name = "kaos-agent"
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "The Kaos agent runtime: providers, backends, the conductor, and the tool-using loop."
+
+[dependencies]
+kaos-core = { path = "../kaos-core" }
+kaos-pact = { path = "../kaos-pact" }
+rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+# HTTP providers (OpenAI + Anthropic). Off ⇒ only the local `claude` CLI and
+# `ollama`, which shell out and need no HTTP crate.
+ureq = { version = "2", features = ["json", "tls"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+api = ["dep:ureq", "dep:serde_json"]

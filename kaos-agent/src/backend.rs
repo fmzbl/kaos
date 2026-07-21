@@ -1,6 +1,6 @@
 //! Backends — where a charged sigil actually fires.
 //!
-//! The simulation core never needs this: [`crate::gnosis::charge`] samples the
+//! The simulation core never needs this: [`kaos_pact::gnosis::charge`] samples the
 //! outcome from Carroll's equation, offline and deterministically. But the live
 //! app can fire a charged intent at a *real* model. The only real backend wired
 //! here is the `claude` CLI, which is authenticated on the host — no API key, no
@@ -281,7 +281,7 @@ fn capture_claude_result(result: &mut String, raw: &str) {
 /// something). Returns no lines for pure plumbing events (init, tool results).
 #[cfg(feature = "api")]
 pub fn claude_event_lines(raw: &str) -> Vec<String> {
-    use crate::theme::*;
+    use kaos_core::theme::*;
     let raw = raw.trim();
     if raw.is_empty() {
         return Vec::new();
@@ -433,7 +433,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
 
 #[cfg(feature = "api")]
 fn push_block(out: &mut Vec<String>, text: &str, sign: char, colour: (u8, u8, u8)) {
-    use crate::theme::*;
+    use kaos_core::theme::*;
     const SHOWN: usize = 6;
     let lines: Vec<&str> = text.lines().collect();
     for l in lines.iter().take(SHOWN) {

@@ -5,7 +5,7 @@
 //! the right shape for coding, and the wrong shape for everything else. A
 //! familiar is the same loop with the world pulled out behind a trait: kaos owns
 //! *when* to call a tool (the `<act>` protocol, the banishment law, the twin
-//! ladders of [`charge`](crate::charge)); the host owns *what* the tools are and
+//! ladders of [`charge`](kaos_pact::charge)); the host owns *what* the tools are and
 //! *what they do*. A witch's familiar knows the house it serves — kaos does not
 //! need to.
 //!
@@ -99,7 +99,7 @@ pub fn converse(
                 }
             }
         };
-        if crate::config::enabled("KAOS_DEBUG") {
+        if kaos_core::config::enabled("KAOS_DEBUG") {
             eprintln!("\n=== FAMILIAR REPLY ===\n{reply}\n=== END ===");
         }
 
@@ -198,7 +198,7 @@ fn system_prompt(role: &str, catalogue: &str) -> String {
     )
 }
 
-/// Render the transcript through the twin ladders of [`charge`](crate::charge):
+/// Render the transcript through the twin ladders of [`charge`](kaos_pact::charge):
 /// the question is never cut, fresh observations burn bright, the middle decays,
 /// and each observation's polarity picks the surviving end. Shared law with the
 /// [`conductor`](crate::conductor).
@@ -206,9 +206,9 @@ fn render_transcript(question: &str, turns: &[(String, String)]) -> String {
     let n = 1 + turns.len();
     let mut out = format!("QUESTION: {question}\n\nBegin. Reply with one <act> block.");
     for (i, (acted, observation)) in turns.iter().enumerate() {
-        let limit = crate::charge::budget_kinded(i + 1, n, observation);
-        let negative = crate::charge::is_negative(observation);
-        let obs = crate::charge::cut(observation, limit, negative);
+        let limit = kaos_pact::charge::budget_kinded(i + 1, n, observation);
+        let negative = kaos_pact::charge::is_negative(observation);
+        let obs = kaos_pact::charge::cut(observation, limit, negative);
         out.push_str(&format!("\n\nAssistant: {acted}\n\nOBSERVATION:\n{obs}"));
     }
     out

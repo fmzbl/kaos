@@ -250,7 +250,7 @@ pub const MAX_ACTS_PER_TURN: usize = 5;
 /// Human-readable Rebis reference compiled into Kaos. Keeping the examples in
 /// `docs/` makes the chat's knowledge auditable and prevents its authoring rules
 /// from drifting away from the documentation users see.
-const REBIS_AUTHORING_CONTEXT: &str = include_str!("../docs/REBIS_CHAT_CONTEXT.md");
+const REBIS_AUTHORING_CONTEXT: &str = include_str!("../../docs/REBIS_CHAT_CONTEXT.md");
 
 /// Whether a task should carry the Rebis reference: true for `/chat`/`/code`
 /// (the TUI sets `KAOS_REBIS_CONTEXT` for its coding mind) and for any task that
@@ -258,7 +258,7 @@ const REBIS_AUTHORING_CONTEXT: &str = include_str!("../docs/REBIS_CHAT_CONTEXT.m
 /// `--append-system-prompt` on this too, so the chat mind and the `<act>` loop
 /// learn Rebis under the same rule.
 pub fn wants_rebis_authoring_context(task: &str) -> bool {
-    crate::config::enabled("KAOS_REBIS_CONTEXT") || task_requests_rebis_authoring_context(task)
+    kaos_core::config::enabled("KAOS_REBIS_CONTEXT") || task_requests_rebis_authoring_context(task)
 }
 
 fn task_requests_rebis_authoring_context(task: &str) -> bool {
@@ -436,10 +436,10 @@ fn render_transcript(task: &str, turns: &[(String, String)]) -> String {
     for (i, (acted, observation)) in turns.iter().enumerate() {
         // Charge is the max of POSITION (the twin ladders) and NATURE (edits
         // and verdicts carry intrinsic charge; reads rot fastest).
-        let limit = crate::charge::budget_kinded(i + 1, n, observation);
-        let negative = crate::charge::is_negative(observation);
+        let limit = kaos_pact::charge::budget_kinded(i + 1, n, observation);
+        let negative = kaos_pact::charge::is_negative(observation);
         // The act itself stays whole (it is small); the observation is cut.
-        let obs = crate::charge::cut(observation, limit, negative);
+        let obs = kaos_pact::charge::cut(observation, limit, negative);
         out.push_str(&format!("\n\nAssistant: {acted}\n\nOBSERVATION:\n{obs}"));
     }
     out
@@ -491,7 +491,7 @@ impl Conductor {
     /// so a caller can render a live trace.
     ///
     /// The transcript is re-rendered every turn through the Twin Ladders of
-    /// charge ([`crate::charge`]): the statement of intent is never compressed,
+    /// charge ([`kaos_pact::charge`]): the statement of intent is never compressed,
     /// fresh observations burn bright, the middle decays to a base budget, and
     /// each symbol's polarity decides which end of it survives the cut. An
     /// unparseable reply is BANISHED — it never enters the transcript; only a
@@ -550,7 +550,7 @@ impl Conductor {
                 }
             };
             on_model_reply(model_turn, &reply);
-            if crate::config::enabled("KAOS_DEBUG") {
+            if kaos_core::config::enabled("KAOS_DEBUG") {
                 eprintln!("\n=== RAW REPLY ===\n{reply}\n=== END ===");
             }
             let tools = parse_actions(&reply, MAX_ACTS_PER_TURN);
@@ -605,7 +605,7 @@ impl Conductor {
                 let observation = match &tool {
                     Tool::ReadFile { path } => {
                         let obs = self.execute(&tool);
-                        let h = crate::rng::hash_str(&obs);
+                        let h = kaos_pact::rng::hash_str(&obs);
                         let key = path.clone();
                         if last_reads.get(&key) == Some(&h) {
                             format!("(unchanged since your last read of {path} — re-reading is a wasted step; act on what you already know)")
@@ -632,7 +632,7 @@ impl Conductor {
                     observation.clone(),
                 ));
                 steps.push(step);
-                if crate::charge::is_negative(&observation) {
+                if kaos_pact::charge::is_negative(&observation) {
                     break; // the rest of the chain is skipped, not executed
                 }
             }
@@ -753,7 +753,7 @@ impl Conductor {
             let raw_text = serde_json::to_string_pretty(&raw).unwrap_or_else(|_| raw.to_string());
             on_model_reply(model_turn, &raw_text);
             let reply = parse_reply(&raw);
-            if crate::config::enabled("KAOS_DEBUG") {
+            if kaos_core::config::enabled("KAOS_DEBUG") {
                 eprintln!("\n=== NATIVE REPLY ===\n{raw}\n=== END ===");
             }
             if reply.calls.is_empty() {
@@ -810,7 +810,7 @@ impl Conductor {
                 let observation = match tool {
                     Tool::ReadFile { path } => {
                         let obs = self.execute(tool);
-                        let h = crate::rng::hash_str(&obs);
+                        let h = kaos_pact::rng::hash_str(&obs);
                         if last_reads.get(path.as_str()) == Some(&h) {
                             format!("(unchanged since your last read of {path} — act on what you already know)")
                         } else {
@@ -831,7 +831,7 @@ impl Conductor {
                 };
                 on_step(&step);
                 steps.push(step);
-                if crate::charge::is_negative(&observation) {
+                if kaos_pact::charge::is_negative(&observation) {
                     halted = true;
                 }
                 executed.push((id.clone(), tool.clone()));

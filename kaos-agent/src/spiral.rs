@@ -148,7 +148,7 @@ pub fn gnosis(session: &crate::conductor::Session) -> String {
             }
             _ => {}
         }
-        if crate::charge::is_negative(&s.observation) {
+        if kaos_pact::charge::is_negative(&s.observation) {
             last_negative = Some(&s.observation);
         }
     }
@@ -172,11 +172,11 @@ pub fn gnosis(session: &crate::conductor::Session) -> String {
     match (last_negative, &session.error) {
         (_, Some(e)) => out.push_str(&format!(
             "It ended in error: {}\n",
-            crate::charge::cut(e, 700, true)
+            kaos_pact::charge::cut(e, 700, true)
         )),
         (Some(neg), None) => out.push_str(&format!(
             "The last failure seen:\n{}\n",
-            crate::charge::cut(neg, 700, true)
+            kaos_pact::charge::cut(neg, 700, true)
         )),
         (None, None) => out.push_str("It ended without changing any file.\n"),
     }

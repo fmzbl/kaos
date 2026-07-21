@@ -37,28 +37,21 @@
 // keep meaning what they always did.
 pub use kaos_core::{config, runs, sessions, sigils, tabs, theme, visual};
 // The Pact — offline and deterministic, in its own crate.
+// The agent runtime — everything that fires a prompt or spawns a child.
+#[cfg(feature = "api")]
+pub use kaos_agent::hand;
+pub use kaos_agent::{
+    agent, auth, backend, conductor, familiar, myth, pause, provider, scry, solve, spiral,
+};
 pub use kaos_pact::{
     adept, charge, dream, egregore, equation, gnosis, grade, order, ray, rite, rng, sigil,
 };
 
-pub mod agent;
-pub mod auth;
-pub mod backend;
-pub mod conductor;
-pub mod familiar;
 pub mod fold;
-#[cfg(feature = "api")]
-pub mod hand;
 pub mod input;
-pub mod myth;
-pub mod pause;
-pub mod provider;
 pub mod rebis_checkpoint;
 pub mod rebis_supervisor;
 pub mod rebis_workspace;
-pub mod scry;
-pub mod solve;
-pub mod spiral;
 #[cfg(feature = "tui")]
 pub mod tui;
 /// The visual editor, in its own crate.

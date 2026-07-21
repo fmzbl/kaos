@@ -30,7 +30,7 @@
 //!   adjournment after 3 — the same answer for 60% of the charge.
 //!
 //! - [`scry_then_convene`] — the two-tier allocation Carroll's mid-band law asks
-//!   for (see [`crate::equation::probability_shift`]): probe with a small number
+//!   for (see [`kaos_pact::equation::probability_shift`]): probe with a small number
 //!   of charges; if they **agree**, the task is likely at the ceiling where the
 //!   conclave has nothing to rescue — ship the answer; if they **disagree**, the
 //!   task has revealed itself mid-band, exactly where best-of-k pays — convene the

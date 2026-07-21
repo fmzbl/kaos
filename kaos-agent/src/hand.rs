@@ -145,9 +145,9 @@ pub fn render_messages(system: &str, history: &[Msg]) -> serde_json::Value {
     for (i, m) in history.iter().enumerate() {
         // Position (the twin ladders) OR nature (edits/verdicts), whichever
         // burns brighter — the tunnel's second law.
-        let limit = crate::charge::budget_kinded(i, n, &m.content);
-        let negative = crate::charge::is_negative(&m.content);
-        let content = crate::charge::cut(&m.content, limit, negative);
+        let limit = kaos_pact::charge::budget_kinded(i, n, &m.content);
+        let negative = kaos_pact::charge::is_negative(&m.content);
+        let content = kaos_pact::charge::cut(&m.content, limit, negative);
         match m.role {
             Role::User => out.push(serde_json::json!({ "role": "user", "content": content })),
             Role::Assistant => {

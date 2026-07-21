@@ -14,7 +14,7 @@ license = "GPL-3.0-or-later"
 # members are the app (here) and `kaos-core`, which holds everything that does
 # not need a terminal or a window — see that crate's docs for the split.
 [workspace]
-members = ["kaos-core", "kaos-pact", "kaos-visual"]
+members = ["kaos-agent", "kaos-core", "kaos-pact", "kaos-visual"]
 
 [dependencies]
 # The fullscreen TUI. ratatui draws it, crossterm is the terminal backend, and
@@ -36,6 +36,8 @@ rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
 kaos-core = { path = "kaos-core" }
 # The offline, deterministic simulation core.
 kaos-pact = { path = "kaos-pact" }
+# The agent runtime: providers, backends, the conductor.
+kaos-agent = { path = "kaos-agent" }
 # HTTP providers (OpenAI + Anthropic APIs). ureq is blocking with pure-rust TLS in
 # one crate; serde_json builds/parses the request+response bodies. Behind `api`.
 ureq = { version = "2", features = ["json", "tls"], optional = true }
@@ -64,7 +66,7 @@ tui = [
 ]
 # `api`: OpenAI + Anthropic HTTP providers (API keys). Off ⇒ only the local `claude`
 # CLI and `ollama` are available (both shell out, no HTTP crate).
-api = ["dep:ureq", "dep:serde_json"]
+api = ["dep:ureq", "dep:serde_json", "kaos-agent/api"]
 # `visual`: the `kaos visual` mandala editor (egui, native OpenGL). Non-default
 # only to keep the ordinary build small — the `visual` module's model and Rebis
 # codegen build and test without it.

@@ -18,7 +18,7 @@ pub const PAUSED_MARKER: &str = "\u{1e}KAOS_PAUSED\u{1f}";
 
 #[must_use]
 pub fn enabled() -> bool {
-    crate::config::enabled(ENABLE_ENV)
+    kaos_core::config::enabled(ENABLE_ENV)
 }
 
 /// Errors that describe an exhausted allowance or a transient provider state,
@@ -80,7 +80,7 @@ pub fn current_run(reason: &str) -> bool {
     #[cfg(unix)]
     {
         let pid = std::process::id();
-        let target = if crate::config::enabled(PROCESS_GROUP_ENV) {
+        let target = if kaos_core::config::enabled(PROCESS_GROUP_ENV) {
             format!("-{pid}")
         } else {
             pid.to_string()

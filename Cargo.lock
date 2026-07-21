@@ -1366,10 +1366,22 @@ dependencies = [
  "arboard",
  "base64",
  "crossterm",
+ "kaos-agent",
  "kaos-core",
  "kaos-pact",
  "kaos-visual",
  "ratatui",
+ "rebis-lang",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "kaos-agent"
+version = "0.0.1"
+dependencies = [
+ "kaos-core",
+ "kaos-pact",
  "rebis-lang",
  "serde_json",
  "ureq",

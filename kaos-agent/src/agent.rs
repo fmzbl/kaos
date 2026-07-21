@@ -27,7 +27,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::rng::Rng;
+use kaos_pact::rng::Rng;
 
 // ───────────────────────────── patches ─────────────────────────────
 

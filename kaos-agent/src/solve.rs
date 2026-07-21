@@ -370,7 +370,7 @@ pub fn render_verdict(verdict: &str) -> String {
 
 /// Live progress for the agentic myth. Suppressed by `KAOS_QUIET`.
 fn quiet() -> bool {
-    crate::config::enabled("KAOS_QUIET")
+    kaos_core::config::enabled("KAOS_QUIET")
 }
 
 /// One self-contained, dim status line, flushed. Thread-safe: `println!` locks
