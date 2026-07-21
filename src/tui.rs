@@ -56,7 +56,7 @@ static PALETTE: std::sync::LazyLock<crate::theme::Palette> =
     std::sync::LazyLock::new(crate::theme::current);
 #[allow(non_snake_case)]
 fn C_RED() -> Color {
-    tone(PALETTE.ink)
+    tone(PALETTE.accent)
 }
 #[allow(non_snake_case)]
 fn C_OX() -> Color {
@@ -74,7 +74,7 @@ fn C_BONE() -> Color {
 // which is why the palette carries a `mid` tone between ink and faint.
 #[allow(non_snake_case)]
 fn C_GOLD() -> Color {
-    tone(PALETTE.ink)
+    tone(PALETTE.accent)
 }
 #[allow(non_snake_case)]
 fn C_TEAL() -> Color {

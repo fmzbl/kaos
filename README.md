@@ -426,6 +426,14 @@ way. It parses first, so an undrawable buffer reports on the status line
 instead of opening an empty window, and the editor runs in its own window while
 the terminal app keeps going.
 
+The right panel edits the source live: type there and the drawing redraws as
+soon as what you have typed parses; change the drawing and the source
+regenerates. Neither overwrites the other mid-keystroke, and source that does
+not yet parse is left alone rather than discarded.
+
+While a run is in flight each node wears a rotating dashed purple ring, driven
+by the run's own thread rather than a timer standing in for one.
+
 A run panel sits under every tab: type evidence into the record, then run the
 drawing or the source. This is the deterministic concept calculus — no model,
 no provider, no child process — so it works with nothing else installed. A
@@ -486,8 +494,11 @@ window is native egui on OpenGL, so it needs no system webkit — see
 
 ## Theme
 
-Kaos is monochrome in two modes. The shapes, sigils and rules carry the
-meaning, so colour only separates figure from ground.
+Kaos is a neutral grey scale plus a single purple accent, in two modes. The
+shapes, sigils and rules carry the meaning through brightness; the accent is
+spent only on what the eye should find first — headings, the selection, the
+active tool, a running node — so it never competes with itself. Both the
+terminal app and `kaos visual` read the same palette.
 
 ```text
 /theme dark     light on dark

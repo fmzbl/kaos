@@ -27,6 +27,16 @@ struct Doc {
     view: View,
     pending: Option<NodeId>,
     selected: Option<NodeId>,
+    /// Nodes currently being evaluated. Driven by a real run on a background
+    /// thread, so the ring means work is actually in flight rather than
+    /// standing in for it.
+    running: std::collections::HashSet<NodeId>,
+    /// The editable source, kept in step with the drawing in both directions.
+    text: String,
+    /// What the drawing last generated. Comparing against it is how we tell an
+    /// edit made on the canvas from one typed into the panel, without either
+    /// overwriting the other mid-keystroke.
+    generated: String,
 }
 
 /// A conversation, with the same durable sessions the terminal app writes.
@@ -86,6 +96,7 @@ fn rgb((r, g, b): (u8, u8, u8)) -> Color32 {
 /// The five tones of the current mode, resolved once per window.
 #[derive(Clone, Copy)]
 struct Ink {
+    accent: Color32,
     ground: Color32,
     chrome: Color32,
     fill: Color32,
@@ -97,6 +108,7 @@ impl Ink {
     fn load() -> Self {
         let p = kaos_core::theme::current();
         Self {
+            accent: rgb(p.accent),
             ground: rgb(p.ground),
             chrome: rgb(p.chrome),
             fill: rgb(p.fill),
@@ -185,10 +197,10 @@ fn install_theme(ctx: &egui::Context, k: Ink) {
     visuals.widgets.noninteractive.bg_stroke = UiStroke::new(1.0, k.faint);
     visuals.widgets.inactive.bg_fill = k.fill;
     visuals.widgets.inactive.bg_stroke = UiStroke::new(1.0, k.faint);
-    visuals.widgets.hovered.bg_stroke = UiStroke::new(1.0, k.ink);
-    visuals.widgets.active.bg_fill = k.faint;
-    visuals.selection.bg_fill = k.ink.gamma_multiply(0.25);
-    visuals.selection.stroke = UiStroke::new(1.0, k.ink);
+    visuals.widgets.hovered.bg_stroke = UiStroke::new(1.0, k.accent);
+    visuals.widgets.active.bg_fill = k.accent;
+    visuals.selection.bg_fill = k.accent.gamma_multiply(0.35);
+    visuals.selection.stroke = UiStroke::new(1.0, k.accent);
     // egui's defaults still carry colour in a few corners — selection blue,
     // hyperlink blue, amber warnings, red errors. Nothing here is allowed to
     // be anything but grey.
@@ -229,6 +241,8 @@ struct Editor {
     /// not a property of one drawing.
     record: String,
     outcome: Option<String>,
+    /// The in-flight run's answer, once its thread finishes.
+    pending_run: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
 }
 
 impl Editor {
@@ -251,6 +265,7 @@ impl Editor {
             notice: None,
             record: String::new(),
             outcome: None,
+            pending_run: None,
         }
     }
 
@@ -261,10 +276,51 @@ impl Editor {
     /// standing alone.
     fn run_source(&mut self, source: &str) {
         let record = kaos_core::runs::record_from_text(&self.record);
-        self.outcome = Some(match kaos_core::runs::evaluate(source, &record) {
-            Ok(out) => out.to_string(),
-            Err(e) => e,
+        let source = source.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Off the UI thread, so the ring is driven by work genuinely in
+        // flight. The deterministic run is quick; a model-backed one will not
+        // be, and this is the seam it will arrive through.
+        let linger = std::env::var("KAOS_VISUAL_RUN_LINGER_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok());
+        std::thread::spawn(move || {
+            // A hook for watching the ring turn; unset in normal use.
+            if let Some(ms) = linger {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+            let answer = kaos_core::runs::evaluate(&source, &record)
+                .map(|o| o.to_string())
+                .map_err(|e| e);
+            let _ = tx.send(answer);
         });
+        self.pending_run = Some(rx);
+        self.outcome = Some("running…".to_string());
+        let ids: std::collections::HashSet<NodeId> =
+            self.doc().mandala.nodes().iter().map(|n| n.id).collect();
+        self.doc_mut().running = ids;
+    }
+
+    /// Collect a finished run and stop the rings.
+    fn poll_run(&mut self) {
+        let done = match &self.pending_run {
+            Some(rx) => match rx.try_recv() {
+                Ok(answer) => Some(answer),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("the run ended without an answer".to_string()))
+                }
+            },
+            None => return,
+        };
+        self.pending_run = None;
+        self.doc_mut().running.clear();
+        if let Some(answer) = done {
+            self.outcome = Some(match answer {
+                Ok(text) => text,
+                Err(e) => e,
+            });
+        }
     }
 
     /// The open drawing, or a stand-in while a conversation is on screen — so
@@ -292,6 +348,10 @@ impl Editor {
 impl eframe::App for Editor {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_keys(ctx);
+        self.poll_run();
+        if self.on_mandala() {
+            self.sync();
+        }
         self.header(ctx);
         self.tab_bar(ctx);
         if self.on_mandala() {
@@ -316,7 +376,7 @@ impl Editor {
     fn header(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.colored_label(self.ink.ink, "KAOS VISUAL");
+                ui.colored_label(self.ink.accent, "KAOS VISUAL");
                 ui.separator();
                 ui.colored_label(
                     self.ink.faint,
@@ -689,6 +749,36 @@ impl Editor {
             });
     }
 
+    /// Keep the drawing and its source in step.
+    ///
+    /// Whichever side changed wins: a canvas edit regenerates the text, and
+    /// text that parses replaces the drawing. Text that does not parse is left
+    /// alone — you are mid-sentence, and throwing the buffer away would be the
+    /// wrong response to an incomplete one.
+    fn sync(&mut self) {
+        let fresh = self.doc().mandala.to_rebis().ok();
+        let doc = self.doc_mut();
+        match fresh {
+            Some(src) if src != doc.generated => {
+                doc.generated = src.clone();
+                doc.text = src;
+            }
+            _ => {}
+        }
+    }
+
+    /// Adopt source typed into the panel, if it parses.
+    fn adopt_text(&mut self) {
+        let text = self.doc().text.clone();
+        if let Ok(mandala) = Mandala::from_rebis(&text) {
+            let doc = self.doc_mut();
+            doc.mandala = mandala;
+            doc.generated = doc.mandala.to_rebis().unwrap_or_default();
+            doc.selected = None;
+            doc.pending = None;
+        }
+    }
+
     fn side(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("side")
             .exact_width(330.0)
@@ -723,22 +813,40 @@ impl Editor {
                         ui.separator();
                     }
                 }
-                ui.colored_label(self.ink.faint, "REBIS");
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    match self.doc_mut().mandala.to_rebis() {
-                        Ok(src) => {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(src).monospace().color(self.ink.ink),
-                                )
-                                .wrap(),
-                            );
-                        }
-                        Err(e) => {
-                            ui.colored_label(self.ink.faint, e.to_string());
-                        }
-                    }
+                let k = self.ink;
+                // The drawing's own diagnostic: what it cannot yet express.
+                let drawing_error = self.doc().mandala.to_rebis().err().map(|e| e.to_string());
+                ui.horizontal(|ui| {
+                    ui.colored_label(k.faint, "REBIS");
+                    let typed = self.doc().text.clone();
+                    let status = if typed.trim().is_empty() {
+                        String::new()
+                    } else if let Some(e) = &drawing_error {
+                        e.clone()
+                    } else if rebis_lang::parse(&typed).is_err() {
+                        "unparsed — the drawing is unchanged".to_string()
+                    } else {
+                        "live".to_string()
+                    };
+                    ui.colored_label(k.faint, status);
                 });
+                let mut edited = false;
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let doc = self.doc_mut();
+                    edited = ui
+                        .add(
+                            egui::TextEdit::multiline(&mut doc.text)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(24),
+                        )
+                        .changed();
+                });
+                // Typing redraws the canvas as soon as what you have typed is a
+                // program.
+                if edited {
+                    self.adopt_text();
+                }
             });
     }
 
@@ -915,7 +1023,12 @@ impl Editor {
             }
         }
 
-        self.paint(&painter, origin);
+        // A turning ring needs a clock and a reason to redraw. egui only
+        // repaints on input, so ask for frames while something is running.
+        if !self.doc().running.is_empty() {
+            ui.ctx().request_repaint();
+        }
+        self.paint(&painter, origin, ui.input(|i| i.time) as f32);
     }
 
     fn click(&mut self, wx: f64, wy: f64) {
@@ -949,7 +1062,36 @@ impl Editor {
         }
     }
 
-    fn paint(&self, painter: &egui::Painter, origin: Pos2) {
+    /// A rotating dashed ring around a node that is being evaluated.
+    ///
+    /// Dashes are drawn as short arcs stepped around the circle and offset by
+    /// the clock, so the ring turns. It reads as motion without animating the
+    /// node itself, which must stay legible while it runs.
+    fn running_ring(&self, painter: &egui::Painter, centre: Pos2, zoom: f32, spin: f32) {
+        const DASHES: usize = 12;
+        const SEGMENTS: usize = 4;
+        let r = (NODE_R as f32 + 9.0) * zoom;
+        let stroke = UiStroke::new(2.2 * zoom, self.ink.accent);
+        let arc = std::f32::consts::TAU / DASHES as f32;
+        for dash in 0..DASHES {
+            if dash % 2 == 1 {
+                continue; // the gaps
+            }
+            let start = spin + dash as f32 * arc;
+            let mut previous = None;
+            for step in 0..=SEGMENTS {
+                let a = start + arc * step as f32 / SEGMENTS as f32;
+                let p = Pos2::new(centre.x + r * a.cos(), centre.y + r * a.sin());
+                if let Some(q) = previous {
+                    painter.line_segment([q, p], stroke);
+                }
+                previous = Some(p);
+            }
+        }
+    }
+
+    fn paint(&self, painter: &egui::Painter, origin: Pos2, time: f32) {
+        let spin = time * 1.6;
         let k = self.ink;
         let v = self.doc().view;
         let zoom = v.zoom as f32;
@@ -1043,7 +1185,10 @@ impl Editor {
             let (ux, uy) = (dx / len, dy / len);
             let p0 = at(f.x + ux * NODE_R, f.y + uy * NODE_R);
             let p1 = at(t.x - ux * (NODE_R + 4.0), t.y - uy * (NODE_R + 4.0));
-            let stroke = UiStroke::new(if hot { 2.6 } else { 1.8 } * zoom, k.ink);
+            let stroke = UiStroke::new(
+                if hot { 2.6 } else { 1.8 } * zoom,
+                if hot { k.accent } else { k.ink },
+            );
             painter.line_segment([p0, p1], stroke);
             let head = 11.0 * zoom;
             let (ax, ay) = (ux as f32, uy as f32);
@@ -1058,7 +1203,7 @@ impl Editor {
                 painter.circle_stroke(
                     at(n.x, n.y),
                     kaos_core::visual::ARROW_HANDLE as f32 * zoom,
-                    UiStroke::new(1.5 * zoom, k.ink),
+                    UiStroke::new(1.5 * zoom, k.accent),
                 );
             }
         }
@@ -1070,7 +1215,7 @@ impl Editor {
             let hot = self.doc().selected == Some(n.id) || self.doc().pending == Some(n.id);
             let outline = UiStroke::new(
                 if hot { 2.5 } else { 1.5 } * zoom,
-                if hot { k.ink } else { k.faint },
+                if hot { k.accent } else { k.faint },
             );
             let centre = at(n.x, n.y);
             let shape = n.shape();
@@ -1104,9 +1249,9 @@ impl Editor {
                         centre,
                         NODE_R as f32 * zoom,
                         k.fill,
-                        UiStroke::new(1.0 * zoom, if hot { k.ink } else { k.chrome }),
+                        UiStroke::new(1.0 * zoom, if hot { k.accent } else { k.chrome }),
                     );
-                    let pen = UiStroke::new(5.0 * zoom, if hot { k.ink } else { k.ink });
+                    let pen = UiStroke::new(5.0 * zoom, if hot { k.accent } else { k.ink });
                     for stroke in shape.strokes() {
                         match stroke {
                             Stroke::Poly(points) => {
@@ -1135,6 +1280,10 @@ impl Editor {
                         }
                     }
                 }
+            }
+
+            if self.doc().running.contains(&n.id) {
+                self.running_ring(painter, centre, zoom, spin);
             }
 
             let caption = n.caption();

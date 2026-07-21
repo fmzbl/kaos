@@ -1,7 +1,9 @@
 //! The palette, shared by the terminal app and `kaos visual`.
 //!
-//! Monochrome in two modes, with no colour anywhere in either interface: the
-//! shapes, sigils, rules and brightness carry the meaning. `/theme dark`
+//! Two modes, each a neutral grey scale plus a single purple accent. The
+//! shapes, sigils and rules carry the meaning through brightness; the accent is
+//! spent only on what the eye should find first, so it never competes with
+//! itself. Both the terminal app and `kaos visual` read this one palette. `/theme dark`
 //! and `/theme light` persist the choice in the Kaos config, and both
 //! interfaces read it back through [`mode`]. Pure std — these are just escape
 //! codes.
@@ -11,10 +13,10 @@
 // `/theme` like everything else. Kept as functions, not constants, because the
 // mode is read from the config at run time.
 
-/// Headings, prompts, the sigil of chaos.
+/// Headings, prompts, the sigil of chaos — the accent.
 #[allow(non_snake_case)]
 pub fn RED() -> (u8, u8, u8) {
-    current().ink
+    current().accent
 }
 /// Rules and frames.
 #[allow(non_snake_case)]
@@ -88,6 +90,10 @@ pub struct Palette {
     pub mid: (u8, u8, u8),
     /// Secondary text and rules.
     pub faint: (u8, u8, u8),
+    /// The one colour: purple, for what the eye should go to first —
+    /// headings, the selection, the active tool, a live arrow. Everything
+    /// else stays neutral so the accent keeps its force.
+    pub accent: (u8, u8, u8),
 }
 
 /// The palette for a mode. Light is not a tint of dark — it is the inverse, so
@@ -101,6 +107,8 @@ pub const fn palette(mode: Mode) -> Palette {
             ink: (238, 238, 238),
             mid: (190, 190, 190),
             faint: (140, 140, 140),
+            // Bright enough to carry on a near-black ground.
+            accent: (176, 132, 232),
         },
         Mode::Light => Palette {
             ground: (250, 250, 250),
@@ -109,6 +117,8 @@ pub const fn palette(mode: Mode) -> Palette {
             ink: (16, 16, 16),
             mid: (70, 70, 70),
             faint: (120, 120, 120),
+            // Deepened so it still reads against white.
+            accent: (104, 58, 168),
         },
     }
 }
@@ -149,7 +159,7 @@ pub fn dim(rgb: (u8, u8, u8), s: &str) -> String {
 }
 
 pub fn red(s: &str) -> String {
-    bold(current().ink, s)
+    bold(current().accent, s)
 }
 pub fn ash(s: &str) -> String {
     fg(current().faint, s)
@@ -188,7 +198,7 @@ pub fn chaos_star_lines() -> [&'static str; 11] {
 pub fn chaos_star_red() -> String {
     chaos_star_lines()
         .iter()
-        .map(|l| bold(current().ink, l))
+        .map(|l| bold(current().accent, l))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -200,7 +210,7 @@ pub fn rule(n: usize) -> String {
 
 /// The prompt: a red sigil and chevron.
 pub fn prompt() -> String {
-    format!("{} {} ", chaosphere(), bold(current().ink, "\u{276f}")) // ✴ ❯
+    format!("{} {} ", chaosphere(), bold(current().accent, "\u{276f}")) // ✴ ❯
 }
 
 #[cfg(test)]
@@ -226,8 +236,9 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_is_monochrome() {
-        // Every tone is a true grey: colour carries no meaning here.
+    fn the_neutral_tones_are_true_greys() {
+        // The scale carries meaning through brightness alone; only `accent`
+        // is allowed to have a hue.
         for m in [Mode::Dark, Mode::Light] {
             let p = palette(m);
             for (name, (r, g, b)) in [
@@ -253,6 +264,30 @@ mod tests {
         // Ink and ground swap ends of the scale.
         assert!(d.ink.0 > d.ground.0, "dark should be light-on-dark");
         assert!(l.ink.0 < l.ground.0, "light should be dark-on-light");
+    }
+
+    #[test]
+    fn the_accent_is_the_only_colour_and_it_is_purple() {
+        for m in [Mode::Dark, Mode::Light] {
+            let (r, g, b) = palette(m).accent;
+            assert!(!(r == g && g == b), "{m:?} accent is grey, not an accent");
+            // Purple: blue strongest, red above green, green lowest.
+            assert!(b > r && r > g, "{m:?} accent {r},{g},{b} is not purple");
+        }
+    }
+
+    #[test]
+    fn the_accent_reads_against_its_ground() {
+        for m in [Mode::Dark, Mode::Light] {
+            let p = palette(m);
+            let lum = |(r, g, b): (u8, u8, u8)| {
+                0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)
+            };
+            assert!(
+                (lum(p.accent) - lum(p.ground)).abs() > 40.0,
+                "{m:?} accent does not separate from the ground"
+            );
+        }
     }
 
     #[test]
