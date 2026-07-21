@@ -34,6 +34,17 @@ rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
 # one crate; serde_json builds/parses the request+response bodies. Behind `api`.
 ureq = { version = "2", features = ["json", "tls"], optional = true }
 serde_json = { version = "1", optional = true }
+# The `kaos visual` mandala editor. egui draws the whiteboard natively on
+# OpenGL — no webview, and so no system webkit. The editor is a thin shell over
+# `visual::Mandala`, which stays std-only and testable without any of this.
+# Behind the non-default `visual` feature so the ordinary build keeps its
+# current dependency set.
+eframe = { version = "0.29", optional = true, default-features = false, features = [
+    "glow",
+    # Without this egui embeds no font and every label renders blank — the
+    # shapes draw fine, so the omission is invisible until you look at it.
+    "default_fonts",
+] }
 
 [features]
 default = ["tui", "api"]
@@ -44,10 +55,26 @@ tui = [
     "dep:ansi-to-tui",
     "dep:base64",
     "dep:arboard",
+    # The input-history file stores one JSON string per line, so an entry
+    # containing a newline survives a round trip.
+    "dep:serde_json",
 ]
 # `api`: OpenAI + Anthropic HTTP providers (API keys). Off ⇒ only the local `claude`
 # CLI and `ollama` are available (both shell out, no HTTP crate).
 api = ["dep:ureq", "dep:serde_json"]
+# `visual`: the `kaos visual` mandala editor (egui, native OpenGL). Non-default
+# only to keep the ordinary build small — the `visual` module's model and Rebis
+# codegen build and test without it.
+visual = ["dep:eframe"]
+
+# The Linux/BSD windowing backends. Kept out of the portable dependency above so
+# macOS (which uses AppKit through winit) never requests them; Cargo unions the
+# feature sets on the platforms that do.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+eframe = { version = "0.29", optional = true, default-features = false, features = [
+    "wayland",
+    "x11",
+] }
 
 [[bin]]
 name = "kaos"

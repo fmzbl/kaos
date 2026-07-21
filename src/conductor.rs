@@ -195,12 +195,18 @@ pub struct ProviderChat {
 }
 impl Chat for ProviderChat {
     fn respond(&self, system: &str, transcript: &str) -> Result<String, String> {
-        self.spec.complete_sampled(
-            system,
-            transcript,
-            Duration::from_secs(self.timeout_s),
-            self.sampling,
-        )
+        loop {
+            match self.spec.complete_sampled(
+                system,
+                transcript,
+                Duration::from_secs(self.timeout_s),
+                self.sampling,
+            ) {
+                Ok(response) => return Ok(response),
+                Err(error) if crate::pause::retry_model_error(&error) => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
     fn label(&self) -> String {
         self.spec.label()
@@ -516,7 +522,19 @@ impl Conductor {
             std::collections::HashMap::new();
         let mut model_turn = 0usize;
 
-        while steps.len() < self.max_steps {
+        let mut step_limit = self.max_steps;
+        loop {
+            if steps.len() >= step_limit {
+                let reason = format!(
+                    "agent step limit ({}) reached without a failure",
+                    self.max_steps
+                );
+                if self.max_steps > 0 && crate::pause::current_run(&reason) {
+                    step_limit = step_limit.saturating_add(self.max_steps);
+                    continue;
+                }
+                break;
+            }
             let transcript = render_transcript(task, &turns);
             model_turn += 1;
             on_model_call(model_turn);
@@ -620,6 +638,19 @@ impl Conductor {
             }
 
             if let Some(message) = finished {
+                if message.trim().is_empty()
+                    && crate::pause::current_run("agent finished without returning a value")
+                {
+                    if steps.len() >= step_limit {
+                        step_limit = step_limit.saturating_add(self.max_steps);
+                    }
+                    turns.push((
+                        act_block_of(&reply),
+                        "finish returned no value; continue and finish with a flow value"
+                            .to_string(),
+                    ));
+                    continue;
+                }
                 return Session {
                     steps,
                     finished: true,
@@ -689,19 +720,34 @@ impl Conductor {
             std::collections::HashMap::new();
         let mut model_turn = 0usize;
 
-        while steps.len() < self.max_steps {
+        let mut step_limit = self.max_steps;
+        loop {
+            if steps.len() >= step_limit {
+                let reason = format!(
+                    "agent step limit ({}) reached without a failure",
+                    self.max_steps
+                );
+                if self.max_steps > 0 && crate::pause::current_run(&reason) {
+                    step_limit = step_limit.saturating_add(self.max_steps);
+                    continue;
+                }
+                break;
+            }
             let messages = render_messages(&system, &history);
             model_turn += 1;
             on_model_call(model_turn);
-            let raw = match spec.complete_native(&messages, &tools, timeout, sampling) {
-                Ok(m) => m,
-                Err(e) => {
-                    return Session {
-                        steps,
-                        finished: false,
-                        final_message: String::new(),
-                        error: Some(e),
-                    };
+            let raw = loop {
+                match spec.complete_native(&messages, &tools, timeout, sampling) {
+                    Ok(message) => break message,
+                    Err(error) if crate::pause::retry_model_error(&error) => continue,
+                    Err(error) => {
+                        return Session {
+                            steps,
+                            finished: false,
+                            final_message: String::new(),
+                            error: Some(error),
+                        };
+                    }
                 }
             };
             let raw_text = serde_json::to_string_pretty(&raw).unwrap_or_else(|_| raw.to_string());
@@ -794,6 +840,17 @@ impl Conductor {
             history.push(Msg::assistant(thought, executed));
             history.extend(observations);
             if let Some(message) = finished {
+                if message.trim().is_empty()
+                    && crate::pause::current_run("agent finished without returning a value")
+                {
+                    if steps.len() >= step_limit {
+                        step_limit = step_limit.saturating_add(self.max_steps);
+                    }
+                    history.push(Msg::user(
+                        "Continue and finish with the value this node should return.".to_string(),
+                    ));
+                    continue;
+                }
                 return Session {
                     steps,
                     finished: true,

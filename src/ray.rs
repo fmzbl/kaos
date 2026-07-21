@@ -93,20 +93,29 @@ impl Ray {
         }
     }
 
-    /// A 24-bit ANSI colour for the red-forward TUI. Red is foregrounded; the rest
-    /// are muted so the principal ray dominates the palette.
+    /// A 24-bit ANSI tone for the TUI.
+    ///
+    /// The interface is monochrome, so the rays separate by brightness rather
+    /// than by hue: each takes a step on a ramp between the current theme's
+    /// faint and ink. The ray *names* still carry the colour symbolism — this
+    /// is only how they are drawn.
     pub fn rgb(&self) -> (u8, u8, u8) {
         use Ray::*;
-        match self {
-            Octarine => (190, 70, 90), // a magic-pink leaning red
-            Black => (110, 70, 78),
-            Blue => (120, 96, 120),
-            Red => (220, 40, 48), // the principal colour
-            Yellow => (170, 120, 80),
-            Green => (110, 120, 96),
-            Orange => (190, 96, 70),
-            Purple => (150, 80, 110),
-        }
+        // Rung on the ramp, brightest for the principal ray.
+        let step: u8 = match self {
+            Red => 7,
+            Octarine => 6,
+            Orange => 5,
+            Yellow => 4,
+            Green => 3,
+            Blue => 2,
+            Purple => 1,
+            Black => 0,
+        };
+        let p = crate::theme::current();
+        let (lo, hi) = (i16::from(p.faint.0), i16::from(p.ink.0));
+        let v = (lo + (hi - lo) * i16::from(step) / 7).clamp(0, 255) as u8;
+        (v, v, v)
     }
 
     /// Keywords that pull a task toward this ray. Crude but deterministic — a real

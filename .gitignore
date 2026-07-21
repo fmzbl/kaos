@@ -4,3 +4,6 @@ realbench_*.jsonl
 .env.*
 .claude/
 *.pdf
+__pycache__/
+*.py[cod]
+.venv-sisyphus/

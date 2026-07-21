@@ -342,20 +342,24 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                     "   {} {}  {}",
                                     bold((220, 170, 60), "\u{271a} write"),
                                     bone(short(path)),
-                                    dim(ASH, &format!("({} lines)", contents.lines().count())),
+                                    dim(ASH(), &format!("({} lines)", contents.lines().count())),
                                 ));
                                 push_block(&mut out, contents, '+', (90, 200, 110));
                             }
                             "Bash" => {
                                 let cmd = input["command"].as_str().unwrap_or("?");
-                                out.push(format!("   {} {}", bold(RED, "$"), bone(&clip(cmd, 88))));
+                                out.push(format!(
+                                    "   {} {}",
+                                    bold(RED(), "$"),
+                                    bone(&clip(cmd, 88))
+                                ));
                             }
                             "Read" => {
                                 let path = input["file_path"].as_str().unwrap_or("?");
                                 out.push(format!(
                                     "   {} {}",
                                     fg((150, 130, 200), "\u{25cb} read"),
-                                    dim(ASH, short(path))
+                                    dim(ASH(), short(path))
                                 ));
                             }
                             "Grep" | "Glob" => {
@@ -363,20 +367,20 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                 out.push(format!(
                                     "   {} {}",
                                     fg((150, 130, 200), "\u{2315} search"),
-                                    dim(ASH, &clip(pat, 80))
+                                    dim(ASH(), &clip(pat, 80))
                                 ));
                             }
                             "TodoWrite" => {
                                 out.push(format!(
                                     "   {}",
-                                    dim(ASH, "\u{2611} plans its next steps")
+                                    dim(ASH(), "\u{2611} plans its next steps")
                                 ));
                             }
                             other => {
                                 out.push(format!(
                                     "   {} {}",
                                     fg((150, 130, 200), "\u{2699}"),
-                                    dim(ASH, other)
+                                    dim(ASH(), other)
                                 ));
                             }
                         }
@@ -442,7 +446,7 @@ fn push_block(out: &mut Vec<String>, text: &str, sign: char, colour: (u8, u8, u8
         out.push(format!(
             "     {}",
             dim(
-                ASH,
+                ASH(),
                 &format!("{sign} \u{2026} {} more lines", lines.len() - SHOWN)
             )
         ));
@@ -686,7 +690,9 @@ pub fn ollama_http(
 
 /// Run a raw prompt through a local `ollama` model with a hard timeout, returning
 /// the (think-stripped) completion. A reader thread drains stdout so a verbose
-/// model can never fill the pipe and deadlock; on timeout the child is killed.
+/// model can never fill the pipe and deadlock. A hosted Rebis run cooperatively
+/// pauses the whole process group at its time boundary and can continue the same
+/// local generation; one-shot callers retain the hard-kill timeout.
 /// This is the primitive the real benchmark and `fire_ollama` are built on.
 pub fn ollama_complete(model: &str, prompt: &str, timeout: Duration) -> Result<String, String> {
     let mut child = Command::new("ollama")
@@ -706,12 +712,19 @@ pub fn ollama_complete(model: &str, prompt: &str, timeout: Duration) -> Result<S
         s
     });
 
-    let start = Instant::now();
+    let mut start = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(st)) => break st,
             Ok(None) => {
                 if start.elapsed() > timeout {
+                    let reason = format!("model time limit ({}s) reached", timeout.as_secs());
+                    if crate::pause::current_run(&reason) {
+                        // SIGCONT grants another time slice to the same Ollama
+                        // child and reader; neither is recreated or discarded.
+                        start = Instant::now();
+                        continue;
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = reader.join();

@@ -13,9 +13,36 @@ The fullscreen application combines:
 - chat and direct coding-agent workflows in the same session;
 - Claude CLI, Ollama, OpenAI, Anthropic, and OpenRouter models.
 
-Kaos is written in Rust. Runs execute in the directory where Kaos was started,
-so relative file reads, edits, commands, imports, and output paths share one
-working context.
+Kaos has three first-class layers: the Rust workspace and agent runtime, the
+Rebis orchestration language, and the root-level Sisyphus neural architecture.
+Runs execute in the directory where Kaos was started, so relative file reads,
+edits, commands, imports, and output paths share one working context.
+
+## Sisyphus architecture
+
+The root [Sisyphus component](sisyphus/README.md) is an experimental causal
+language model that reimagines Thoth around Rebis's
+quote/route/group/square semantics and Kaos's evidence-gated recursion. In a
+frozen five-seed 29.8k-parameter `enwik8` micro-study it beat a matched modern
+Transformer 4/5 seeds (3.7491 vs 3.8013 mean held-out bits/byte; paired 95% CI
+`[-0.0971, -0.0061]`). Its second recursive pass improved the first in all five
+seeds.
+
+That short-context quality result did not transfer. With every setting frozen,
+an untouched five-seed `text8` confirmation favored the Transformer 5/5 (3.1493
+vs 3.0679 bpb; paired 95% CI `[+0.0439, +0.1248]`). Sisyphus therefore has no
+demonstrated general language-quality edge; enwik8 is a retained
+dataset-specific positive, not the headline averaged across a kept null.
+
+The edge is bounded: at context 128 the Transformer still trains 5.09× faster.
+Sisyphus's `O(n log n)` mixer crosses over in isolated CPU inference among the
+measured lengths at context 2,048; at 4,096 it is 5.04× faster with 83.3% lower
+peak RSS. The [architecture](sisyphus/ARCHITECTURE.md),
+[paper](sisyphus/PAPER.md), [protocol](sisyphus/PROTOCOL.md),
+[confirmation](sisyphus/CONFIRMATION.md), and
+[Kaos integration note](docs/SISYPHUS.md) state the complete result and
+limitations. Sisyphus is part of the root project, but its present research
+checkpoint is not the default Kaos provider.
 
 ## Install and start
 
@@ -27,6 +54,25 @@ cargo install --path .
 # Choose a model, then open the terminal app.
 export KAOS_MODEL=claude:sonnet
 kaos
+```
+
+The [visual mandala editor](#visual-mandala-editor) is an optional feature. It
+draws natively with egui on OpenGL — no webview, and so no system webkit:
+
+```bash
+cargo install --path . --features visual
+kaos visual
+```
+
+It is off by default only to keep the ordinary build small; `kaos visual`
+prints this instruction when the feature is absent.
+
+The Sisyphus training and benchmark stack is an optional Python component:
+
+```bash
+python -m venv .venv-sisyphus
+.venv-sisyphus/bin/pip install -r sisyphus/requirements.txt
+PYTHONPATH=. DEV=CPU .venv-sisyphus/bin/python -m sisyphus --help
 ```
 
 Without arguments, `kaos` opens the Rebis workspace. A new workspace shows a
@@ -138,6 +184,7 @@ Useful workspace commands:
 ```text
 /format                 format valid Rebis source
 /format!                format even when comments will be removed
+/search TEXT            find the next literal source match; /search repeats
 /tree                   show the structural tree
 /mandala                show the o-[]-o flow projection
 /graph                  focus the right panel
@@ -192,14 +239,28 @@ finishes:
 - `j`/`k` select a run;
 - `Tab` expands or collapses its full stream;
 - Up/Down and Page Up/Down browse retained output;
-- Shift-Down or End jumps to the tail, and Home returns to the start;
+- Shift-Up or Home jumps to the top, and Shift-Down or End jumps to the tail;
+- `p` pauses or resumes the selected run, including a replacement child after an interruption;
 - `u` or Delete removes a queued, cancelled, or completed run.
 
 Running entries cannot be deleted. Long output wraps instead of being cut at
 the right edge, and the complete model response, agent steps, file operations,
 commands, observations, diagnostics, and execution tree are retained. `WAIT`
-shows queue/permission time; `TIME` shows execution time and freezes when the
-run finishes.
+shows queue/permission time; `TIME` shows active execution time and freezes when
+the run finishes. Paused time is not charged to `TIME`.
+
+The mouse wheel follows the pane under the pointer. Scrolling the source
+temporarily detaches its viewport from the edit cursor so redraws do not snap
+back; the next source key or `/search` resumes cursor following. Source,
+projection, and run-log scrolling are clamped to their real bounds.
+
+A hosted Rebis run pauses whenever a model prompt fails, returns no answer,
+times out, reaches a clean allowance boundary, or its child process disappears.
+`p` resumes a suspended child directly. If the child disappeared, `p` launches a
+replacement from the captured source and record: completed prompt answers replay
+locally from an atomic journal, then the first unfinished prompt is tried again.
+Completed model/tool prompts are not repeated. `Ctrl-C` remains explicit
+cancellation and is the intentional way to discard a paused run.
 
 ## Direct and chaos runs
 
@@ -234,10 +295,24 @@ execution under `TRACE`. Use `/output` to focus the final value:
 `/record FILE` supplies a text record to later runs. Rebis uses records as
 evidence and input according to the program's structure.
 
+Every successful serial run retains the current sigil's output. A plain `/run`
+keeps its normal fresh/explicit-record behavior; continuation of interrupted
+execution belongs to `p`, not to a separate run command.
+
 ## Sigils, modules, and the standard library
 
 The right panel starts as a sigil explorer. Personal sigils live under
 `~/.kaos/sigils` and act as reusable, definition-only Rebis modules.
+
+`/sigil save NAME` writes `NAME.rebis` and, when a successful output exists,
+`NAME.output`. If the selected or most recent run is unfinished, it also writes
+`NAME.run` plus `NAME.checkpoint`: the captured record/input, run mode, retained
+trace and exact completed prompt journal. Opening that sigil recreates the run as
+paused; `/runs` followed by `p` reconstructs the interpreter, replays completed
+prompts locally, and retries the first unfinished prompt. Manual/automatic pauses
+refresh the durable state. Successful completion removes the resumable sidecars
+so an obsolete checkpoint cannot shadow the finished result. Runtime data stays
+outside importable `.rebis` source.
 
 ```text
 /sigil save repair-loop
@@ -245,6 +320,24 @@ The right panel starts as a sigil explorer. Personal sigils live under
 /sigils repair
 /sigil open team/reviews
 ```
+
+`/sigil chat` opens a source-bound **God Agent** channel inside the right panel.
+The channel receives an isolated copy of the complete current `.rebis` source,
+plus a live-refreshed inventory of every running, paused, queued, or
+permission-gated bot: captured source and record, state, mode, directive, full
+trace, and prompt journal. Enter sends a turn; Esc returns focus to source.
+One run remains the bound source-mutation target. When explicitly requested in
+the user turn, the God Agent may target any live run with `PAUSE`, `RESUME`,
+`APPLY_DIRECTIVE`, or `CLEAR_DIRECTIVE`; directives are attached to that run's
+next unfinished prompts. Cancellation and deletion are unavailable through this
+channel. If the agent produces a
+valid revision and the editor has not changed concurrently, Kaos applies it to the
+live buffer. A running bound interpreter is paused for the coherent snapshot and
+then reconstructed from its atomic journal: identical completed prompts replay
+without model/tool work, while the first changed prompt invalidates only the
+divergent tail. The channel transcript, run trace, record input, and checkpoint are
+not cleared. Invalid revisions and concurrent editor conflicts are retained for
+inspection but never overwrite source.
 
 Names may contain `/`-separated folders. A saved `team/reviews` sigil is
 imported with `(# team/reviews)`. Importing `(# team)` recursively loads every
@@ -305,6 +398,78 @@ kaos rebis mandala '(-> "Reproduce the bug" "Write the fix")'
 `rebis run` accepts either a file or inline Rebis source. `tree` and `mandala`
 accept inline source. Piped stdin becomes a record for the run.
 
+## Visual mandala editor
+
+`kaos rebis mandala` projects source *into* the `o-[]-o` notation. `kaos visual`
+runs it the other way: draw the mandala on a canvas and it writes the Rebis.
+
+```bash
+# Start on an empty canvas.
+kaos visual
+
+# Load an existing program onto the canvas.
+kaos visual program.rebis
+kaos visual '(["synthesize"] "Inspect code" "Trace failure")'
+```
+
+From inside the Rebis workspace, `/visual` opens the current buffer the same
+way. It parses first, so an undrawable buffer reports on the status line
+instead of opening an empty window, and the editor runs in its own window while
+the terminal app keeps going.
+
+The whiteboard has the same three elements as the notation — the circle, the
+square, and the arrow:
+
+| draw        | means                          | generates            |
+|-------------|--------------------------------|----------------------|
+| `o`         | a prompt terminal              | `"label"`            |
+| `o` fed by arrows | a prompt consuming answers | `(-> in… "label")`   |
+| `[]`        | a mediator combining its inputs | `(["label"] in…)`   |
+| `→`         | answer flow                    | nesting              |
+
+An arrow means "this answer flows into that shape". The one shape with no
+outgoing arrow is the program's result, and the source is generated by walking
+back from it. Drawing a `←` is the same as drawing a `→` the other way, so there
+is nothing extra to learn. The generated source updates live beside the canvas;
+loops, disconnected shapes, and empty mediators are reported there instead of
+producing invalid code.
+
+A circle takes at most one incoming arrow. Rebis's `->` is binary and folds
+left, so `(-> a b "label")` means "a flows to b flows to label" — a chain, not
+"a and b both feed label". Joining several answers is exactly what the square
+is for, so a circle with two inputs is reported rather than written out as a
+chain that does not match the drawing.
+
+Loading is the exact inverse of generating: a program that came from the canvas
+returns to the same canvas. Only the three shapes above can be drawn, so a
+buffer using macros, imports, symbols, or `($ ...)` interpolation is refused by
+name instead of being approximated.
+
+The editor is a thin shell over `kaos::visual`, which holds the model and the
+code generation and is plain testable Rust — the notation's rules live there,
+not in the UI.
+
+`visual` is not a default feature, only to keep the ordinary build small. The
+window is native egui on OpenGL, so it needs no system webkit — see
+[Install and start](#install-and-start). Built without the feature,
+`kaos visual` prints the instruction and exits.
+
+## Theme
+
+Kaos is monochrome in two modes. The shapes, sigils and rules carry the
+meaning, so colour only separates figure from ground.
+
+```text
+/theme dark     light on dark
+/theme light    dark on light
+/theme          report the current mode
+```
+
+The choice is persisted in the Kaos config and read by **both** interfaces, so
+the terminal app and [`kaos visual`](#visual-mandala-editor) always agree.
+`kaos visual` picks it up the next time it opens; the terminal repaints on
+restart.
+
 ## Models and authentication
 
 Select a model from chat or Rebis. The choice is written to the Kaos config and
@@ -358,9 +523,10 @@ KAOS_REBIS_MAX_CONCURRENCY  runtime branch concurrency (4)
 vim_mode                    persistent embedded-Vim preference (false)
 ```
 
-The runtime limits are per Rebis process. Setting a limit to `0` disables that
-limit. Explicit shell environment variables override values loaded from the
-config file.
+The runtime limits are per Rebis process. In a hosted TUI run, the model-call
+limit is a renewable slice: reaching it pauses the live run and `p` grants the
+next slice. Setting a limit to `0` disables that limit. Explicit shell
+environment variables override values loaded from the config file.
 
 ## Chat and coding-agent workflows
 
@@ -403,12 +569,21 @@ cargo build --release
 cargo test
 cargo clippy --all-targets -- -D warnings
 
+# Optional Sisyphus architecture checks.
+PYTHONPATH=. DEV=CPU .venv-sisyphus/bin/python \
+  -m unittest discover -s sisyphus -t . -v
+
 # Plain line interface and shell-out providers only.
 cargo build --no-default-features
+
+# The visual editor (native egui; no extra system libraries).
+cargo build --features visual
 ```
 
 Default features enable the Ratatui terminal application and HTTP providers.
 Without default features, Kaos builds a plain REPL suitable for pipes and CI.
+The `visual` feature is off by default; its model and Rebis code generation
+(`src/visual.rs`) are plain Rust and are covered by `cargo test` either way.
 
 The main integration points are:
 
@@ -416,9 +591,12 @@ The main integration points are:
 src/rebis_workspace.rs   editor, Vim behavior, sigils, panels, and commands
 src/tui.rs               terminal application, queues, jobs, and run browser
 src/main.rs              CLI, Rebis host runtime, and coding-agent commands
+src/visual.rs            mandala model and Rebis code generation (no UI)
+src/visual_ui.rs         the `kaos visual` egui canvas (feature `visual`)
 src/config.rs            persistent non-secret configuration
 src/provider.rs          model/provider selection
 src/conductor.rs         tool-using coding-agent loop
+sisyphus/                neural architecture, training, evidence, and paper
 ```
 
 ## License

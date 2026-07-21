@@ -185,6 +185,11 @@ fn truthy(value: &str) -> bool {
     )
 }
 
+/// Read a string setting from the config file.
+pub fn value(key: &str) -> Option<String> {
+    read_value(key)
+}
+
 fn read_value(key: &str) -> Option<String> {
     read_path(&path()).ok()?.remove(key)
 }

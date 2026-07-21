@@ -14,6 +14,12 @@ depending on the selected model's prior knowledge. That reference is also the
 concise example cookbook for higher-order macros, deep mediators,
 standard-library strategies, lazy routing, and bounded recursive refinement.
 
+Rebis also supplies the operation basis for the experimental
+[Sisyphus model](SISYPHUS.md): quote/retain, arrow/route, group/compose, and
+square/mediate become four learned causal candidates in one recursively shared
+cell. Rebis remains the executable orchestration language; Sisyphus is a neural
+model inspired by its semantics, not a replacement parser or runtime.
+
 Rebis is the default Kaos screen. Press `Ctrl-K` to open the command palette.
 The legacy `Ctrl-/` chord is still recognized too (including the `Ctrl-_` and
 unit-separator encodings that older terminals emit). The
@@ -84,8 +90,10 @@ no model work and needs no permission.
 
 Open the integrated editor directly with `kaos rebis edit <file>`, or enter
 `/rebis <file>` at the main Kaos command line. It supports paired `()` and `[]`,
-quote highlighting, `%` matching, and Vim visual modes. Press `Ctrl-K` for Kaos
-commands such as `/format`, `/run`, `/tree`, and `/mandala`. Vim `:` remains
+quote highlighting, `%` matching, and Vim visual modes. `/search TEXT` moves to
+the next case-sensitive literal source match and wraps at the end; `/search`
+repeats the previous query. Press `Ctrl-K` for Kaos commands such as `/search`,
+`/format`, `/run`, `/tree`, and `/mandala`. Vim `:` remains
 reserved for `:w`, `:e`, `:q`, `:q!`, and `:wq`.
 The top bar shows the complete Rebis punctuation set horizontally—symbols only:
 `( ) [ ] ~ # ' , -> <- ; "`. Structural operators and delimiters use one shared
@@ -101,7 +109,42 @@ The editor also manages a personal sigil library in `~/.kaos/sigils`:
 /sigil save team/reviews   folders work: saved to team/reviews.rebis
 /sigils repair             search saved names in the right panel
 /sigil open team/reviews   load a saved sigil into the editor
+/sigil chat                supervise and revise this sigil in the right panel
 ```
+
+Saving also writes the last successful returned value to a neighboring
+`.output` sidecar. When an unfinished run exists, a `.run` sidecar retains its
+record/input, exact execution source, mode, trace, elapsed time and pause reason;
+the atomic prompt journal is copied to `.checkpoint`. Opening the sigil restores
+that execution as a paused run. Use `/runs`, then `p`, to rebuild the interpreter
+from its identical completed prompt prefix and retry the first unfinished prompt.
+Manual pauses, automatic timeouts/allowance pauses, and unexpected child exits
+refresh the durable snapshot. A successful result clears `.run` and
+`.checkpoint`, while `.output` remains the saved returned value. A plain `/run`
+still starts fresh (or uses `/record FILE`).
+
+`/sigil chat` is distinct from ordinary `/chat`: it does not suspend the Rebis
+workspace. It opens a durable God Agent transcript in the right panel and binds
+to the selected unfinished run (or the newest unfinished run when the selection
+is complete). Each turn places the entire editor source and a live-refreshed
+snapshot of every nonterminal bot into an isolated bridge. Every entry includes
+its source, record/input, state, mode, pause reason, current directive, checkpoint
+journal, and undropped trace. The supervisor may revise only the bound source
+copy. Explicit user requests may additionally produce validated per-run `PAUSE`,
+`RESUME`, `APPLY_DIRECTIVE`, and `CLEAR_DIRECTIVE` actions. A directive remains
+attached to that bot's unfinished model prompts until replaced or cleared;
+checkpoint replays remain immutable. God-channel cancellation and deletion are
+not supported. Kaos
+parses the proposal and compares it with the editor revision before merging it,
+so invalid output or concurrent human edits cannot overwrite the buffer.
+
+When a bound run is live, the turn takes a coherent process pause. An unchanged
+source continues in place. A changed valid source retires only the old
+interpreter process and immediately reconstructs it from the same prompt journal:
+the exact unchanged prompt prefix replays locally, and checkpoint logic truncates
+only from the first changed prompt. The record, completed answers, transcript,
+timers, and run-tree identity survive. Runs already paused before the conversation
+stay paused so the user remains in control; `/runs` followed by `p` resumes them.
 
 Names take `/`-separated folders, the same shape as module paths — a sigil
 saved as `team/reviews` is importable as `(# team/reviews)`. Search walks the
@@ -226,6 +269,14 @@ The definition appears as a reusable template:
 
 Use `/mandala` to open this projection and `/tree` for the structural AST.
 
+The projection also runs backwards. `kaos visual` opens a canvas where the same
+three elements are drawn rather than read, and the Rebis source is generated
+from the drawing — see [the README](../README.md#visual-mandala-editor).
+`kaos visual FILE` and `/visual` load an existing program onto that canvas, so
+the projection round-trips: source to drawing and back to the same source. It
+is built on `kaos::visual`, which owns the mapping between the shapes and the
+language.
+
 The mandala is scrollable. Enter `/graph`, then use `hjkl`, arrow keys, Page Up,
 Page Down, `Home`, or `g`. `Esc` returns to source focus. `/panel hide` removes
 the panel, `/panel show` restores it, and `/panel` toggles it.
@@ -233,6 +284,10 @@ Vim window motions work too: `Ctrl-W l` focuses the right mandala/result panel,
 and `Ctrl-W h` returns to the source editor.
 The mouse wheel scrolls whichever pane is under the pointer: source on the left
 and mandala/results on the right. Shift-wheel scrolls that pane horizontally.
+Source-wheel review stays at the chosen viewport instead of snapping back to
+the stationary edit cursor; the next source key or `/search` follows the cursor
+again. Vertical wheel scrolling is clamped to the real source, projection, or
+run-log bounds, preventing blank overscroll.
 Mouse capture is enabled by default. A drag selects and copies only text from
 the pane where it began, clipped at that pane's boundaries instead of selecting
 the terminal's whole row. `Ctrl-Shift-C` copies the highlighted pane selection
@@ -305,8 +360,8 @@ active trace until they reach the head of the queue. Every submitted run appears
 in a durable right-panel tree: click it or use `Ctrl-W l`, choose a
 run with `j`/`k`, and press `Tab` to expand or collapse its captured text stream.
 Up/Down and the mouse wheel scroll through output rows; Page Up/Down move
-faster, Home returns to the start, and Shift-Down or End reaches the latest
-retained output.
+faster, Shift-Up or Home returns to the start, and Shift-Down or End reaches
+the latest retained output.
 Stream lines retain the agent's complete text; nothing is shortened with an
 ellipsis, and model/code lines wider than the panel wrap onto continuation rows
 without changing the retained stream. Finished runs remain available until `u` or
@@ -319,7 +374,14 @@ treats `Ctrl-C` as cancel-first: it stops in-flight work and only exits when
 the chat is idle.)
 Every header includes a live `WAIT` duration while queued or permission-gated
 and a `TIME` duration after execution starts. Completion and cancellation freeze
-that final duration in the retained run history.
+that final duration in the retained run history; suspended time is excluded.
+Press `p` on a run to suspend or resume it. Failed or empty model prompts,
+timeouts, clean step/model-call allowance boundaries, and vanished child
+processes all become pauses rather than failed exits. A live child retains the
+interpreter stack directly. If it vanished, `p` starts a replacement that
+replays atomically checkpointed prompt answers locally, rebuilds the stack, and
+retries the first unfinished prompt. `Ctrl-C` remains explicit cancellation and
+terminates the child process group.
 
 An expanded run contains a numbered `AGENT` section for every quoted Rebis
 prompt. Each agent uses the same activity stream as a chat coding working:

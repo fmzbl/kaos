@@ -5,7 +5,7 @@
 //! Every diagnostic and every graph shown by the workspace comes from
 //! [`rebis_lang::parse`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -126,6 +126,8 @@ struct TemporarySigil {
     label: String,
     source: String,
     path: Option<PathBuf>,
+    final_output: Option<String>,
+    saved_output: Option<String>,
 }
 
 /// Resolves foundational Rebis modules from Kaos's saved hypersigil library.
@@ -681,6 +683,31 @@ impl Editor {
         self.cursor = self.char_len();
         self.preferred_column = None;
         self.pending_normal.clear();
+    }
+
+    /// Move to the next literal occurrence after the cursor, wrapping once at
+    /// the end of the buffer. Both the cursor and returned location remain
+    /// character-based even when the source or query contains Unicode.
+    fn find_next(&mut self, query: &str) -> Option<bool> {
+        if query.is_empty() || self.source.is_empty() {
+            return None;
+        }
+        let start_char = (self.cursor + 1).min(self.char_len());
+        let start_byte = self.byte_at(start_char);
+        let found = self.source[start_byte..]
+            .find(query)
+            .map(|offset| (start_byte + offset, false))
+            .or_else(|| {
+                self.source
+                    .find(query)
+                    .filter(|byte| *byte < start_byte)
+                    .map(|byte| (byte, true))
+            });
+        let (byte, wrapped) = found?;
+        self.cursor = self.source[..byte].chars().count();
+        self.preferred_column = None;
+        self.pending_normal.clear();
+        Some(wrapped)
     }
 
     /// Move to the start of the next word.
@@ -1941,8 +1968,20 @@ pub enum WorkspaceAction {
     RunParallel(RunRequest),
     /// Reveal and focus Kaos's retained run browser.
     BrowseRuns,
+    /// Open the source-bound supervisory conversation in the right panel.
+    OpenSigilChat,
+    /// Send one turn to the supervisory agent without leaving the workspace.
+    SigilChat(String),
     /// Execute a session-level Kaos command without leaving the editor.
     Kaos(String),
+}
+
+/// Durable-sigil lifecycle events that require app-owned run/checkpoint state.
+/// The editor owns files and identity; the TUI host owns live subprocesses.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceEvent {
+    SigilSaved(String),
+    SigilOpened(String),
 }
 
 /// Complete state for one Rebis editor/visualizer session.
@@ -1956,6 +1995,9 @@ pub struct Workspace {
     pub message: String,
     pub view_top: usize,
     pub view_left: usize,
+    /// Keyboard editing follows the cursor; mouse-wheel review deliberately
+    /// detaches the source viewport until the next source action.
+    source_follow_cursor: bool,
     pub visualization: Visualization,
     pub panel_visible: bool,
     /// The run browser is a panel projection, not ownership of execution.
@@ -1994,10 +2036,23 @@ pub struct Workspace {
     run_output_visible: bool,
     result_only_visible: bool,
     final_output: Option<String>,
+    /// Last successfully completed output for this sigil. Unlike the visible
+    /// output pane, beginning another run does not erase this saved value.
+    saved_output: Option<String>,
+    /// Last literal source query, retained so `/search` repeats it.
+    last_search: Option<String>,
+    /// Source-bound supervisory conversation. It is deliberately part of the
+    /// workspace so switching views never sacrifices its context.
+    sigil_chat_visible: bool,
+    sigil_chat_input: String,
+    sigil_chat_lines: Vec<String>,
+    sigil_chat_busy: bool,
+    sigil_chat_run_id: Option<u64>,
     sigil_results: Vec<SigilEntry>,
     temporary_sigils: Vec<TemporarySigil>,
     active_temporary_sigil: Option<u64>,
     current_sigil: Option<String>,
+    host_events: VecDeque<WorkspaceEvent>,
     next_temporary_sigil: u64,
     diagnostic: Option<String>,
     error_char: Option<usize>,
@@ -2038,6 +2093,7 @@ impl Workspace {
             message: String::new(),
             view_top: 0,
             view_left: 0,
+            source_follow_cursor: true,
             visualization: Visualization::Mandala,
             panel_visible: true,
             runs_visible: false,
@@ -2061,10 +2117,18 @@ impl Workspace {
             run_output_visible: false,
             result_only_visible: false,
             final_output: None,
+            saved_output: None,
+            last_search: None,
+            sigil_chat_visible: false,
+            sigil_chat_input: String::new(),
+            sigil_chat_lines: Vec::new(),
+            sigil_chat_busy: false,
+            sigil_chat_run_id: None,
             sigil_results: Vec::new(),
             temporary_sigils: Vec::new(),
             active_temporary_sigil: None,
             current_sigil: None,
+            host_events: VecDeque::new(),
             next_temporary_sigil: 1,
             diagnostic: None,
             error_char: None,
@@ -2169,6 +2233,154 @@ impl Workspace {
         )
     }
 
+    #[must_use]
+    pub fn current_sigil(&self) -> Option<&str> {
+        self.current_sigil.as_deref()
+    }
+
+    /// Host-owned resumable state lives beside, but never inside, importable
+    /// Rebis source. Both names derive from an already validated sigil name.
+    #[must_use]
+    pub fn sigil_resume_paths(&self, name: &str) -> (PathBuf, PathBuf) {
+        (
+            self.sigils_dir().join(format!("{name}.run")),
+            self.sigils_dir().join(format!("{name}.checkpoint")),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn set_sigils_root_for_test(&mut self, root: PathBuf) {
+        self.sigils_root = root;
+    }
+
+    pub fn take_host_event(&mut self) -> Option<WorkspaceEvent> {
+        self.host_events.pop_front()
+    }
+
+    /// Reveal the source-bound supervisor without leaving or replacing the
+    /// editor. The transcript belongs to this workspace and survives view
+    /// changes just like the run tree.
+    pub fn open_sigil_chat(&mut self) {
+        self.panel_visible = true;
+        self.runs_visible = false;
+        self.run_output_visible = false;
+        self.result_only_visible = false;
+        self.sigil_chat_visible = true;
+        self.graph_focus = true;
+        self.graph_left = 0;
+        if self.sigil_chat_lines.is_empty() {
+            self.sigil_chat_lines.extend([
+                "GOD CHANNEL".to_string(),
+                "The supervisor sees every live bot's source, input, checkpoint, directive, state, and full trace. One run remains the bound source-edit target; explicit per-run controls can pause, resume, apply guidance, or clear guidance without killing a run.".to_string(),
+                String::new(),
+            ]);
+        }
+        self.graph_top = self.sigil_chat_lines.len().saturating_sub(1);
+        self.message = "sigil chat · type in the right panel · Enter sends · Esc returns to source"
+            .to_string();
+    }
+
+    #[must_use]
+    pub const fn sigil_chat_visible(&self) -> bool {
+        self.sigil_chat_visible
+    }
+
+    pub fn hide_sigil_chat(&mut self) {
+        self.sigil_chat_visible = false;
+    }
+
+    fn reset_sigil_chat(&mut self) {
+        self.sigil_chat_visible = false;
+        self.sigil_chat_input.clear();
+        self.sigil_chat_lines.clear();
+        self.sigil_chat_busy = false;
+        self.sigil_chat_run_id = None;
+    }
+
+    #[must_use]
+    pub const fn sigil_chat_busy(&self) -> bool {
+        self.sigil_chat_busy
+    }
+
+    #[must_use]
+    pub const fn sigil_chat_run_id(&self) -> Option<u64> {
+        self.sigil_chat_run_id
+    }
+
+    pub fn bind_sigil_chat_run(&mut self, run_id: Option<u64>) {
+        let binding_already_rendered = self.sigil_chat_lines.iter().any(|line| {
+            line.starts_with("system  bound to resumable run #")
+                || line.starts_with("system  source-only channel")
+        });
+        if self.sigil_chat_run_id == run_id && binding_already_rendered {
+            return;
+        }
+        self.sigil_chat_run_id = run_id;
+        self.push_sigil_chat_line(match run_id {
+            Some(id) => format!("system  bound to resumable run #{id}"),
+            None => "system  source-only channel · no unfinished run is bound".to_string(),
+        });
+    }
+
+    #[must_use]
+    pub fn sigil_chat_lines(&self) -> &[String] {
+        &self.sigil_chat_lines
+    }
+
+    #[must_use]
+    pub fn sigil_chat_input(&self) -> &str {
+        &self.sigil_chat_input
+    }
+
+    pub fn insert_sigil_chat_char(&mut self, character: char) {
+        self.sigil_chat_input.push(character);
+    }
+
+    pub fn backspace_sigil_chat(&mut self) {
+        self.sigil_chat_input.pop();
+    }
+
+    pub fn clear_sigil_chat_input(&mut self) {
+        self.sigil_chat_input.clear();
+    }
+
+    /// Consume a non-empty user turn. Keeping this at the workspace boundary
+    /// makes Enter atomic: a busy channel cannot duplicate a submission.
+    pub fn take_sigil_chat_message(&mut self) -> Option<String> {
+        if self.sigil_chat_busy {
+            self.message = "god agent is still working".to_string();
+            return None;
+        }
+        let message = self.sigil_chat_input.trim().to_string();
+        if message.is_empty() {
+            return None;
+        }
+        self.sigil_chat_input.clear();
+        self.push_sigil_chat_line(format!("you     {message}"));
+        Some(message)
+    }
+
+    pub fn set_sigil_chat_busy(&mut self, busy: bool) {
+        self.sigil_chat_busy = busy;
+        self.message = if busy {
+            "god agent working · bound run paused · peer bot snapshot stays live".to_string()
+        } else {
+            "sigil chat ready · Enter sends · /runs then p resumes an already-paused run"
+                .to_string()
+        };
+    }
+
+    pub fn push_sigil_chat_line(&mut self, line: impl Into<String>) {
+        let line = line.into();
+        if line.is_empty() {
+            self.sigil_chat_lines.push(String::new());
+        } else {
+            self.sigil_chat_lines
+                .extend(line.lines().map(str::to_string));
+        }
+        self.graph_top = self.sigil_chat_lines.len().saturating_sub(1);
+    }
+
     /// Keep the cursor in the editor viewport.
     pub fn ensure_visible(&mut self, rows: usize, columns: usize) {
         let (row, column) = self.editor.row_col();
@@ -2182,6 +2394,48 @@ impl Workspace {
         } else if column >= self.view_left + columns.max(1) {
             self.view_left = column + 1 - columns.max(1);
         }
+    }
+
+    /// Whether rendering should keep the source cursor inside the viewport.
+    #[must_use]
+    pub const fn source_follows_cursor(&self) -> bool {
+        self.source_follow_cursor
+    }
+
+    /// Reattach the source viewport after a keyboard action or explicit jump.
+    pub fn follow_source_cursor(&mut self) {
+        self.source_follow_cursor = true;
+    }
+
+    /// Scroll source text without moving the editing cursor. The viewport is
+    /// clamped to real content so repeated wheel events cannot create a long
+    /// blank region that appears stuck while scrolling back.
+    pub fn scroll_source_vertical(&mut self, delta: isize, visible_rows: usize) {
+        let max_top = self.editor.line_count().saturating_sub(visible_rows.max(1));
+        self.view_top = self
+            .view_top
+            .min(max_top)
+            .saturating_add_signed(delta)
+            .min(max_top);
+        self.source_follow_cursor = false;
+    }
+
+    /// Horizontally scroll source text without moving the editing cursor.
+    pub fn scroll_source_horizontal(&mut self, delta: isize, visible_columns: usize) {
+        let longest = self
+            .editor
+            .source()
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or_default();
+        let max_left = longest.saturating_sub(visible_columns.max(1));
+        self.view_left = self
+            .view_left
+            .min(max_left)
+            .saturating_add_signed(delta)
+            .min(max_left);
+        self.source_follow_cursor = false;
     }
 
     /// Execute the current command-line contents.
@@ -2297,6 +2551,7 @@ impl Workspace {
                 let _ = self.save(Some(&path));
             }
             "mandala" => {
+                self.sigil_chat_visible = false;
                 self.visualization = Visualization::Mandala;
                 self.panel_visible = true;
                 self.runs_visible = false;
@@ -2304,7 +2559,21 @@ impl Workspace {
                 self.result_only_visible = false;
                 self.message = "mandala view".to_string();
             }
+            // `/visual open` draws the saved sigil from disk; plain `/visual`
+            // draws the buffer, including unsaved edits.
+            "visual open" => match self.path.clone() {
+                Some(path) => match std::fs::read_to_string(&path) {
+                    Ok(text) => self.open_visual_with(&text),
+                    Err(error) => self.message = format!("visual · {error}"),
+                },
+                None => self.message = "visual · this sigil has no file — /visual".to_string(),
+            },
+            "visual" => {
+                let source = self.editor.source().trim().to_string();
+                self.open_visual_with(&source);
+            }
             "tree" => {
+                self.sigil_chat_visible = false;
                 self.visualization = Visualization::Tree;
                 self.panel_visible = true;
                 self.runs_visible = false;
@@ -2315,6 +2584,10 @@ impl Workspace {
             "sigils" => self.search_sigils(""),
             _ if command.starts_with("sigils ") => {
                 self.search_sigils(command.trim_start_matches("sigils ").trim())
+            }
+            "sigil chat" => {
+                self.open_sigil_chat();
+                return WorkspaceAction::OpenSigilChat;
             }
             _ if command.starts_with("sigil save ") => {
                 let name = command.trim_start_matches("sigil save ").trim();
@@ -2362,13 +2635,17 @@ impl Workspace {
                 self.graph_focus = false;
                 self.message = "source focus".to_string();
             }
+            "search" => self.search_source(None),
+            _ if command.starts_with("search ") => {
+                self.search_source(Some(command.trim_start_matches("search ").trim()))
+            }
             "run" | "run parallel" => {
                 let parallel = command == "run parallel";
                 // A selection captured on entering command mode runs as a
                 // block; otherwise the whole buffer runs.
                 if let Some((start, end)) = run_selection {
                     let slice = slice_chars(self.editor.source(), start, end);
-                    return self.run_block(&slice, parallel);
+                    return self.run_block(&slice, parallel, None);
                 }
                 if self.compiled.is_none() {
                     self.message = "run refused: fix the diagnostic".to_string();
@@ -2396,9 +2673,10 @@ impl Workspace {
                     return WorkspaceAction::None;
                 };
                 let slice = slice_chars(self.editor.source(), left, right);
-                return self.run_block(&slice, parallel);
+                return self.run_block(&slice, parallel, None);
             }
             "output" => {
+                self.sigil_chat_visible = false;
                 self.panel_visible = true;
                 self.runs_visible = false;
                 self.graph_focus = true;
@@ -2445,12 +2723,37 @@ impl Workspace {
             }
             "help" | "" => {
                 self.message =
-                    "/chat /config [restore] /model [MODEL] /chaos [on|off] /new /clear /quit /run [block] [parallel] /runs /save [FILE] /vim on|off|always|never /output [copy|write FILE] /mandala /tree /sigils [QUERY] /sigil save|open NAME /panel hide|show /graph /source /format[!] /mouse [on|off] /record FILE"
+                    "/chat /config [restore] /model [MODEL] /chaos [on|off] /new /clear /quit /run [block|parallel] /runs /save [FILE] /vim on|off|always|never /search [TEXT] /output [copy|write FILE] /theme dark|light /mandala /visual [open] /tree /sigils [QUERY] /sigil save|open NAME /sigil chat /panel hide|show /graph /source /format[!] /mouse [on|off] /record FILE"
                         .to_string()
             }
             _ => self.message = format!("unknown Kaos command /{command}"),
         }
         WorkspaceAction::None
+    }
+
+    fn search_source(&mut self, query: Option<&str>) {
+        self.graph_focus = false;
+        self.follow_source_cursor();
+        let query = query
+            .filter(|query| !query.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.last_search.clone());
+        let Some(query) = query else {
+            self.message = "search: enter text, or repeat after a previous /search".to_string();
+            return;
+        };
+        self.last_search = Some(query.clone());
+        let Some(wrapped) = self.editor.find_next(&query) else {
+            self.message = format!("search: {query:?} not found");
+            return;
+        };
+        let (row, column) = self.editor.row_col();
+        self.message = format!(
+            "{}match {query:?} at {}:{} · /search repeats",
+            if wrapped { "wrapped · " } else { "" },
+            row + 1,
+            column + 1
+        );
     }
 
     const fn editing_mode(&self) -> Mode {
@@ -2523,6 +2826,8 @@ impl Workspace {
                 temporary.source = source;
                 temporary.path.clone_from(&self.path);
                 temporary.label = label;
+                temporary.final_output.clone_from(&self.final_output);
+                temporary.saved_output.clone_from(&self.saved_output);
                 return Some(id);
             }
         }
@@ -2533,6 +2838,8 @@ impl Workspace {
             label,
             source,
             path: self.path.clone(),
+            final_output: self.final_output.clone(),
+            saved_output: self.saved_output.clone(),
         });
         Some(id)
     }
@@ -2701,7 +3008,12 @@ impl Workspace {
     /// Run one block: parse it, prepend the buffer's top-level definitions and
     /// imports so it resolves as it would in place (Lisp eval-region), then
     /// hand it to the run path. A malformed slice reports a diagnostic.
-    fn run_block(&mut self, block_src: &str, parallel: bool) -> WorkspaceAction {
+    fn run_block(
+        &mut self,
+        block_src: &str,
+        parallel: bool,
+        input: Option<String>,
+    ) -> WorkspaceAction {
         let block = match rebis_lang::parse(block_src) {
             Ok(expr) => expr,
             Err(error) => {
@@ -2712,7 +3024,7 @@ impl Workspace {
         let program = self.block_with_definitions(block);
         let request = RunRequest {
             source: program,
-            input: self.record_text.clone().unwrap_or_default(),
+            input: input.unwrap_or_else(|| self.record_text.clone().unwrap_or_default()),
             scope: RunScope::Block,
         };
         if parallel {
@@ -2757,6 +3069,10 @@ impl Workspace {
     }
 
     fn open_temporary_sigil(&mut self, id: u64) {
+        if self.sigil_chat_busy {
+            self.message = "wait for the god-agent turn before changing sigils".to_string();
+            return;
+        }
         if self.active_temporary_sigil == Some(id) {
             self.message = format!("temporary sigil temp:{id} is already open");
             return;
@@ -2771,10 +3087,16 @@ impl Workspace {
             return;
         };
         self.park_current_as_temporary_sigil();
+        self.reset_sigil_chat();
         self.editor = Editor::new(temporary.source);
         self.editor.dirty = true;
         self.chaos_star_visible = false;
         self.path = temporary.path;
+        self.final_output = temporary.final_output;
+        self.saved_output = temporary.saved_output;
+        self.run_output.clear();
+        self.run_output_visible = false;
+        self.result_only_visible = false;
         self.current_sigil = None;
         self.active_temporary_sigil = Some(id);
         self.view_top = 0;
@@ -2805,6 +3127,58 @@ impl Workspace {
         valid.then(|| name.to_string())
     }
 
+    fn sigil_output_path(&self, name: &str) -> PathBuf {
+        self.sigils_dir().join(format!("{name}.output"))
+    }
+
+    /// Persist the last successful value separately from executable Rebis
+    /// source, so importing the sigil remains definition-only and parseable.
+    fn save_sigil_output(&self, name: &str) -> Result<bool, String> {
+        let path = self.sigil_output_path(name);
+        match &self.saved_output {
+            Some(output) => fs::write(&path, output)
+                .map(|()| true)
+                .map_err(|error| format!("could not save {}: {error}", path.display())),
+            None => match fs::remove_file(&path) {
+                Ok(()) => Ok(false),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(format!("could not clear {}: {error}", path.display())),
+            },
+        }
+    }
+
+    fn restore_sigil_output(&mut self, name: &str) -> Result<bool, String> {
+        self.run_output.clear();
+        self.run_output_visible = false;
+        self.result_only_visible = false;
+        let path = self.sigil_output_path(name);
+        match fs::read_to_string(&path) {
+            Ok(output) => {
+                self.final_output = Some(output.clone());
+                self.saved_output = Some(output);
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.final_output = None;
+                self.saved_output = None;
+                Ok(false)
+            }
+            Err(error) => {
+                self.final_output = None;
+                self.saved_output = None;
+                Err(format!("could not restore {}: {error}", path.display()))
+            }
+        }
+    }
+
+    fn clear_sigil_output(&mut self) {
+        self.run_output.clear();
+        self.run_output_visible = false;
+        self.result_only_visible = false;
+        self.final_output = None;
+        self.saved_output = None;
+    }
+
     fn save_sigil(&mut self, requested: &str) {
         if self.compiled.is_none() {
             self.message = "sigil save refused: fix the diagnostic".to_string();
@@ -2823,17 +3197,30 @@ impl Workspace {
             }
         }
         match fs::write(&path, self.editor.source()) {
-            Ok(()) => {
-                self.editor.mark_clean();
-                self.remove_active_temporary_sigil();
-                self.current_sigil = Some(name.clone());
-                self.refresh_sigils_if_visible(format!("saved sigil {name}"));
-            }
+            Ok(()) => match self.save_sigil_output(&name) {
+                Ok(output_saved) => {
+                    self.editor.mark_clean();
+                    self.remove_active_temporary_sigil();
+                    self.current_sigil = Some(name.clone());
+                    self.host_events
+                        .push_back(WorkspaceEvent::SigilSaved(name.clone()));
+                    self.refresh_sigils_if_visible(if output_saved {
+                        format!("saved sigil {name} · output sidecar saved")
+                    } else {
+                        format!("saved sigil {name} · no output yet")
+                    });
+                }
+                Err(error) => self.message = error,
+            },
             Err(error) => self.message = format!("could not save {}: {error}", path.display()),
         }
     }
 
     fn open_sigil(&mut self, requested: &str) {
+        if self.sigil_chat_busy {
+            self.message = "wait for the god-agent turn before changing sigils".to_string();
+            return;
+        }
         if let Some(id) = requested
             .trim()
             .strip_prefix("temp:")
@@ -2850,11 +3237,13 @@ impl Workspace {
             .find(|(name, _)| *name == requested_name)
         {
             let parked = self.park_current_as_temporary_sigil();
+            self.reset_sigil_chat();
             self.editor = Editor::new((*source).to_string());
             self.chaos_star_visible = false;
             self.path = None;
             self.current_sigil = None;
             self.active_temporary_sigil = None;
+            self.clear_sigil_output();
             self.view_top = 0;
             self.view_left = 0;
             self.refresh();
@@ -2880,21 +3269,30 @@ impl Workspace {
         match fs::read_to_string(&path) {
             Ok(source) => {
                 let parked = self.park_current_as_temporary_sigil();
+                self.reset_sigil_chat();
                 self.editor = Editor::new(source);
                 self.chaos_star_visible = false;
                 self.path = None;
                 self.current_sigil = Some(name.clone());
                 self.active_temporary_sigil = None;
+                let restored_output = self.restore_sigil_output(&name);
                 self.view_top = 0;
                 self.view_left = 0;
                 self.refresh();
-                let message = parked.map_or_else(
+                let mut message = parked.map_or_else(
                     || format!("opened sigil {name} · :w PATH saves a working copy"),
                     |id| format!("opened sigil {name} · previous edits parked as temp:{id}"),
                 );
+                match restored_output {
+                    Ok(true) => message.push_str(" · output sidecar restored"),
+                    Ok(false) => {}
+                    Err(error) => message.push_str(&format!(" · {error}")),
+                }
                 if self.visualization == Visualization::Sigils {
                     self.search_sigils("");
                 }
+                self.host_events
+                    .push_back(WorkspaceEvent::SigilOpened(name.clone()));
                 self.message = message;
             }
             Err(error) => self.message = format!("could not open sigil {name}: {error}"),
@@ -2922,6 +3320,39 @@ impl Workspace {
             } else if path.extension().and_then(|value| value.to_str()) == Some("rebis") {
                 out.push(format!("{prefix}{stem}"));
             }
+        }
+    }
+
+    /// Open `source` in the mandala editor.
+    ///
+    /// The editor is a windowed application and this workspace owns the
+    /// terminal, so it runs as a detached child rather than inline. The source
+    /// is parsed here first, so an undrawable program reports on the status
+    /// line instead of opening a window that immediately exits.
+    fn open_visual_with(&mut self, source: &str) {
+        let source = source.trim();
+        if source.is_empty() {
+            self.message = "visual · nothing to draw".to_string();
+            return;
+        }
+        if let Err(error) = crate::visual::Mandala::from_rebis(source) {
+            self.message = format!("visual · {error}");
+            return;
+        }
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kaos"));
+        match std::process::Command::new(exe)
+            .arg("visual")
+            .arg(source)
+            // The editor inherits this workspace's working context, so a
+            // program drawn there resolves paths and imports the same way.
+            .current_dir(&self.cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => self.message = "visual · editor opened".to_string(),
+            Err(error) => self.message = format!("visual · could not open: {error}"),
         }
     }
 
@@ -2973,6 +3404,7 @@ impl Workspace {
                 .collect();
             self.expanded_folders.extend(ancestors);
         }
+        self.sigil_chat_visible = false;
         self.visualization = Visualization::Sigils;
         self.panel_visible = true;
         self.runs_visible = false;
@@ -2988,6 +3420,10 @@ impl Workspace {
     }
 
     fn load(&mut self, requested: &str) {
+        if self.sigil_chat_busy {
+            self.message = "wait for the god-agent turn before opening another file".to_string();
+            return;
+        }
         if self.editor.dirty() {
             self.message = "unsaved changes · :w first or leave with :q!".to_string();
             return;
@@ -2995,6 +3431,7 @@ impl Workspace {
         let path = resolve(&self.cwd, requested);
         match fs::read_to_string(&path) {
             Ok(source) => {
+                self.reset_sigil_chat();
                 self.editor = Editor::new(source);
                 self.chaos_star_visible = false;
                 self.path = Some(path.clone());
@@ -3121,11 +3558,45 @@ impl Workspace {
             .collect()
     }
 
+    /// Scroll the right-hand projection without permitting blank overscroll.
+    pub fn scroll_graph_vertical(&mut self, delta: isize, visible_rows: usize) {
+        let row_count = if self.sigil_chat_visible {
+            self.sigil_chat_lines.len()
+        } else if self.result_only_visible {
+            self.output_lines().len()
+        } else if self.run_output_visible && !self.run_output.is_empty() {
+            self.run_output.len()
+        } else if self.visualization == Visualization::Sigils {
+            self.visible_sigil_rows().len() + 3
+        } else if self.chaos_star_visible {
+            0
+        } else if let Some(expr) = &self.compiled {
+            let rendered = match self.visualization {
+                Visualization::Mandala => rebis_lang::mandala(expr),
+                Visualization::Tree => self.record.as_ref().map_or_else(
+                    || rebis_lang::tree(expr),
+                    |record| rebis_lang::tree_scored(expr, record),
+                ),
+                Visualization::Sigils => unreachable!(),
+            };
+            rendered.lines().count() + usize::from(self.visualization == Visualization::Tree)
+        } else {
+            2
+        };
+        let max_top = row_count.saturating_sub(visible_rows.max(1));
+        self.graph_top = self
+            .graph_top
+            .min(max_top)
+            .saturating_add_signed(delta)
+            .min(max_top);
+    }
+
     /// Reset the output pane when a captured request actually reaches the head
     /// of KAOS's work queue. Merely enqueueing a request must leave the active
     /// run's trace and returned value intact.
     pub fn begin_run(&mut self, scope: RunScope) {
         self.run_output.clear();
+        self.sigil_chat_visible = false;
         self.runs_visible = true;
         self.graph_focus = true;
         self.run_output_visible = true;
@@ -3134,7 +3605,7 @@ impl Workspace {
         self.graph_top = 0;
         self.graph_left = 0;
         self.message = format!(
-            "running Rebis {}… · ↑/↓ scroll · ⇧↓ tail · Pg scroll · ^C exits Kaos",
+            "running Rebis {}… · ↑/↓ scroll · ⇧↑ top · ⇧↓ tail · Pg scroll · ^C exits Kaos",
             scope.label()
         );
     }
@@ -3151,17 +3622,26 @@ impl Workspace {
             }
         }
         self.run_output.push(line.to_string());
-        self.message =
-            "running Rebis… · ↑/↓ scroll · ⇧↓ tail · Pg scroll · ^C exits Kaos".to_string();
+        self.message = "running Rebis… · ↑/↓ scroll · ⇧↑ top · ⇧↓ tail · Pg scroll · ^C exits Kaos"
+            .to_string();
     }
 
     /// Mark the hosted run complete while retaining its trace in the right pane.
     pub fn finish_run(&mut self, code: i32) {
+        if code == 0 {
+            self.saved_output.clone_from(&self.final_output);
+        }
         self.message = if code == 0 {
-            "Rebis run complete · /run again · :q returns to Kaos".to_string()
+            "Rebis run complete · output retained with this sigil".to_string()
         } else {
             format!("Rebis run exited ({code})")
         };
+    }
+
+    /// A hosted child disappeared without completing the Rebis program. The
+    /// app retains the run request and prompt journal; `p` owns continuation.
+    pub fn pause_run(&mut self, reason: &str) {
+        self.message = format!("Rebis run paused · {reason}");
     }
 
     fn output_lines(&self) -> Vec<String> {
@@ -3908,6 +4388,80 @@ mod tests {
     }
 
     #[test]
+    fn sigil_chat_opens_a_source_bound_right_panel_without_losing_source() {
+        let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+        workspace.dismiss_chaos_star();
+        workspace.editor = Editor::new("(-> \"inspect\" \"report\")");
+        workspace.refresh();
+        let original = workspace.editor.source().to_string();
+
+        workspace.command = "sigil chat".to_string();
+        assert_eq!(
+            workspace.execute_kaos_command(),
+            WorkspaceAction::OpenSigilChat
+        );
+        assert!(workspace.sigil_chat_visible());
+        assert!(workspace.panel_visible);
+        assert!(workspace.graph_focus);
+        assert_eq!(workspace.editor.source(), original);
+
+        for character in "change the final mediator".chars() {
+            workspace.insert_sigil_chat_char(character);
+        }
+        assert_eq!(
+            workspace.take_sigil_chat_message().as_deref(),
+            Some("change the final mediator")
+        );
+        assert!(workspace.sigil_chat_input().is_empty());
+        assert!(workspace
+            .sigil_chat_lines()
+            .iter()
+            .any(|line| line.contains("change the final mediator")));
+        assert_eq!(workspace.editor.source(), original);
+    }
+
+    #[test]
+    fn source_search_repeats_wraps_and_keeps_unicode_cursor_offsets() {
+        let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+        workspace.dismiss_chaos_star();
+        workspace.editor = Editor::new("α first\nβ middle\nβ last");
+        workspace.graph_focus = true;
+
+        workspace.command = "search β".to_string();
+        assert_eq!(workspace.execute_kaos_command(), WorkspaceAction::None);
+        assert_eq!(workspace.editor.row_col(), (1, 0));
+        assert!(
+            !workspace.graph_focus,
+            "a source match must focus the editor"
+        );
+        assert!(workspace.message.contains("2:1"));
+
+        workspace.command = "search".to_string();
+        workspace.execute_kaos_command();
+        assert_eq!(workspace.editor.row_col(), (2, 0));
+        workspace.command = "search".to_string();
+        workspace.execute_kaos_command();
+        assert_eq!(workspace.editor.row_col(), (1, 0));
+        assert!(workspace.message.starts_with("wrapped"));
+
+        let cursor = workspace.editor.cursor();
+        workspace.command = "search absent".to_string();
+        workspace.execute_kaos_command();
+        assert_eq!(workspace.editor.cursor(), cursor);
+        assert!(workspace.message.contains("not found"));
+        assert!(!workspace.editor.dirty());
+    }
+
+    #[test]
+    fn source_search_without_a_previous_query_explains_what_is_missing() {
+        let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+        workspace.dismiss_chaos_star();
+        workspace.command = "search".to_string();
+        workspace.execute_kaos_command();
+        assert!(workspace.message.contains("enter text"));
+    }
+
+    #[test]
     fn runs_command_requests_the_host_run_browser() {
         let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
         workspace.command = "runs".to_string();
@@ -3953,6 +4507,33 @@ mod tests {
                 ..
             }) if input.is_empty()
         ));
+    }
+
+    #[test]
+    fn successful_output_is_retained_but_plain_runs_keep_the_declared_record() {
+        let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+        workspace.editor = Editor::new("\"run this\"");
+        workspace.refresh();
+        workspace.begin_run(RunScope::Program);
+        workspace.push_run_output("result   first checkpoint");
+        workspace.finish_run(0);
+
+        // A later failed attempt may show partial output, but it must not replace
+        // the saved successful output.
+        workspace.begin_run(RunScope::Program);
+        workspace.push_run_output("result   incomplete attempt");
+        workspace.finish_run(3);
+        workspace.command = "run".to_string();
+
+        assert!(matches!(
+            workspace.execute_kaos_command(),
+            WorkspaceAction::Run(RunRequest {
+                input,
+                scope: RunScope::Program,
+                ..
+            }) if input.is_empty()
+        ));
+        assert_eq!(workspace.saved_output.as_deref(), Some("first checkpoint"));
     }
 
     #[test]
@@ -4194,6 +4775,48 @@ mod tests {
         workspace.editor = Editor::new(String::new());
         workspace.open_sigil("repair/loop");
         assert!(workspace.editor.source().contains("(~ fix (x)"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn saved_sigils_restore_their_own_output_sidecars() {
+        let root = std::env::temp_dir().join(format!(
+            "kaos-sigil-output-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+        workspace.sigils_root = root.clone();
+
+        workspace.editor = Editor::new("\"first sigil\"");
+        workspace.refresh();
+        workspace.begin_run(RunScope::Program);
+        workspace.push_run_output("result   first state");
+        workspace.finish_run(0);
+        workspace.save_sigil("first");
+        assert_eq!(
+            fs::read_to_string(root.join("first.output")).unwrap(),
+            "first state"
+        );
+
+        workspace.editor = Editor::new("\"second sigil\"");
+        workspace.refresh();
+        workspace.begin_run(RunScope::Program);
+        workspace.push_run_output("result   second state");
+        workspace.finish_run(0);
+        workspace.save_sigil("second");
+
+        workspace.open_sigil("first");
+        assert_eq!(workspace.final_output.as_deref(), Some("first state"));
+        workspace.command = "run".to_string();
+        assert!(matches!(
+            workspace.execute_kaos_command(),
+            WorkspaceAction::Run(RunRequest { input, .. }) if input.is_empty()
+        ));
+
+        workspace.open_sigil("second");
+        assert_eq!(workspace.final_output.as_deref(), Some("second state"));
         let _ = fs::remove_dir_all(&root);
     }
 

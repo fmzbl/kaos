@@ -8,6 +8,8 @@
 //! long/agent commands stream live. The model is passed down via `KAOS_MODEL`.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -34,17 +36,59 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::rebis_workspace::{
     self, Highlight, Mode as RebisMode, NormalAction, RunRequest, RunScope, Visualization,
-    Workspace as RebisWorkspace, WorkspaceAction,
+    Workspace as RebisWorkspace, WorkspaceAction, WorkspaceEvent,
 };
 use crate::theme;
 
-const C_RED: Color = Color::Rgb(220, 40, 48);
-const C_OX: Color = Color::Rgb(120, 24, 28);
-const C_ASH: Color = Color::Rgb(150, 140, 140);
-const C_BONE: Color = Color::Rgb(235, 225, 222);
-const C_GOLD: Color = Color::Rgb(210, 155, 72);
-const C_TEAL: Color = Color::Rgb(72, 176, 166);
-const C_BLUE: Color = Color::Rgb(92, 126, 196);
+// The terminal palette, resolved once at startup from the configured mode
+// (`/theme dark|light`). Monochrome by design: the shapes and rules carry the
+// meaning, so colour only separates figure from ground.
+fn tone(rgb: (u8, u8, u8)) -> Color {
+    Color::Rgb(rgb.0, rgb.1, rgb.2)
+}
+fn c_ink() -> Color {
+    tone(crate::theme::current().ink)
+}
+fn c_faint() -> Color {
+    tone(crate::theme::current().faint)
+}
+static PALETTE: std::sync::LazyLock<crate::theme::Palette> =
+    std::sync::LazyLock::new(crate::theme::current);
+#[allow(non_snake_case)]
+fn C_RED() -> Color {
+    tone(PALETTE.ink)
+}
+#[allow(non_snake_case)]
+fn C_OX() -> Color {
+    tone(PALETTE.faint)
+}
+#[allow(non_snake_case)]
+fn C_ASH() -> Color {
+    tone(PALETTE.faint)
+}
+#[allow(non_snake_case)]
+fn C_BONE() -> Color {
+    tone(PALETTE.ink)
+}
+// The accents. With colour gone these separate by brightness instead of hue,
+// which is why the palette carries a `mid` tone between ink and faint.
+#[allow(non_snake_case)]
+fn C_GOLD() -> Color {
+    tone(PALETTE.ink)
+}
+#[allow(non_snake_case)]
+fn C_TEAL() -> Color {
+    tone(PALETTE.mid)
+}
+#[allow(non_snake_case)]
+fn C_BLUE() -> Color {
+    tone(PALETTE.faint)
+}
+/// A finished run. Formerly green; now simply the brightest tone.
+#[allow(non_snake_case)]
+fn C_DONE() -> Color {
+    tone(PALETTE.ink)
+}
 /// Internal marker distinguishing a literal chat intent from `/code`'s CLI
 /// grammar (`[dir] [xK] task -- gate`). It is consumed before spawning.
 const RAW_CHAT_TASK_ARG: &str = "__kaos_raw_chat_task__";
@@ -115,6 +159,13 @@ const REBIS_SLASH_COMMANDS: &[CommandSpec] = &[
     command("output copy", "output copy"),
     command("output write [FILE]", "output write "),
     command("mandala", "mandala"),
+    command("visual", "visual"),
+    command("visual open", "visual open"),
+    command("theme dark", "theme dark"),
+    command("theme light", "theme light"),
+    command("sessions", "sessions"),
+    command("resume [N|id]", "resume "),
+    command("forget-session [N|id]", "forget-session "),
     command("tree", "tree"),
     command("graph", "graph"),
     command("source", "source"),
@@ -123,7 +174,9 @@ const REBIS_SLASH_COMMANDS: &[CommandSpec] = &[
     command("panel show", "panel show"),
     command("format", "format"),
     command("format!", "format!"),
+    command("search [TEXT]", "search "),
     command("sigils [QUERY]", "sigils "),
+    command("sigil chat", "sigil chat"),
     command("sigil save [NAME]", "sigil save "),
     command("sigil open [NAME|temp:N]", "sigil open "),
     command("record [FILE]", "record "),
@@ -176,7 +229,7 @@ fn missing_command_argument(query: &str, command: CommandSpec) -> bool {
 }
 
 fn red_bold() -> Style {
-    Style::new().fg(C_RED).add_modifier(Modifier::BOLD)
+    Style::new().fg(C_RED()).add_modifier(Modifier::BOLD)
 }
 
 /// Render a status line while reserving the right edge for the selected model.
@@ -193,7 +246,7 @@ fn render_footer_with_model(f: &mut Frame, area: Rect, status: Line<'_>, model: 
             badge,
             Style::new()
                 .fg(Color::Black)
-                .bg(C_GOLD)
+                .bg(C_GOLD())
                 .add_modifier(Modifier::BOLD),
         ))
         .alignment(Alignment::Right),
@@ -276,6 +329,9 @@ struct Job {
     /// Identity of a hosted Rebis run. Its stream is retained in the run tree
     /// as well as the workspace output pane and chat transcript.
     rebis_run_id: Option<u64>,
+    /// Hosted children lead their own process group, so pause/cancel includes
+    /// model and command descendants instead of orphaning them.
+    owns_process_group: bool,
 }
 
 struct ChildTransport {
@@ -317,6 +373,180 @@ struct JobPoll {
     done: Option<i32>,
 }
 
+/// One isolated supervisory turn. The model edits a private bridge copy, never
+/// the live editor buffer directly; completion validates and merges that copy
+/// against the exact source revision on which the turn began.
+struct SigilChatJob {
+    job: Job,
+    base_source: String,
+    bridge_dir: PathBuf,
+    run_id: Option<u64>,
+    /// The channel paused this run, so a completed turn should continue it.
+    /// A run that was already paused remains paused for the user to inspect.
+    resume_after: bool,
+}
+
+const SAVED_REBIS_RUN_HEADER: &str = "KAOS_REBIS_SAVED_RUN_V1\n";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SavedRebisRun {
+    source: String,
+    input: String,
+    scope: RunScope,
+    parallel: bool,
+    chaos: bool,
+    output: Vec<String>,
+    elapsed: Duration,
+    pause_reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SigilRunControl {
+    Pause(u64),
+    Resume(u64),
+    ApplyDirective(u64),
+    ClearDirective(u64),
+}
+
+fn parse_sigil_run_controls(source: &str) -> Result<Vec<SigilRunControl>, String> {
+    let mut controls = Vec::new();
+    for (line_index, raw) in source.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut words = line.split_whitespace();
+        let command = words.next().unwrap_or_default();
+        let id = words
+            .next()
+            .ok_or_else(|| format!("control line {} has no run id", line_index + 1))?
+            .parse::<u64>()
+            .map_err(|_| format!("control line {} has an invalid run id", line_index + 1))?;
+        if words.next().is_some() {
+            return Err(format!(
+                "control line {} has unexpected trailing text",
+                line_index + 1
+            ));
+        }
+        controls.push(match command {
+            "PAUSE" => SigilRunControl::Pause(id),
+            "RESUME" => SigilRunControl::Resume(id),
+            "APPLY_DIRECTIVE" => SigilRunControl::ApplyDirective(id),
+            "CLEAR_DIRECTIVE" => SigilRunControl::ClearDirective(id),
+            _ => {
+                return Err(format!(
+                    "control line {} uses unknown action {command:?}",
+                    line_index + 1
+                ))
+            }
+        });
+    }
+    Ok(controls)
+}
+
+fn push_saved_run_field(encoded: &mut Vec<u8>, value: &str) {
+    encoded.extend_from_slice(value.len().to_string().as_bytes());
+    encoded.push(b'\n');
+    encoded.extend_from_slice(value.as_bytes());
+    encoded.push(b'\n');
+}
+
+fn take_saved_run_field(encoded: &mut &[u8]) -> Result<String, String> {
+    let Some(newline) = encoded.iter().position(|byte| *byte == b'\n') else {
+        return Err("saved run field has no length terminator".to_string());
+    };
+    let length = std::str::from_utf8(&encoded[..newline])
+        .map_err(|_| "saved run field length is not UTF-8".to_string())?
+        .parse::<usize>()
+        .map_err(|_| "saved run field length is not a number".to_string())?;
+    *encoded = &encoded[newline + 1..];
+    if encoded.len() < length + 1 || encoded[length] != b'\n' {
+        return Err("saved run field is truncated".to_string());
+    }
+    let value = String::from_utf8(encoded[..length].to_vec())
+        .map_err(|_| "saved run field is not UTF-8".to_string())?;
+    *encoded = &encoded[length + 1..];
+    Ok(value)
+}
+
+fn encode_saved_rebis_run(saved: &SavedRebisRun) -> Vec<u8> {
+    let mut encoded = SAVED_REBIS_RUN_HEADER.as_bytes().to_vec();
+    push_saved_run_field(&mut encoded, &saved.source);
+    push_saved_run_field(&mut encoded, &saved.input);
+    push_saved_run_field(
+        &mut encoded,
+        match saved.scope {
+            RunScope::Program => "program",
+            RunScope::Block => "block",
+        },
+    );
+    push_saved_run_field(&mut encoded, if saved.parallel { "1" } else { "0" });
+    push_saved_run_field(&mut encoded, if saved.chaos { "1" } else { "0" });
+    push_saved_run_field(&mut encoded, &saved.elapsed.as_millis().to_string());
+    push_saved_run_field(&mut encoded, &saved.pause_reason);
+    push_saved_run_field(&mut encoded, &saved.output.len().to_string());
+    for line in &saved.output {
+        push_saved_run_field(&mut encoded, line);
+    }
+    encoded
+}
+
+fn decode_saved_rebis_run(encoded: &[u8]) -> Result<SavedRebisRun, String> {
+    let Some(mut fields) = encoded.strip_prefix(SAVED_REBIS_RUN_HEADER.as_bytes()) else {
+        return Err("unrecognized saved Rebis run format".to_string());
+    };
+    let source = take_saved_run_field(&mut fields)?;
+    let input = take_saved_run_field(&mut fields)?;
+    let scope = match take_saved_run_field(&mut fields)?.as_str() {
+        "program" => RunScope::Program,
+        "block" => RunScope::Block,
+        _ => return Err("saved Rebis run has an invalid scope".to_string()),
+    };
+    let parallel = match take_saved_run_field(&mut fields)?.as_str() {
+        "0" => false,
+        "1" => true,
+        _ => return Err("saved Rebis run has an invalid parallel flag".to_string()),
+    };
+    let chaos = match take_saved_run_field(&mut fields)?.as_str() {
+        "0" => false,
+        "1" => true,
+        _ => return Err("saved Rebis run has an invalid chaos flag".to_string()),
+    };
+    let elapsed_ms = take_saved_run_field(&mut fields)?
+        .parse::<u64>()
+        .map_err(|_| "saved Rebis run has an invalid elapsed time".to_string())?;
+    let pause_reason = take_saved_run_field(&mut fields)?;
+    let output_count = take_saved_run_field(&mut fields)?
+        .parse::<usize>()
+        .map_err(|_| "saved Rebis run has an invalid output count".to_string())?;
+    let mut output = Vec::with_capacity(output_count);
+    for _ in 0..output_count {
+        output.push(take_saved_run_field(&mut fields)?);
+    }
+    if !fields.is_empty() {
+        return Err("saved Rebis run has trailing data".to_string());
+    }
+    Ok(SavedRebisRun {
+        source,
+        input,
+        scope,
+        parallel,
+        chaos,
+        output,
+        elapsed: Duration::from_millis(elapsed_ms),
+        pause_reason,
+    })
+}
+
+fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(temporary, path)
+}
+
 fn poll_job(job: &Job) -> JobPoll {
     let mut lines = Vec::new();
     let mut done = None;
@@ -347,7 +577,9 @@ enum RebisRunState {
     AwaitingPermission,
     Queued,
     Running,
-    Complete(i32),
+    /// The program reached its successful result. Non-success exits remain
+    /// `Running` + paused and therefore cannot enter a terminal failure state.
+    Complete,
     Cancelled,
 }
 
@@ -356,6 +588,21 @@ enum RebisRunState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RebisRunEntry {
     id: u64,
+    /// Saved-sigil identity and durable sidecars, when this unfinished run has
+    /// been attached by `/sigil save` or restored by `/sigil open`.
+    sigil: Option<String>,
+    saved_run_path: Option<PathBuf>,
+    saved_checkpoint_path: Option<PathBuf>,
+    /// Captured source/input used both for the first child and for a replacement
+    /// child. Ordinary editor changes cannot touch it; an explicit guarded
+    /// `/sigil chat` revision may replace only `source` while preserving input,
+    /// identity, trace, timers, and the prompt journal.
+    request: RunRequest,
+    /// Completed prompt answers, committed before the interpreter advances.
+    checkpoint_path: PathBuf,
+    /// Persistent guidance read by the child before every unfinished prompt.
+    /// `/sigil chat` is the only writer; checkpoint replays ignore it.
+    directive_path: PathBuf,
     scope: RunScope,
     preview: String,
     state: RebisRunState,
@@ -374,6 +621,9 @@ struct RebisRunEntry {
     /// A running run whose subprocess has been suspended (SIGSTOP) with `p`.
     /// It stays `Running` but makes no progress until resumed (SIGCONT).
     paused: bool,
+    pause_reason: Option<String>,
+    paused_at: Option<Instant>,
+    paused_total: Duration,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -516,10 +766,19 @@ pub struct App {
     hist_nav: Option<usize>,
     stash: String,
     model: String, // "sim" | "claude" | "ollama:<model>"
+    /// The conversation as durable data, saved on exit and reloadable with
+    /// `/chat resume`. Separate from `transcript`, which is the rendered screen.
+    session: crate::sessions::Session,
+    /// Plain text streamed by the running job, flushed into `session` as one
+    /// model turn when the job finishes.
+    session_reply: String,
     cwd: PathBuf,
     job: Option<Job>,
     /// Opt-in Rebis evaluations running beside the shared serial job.
     parallel_jobs: Vec<Job>,
+    /// Source-bound god-agent turn running beside Rebis without occupying its
+    /// serial FIFO or ordinary chat conversation.
+    sigil_chat_job: Option<SigilChatJob>,
     /// When the current job started (for the spinner + elapsed clock).
     job_start: Option<Instant>,
     /// The agent's latest activity — the most recent non-empty output line — shown
@@ -602,6 +861,9 @@ fn run_with_rebis(rebis_path: Option<Option<&str>>) -> io::Result<()> {
         app.open_rebis(path);
     }
     let res = app.run_loop(&mut terminal);
+    // Persist before tearing the terminal down, so a session survives any exit
+    // path — /quit, Ctrl-C, or an error out of the loop.
+    app.save_session();
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(io::stdout(), DisableMouseCapture);
     let _ = execute!(io::stdout(), DisableBracketedPaste);
@@ -635,9 +897,15 @@ impl App {
                 &std::env::var("KAOS_MODEL").unwrap_or_else(|_| "sim".to_string()),
             )
             .canonical(),
+            session: crate::sessions::Session::new(
+                std::env::var("KAOS_MODEL").unwrap_or_else(|_| "sim".to_string()),
+                cwd.display().to_string(),
+            ),
+            session_reply: String::new(),
             cwd,
             job: None,
             parallel_jobs: Vec::new(),
+            sigil_chat_job: None,
             job_start: None,
             activity: String::new(),
             // Honour a pre-set env var; otherwise leave undecided so the first
@@ -680,11 +948,11 @@ impl App {
         self.push_line(Line::raw(""));
         self.push_line(Line::from(vec![
             Span::styled("✴ kaos", red_bold()),
-            Span::styled("  — the Pact convenes.", Style::new().fg(C_ASH)),
+            Span::styled("  — the Pact convenes.", Style::new().fg(C_ASH())),
         ]));
         self.push_line(Line::from(Span::styled(
             "speak an intent — the adept works these files · /cast for a one-shot · /help",
-            Style::new().fg(C_ASH),
+            Style::new().fg(C_ASH()),
         )));
         self.push_line(Line::raw(""));
     }
@@ -885,12 +1153,32 @@ impl App {
         let now = Instant::now();
         let already_started = matches!(
             state,
-            RebisRunState::Running | RebisRunState::Complete(_) | RebisRunState::Cancelled
+            RebisRunState::Running | RebisRunState::Complete | RebisRunState::Cancelled
         );
-        let already_finished =
-            matches!(state, RebisRunState::Complete(_) | RebisRunState::Cancelled);
+        let already_finished = matches!(state, RebisRunState::Complete | RebisRunState::Cancelled);
+        let workspace = if self.config_editor {
+            self.config_return_rebis
+                .as_ref()
+                .or(self.suspended_rebis.as_ref())
+        } else {
+            self.rebis.as_ref().or(self.suspended_rebis.as_ref())
+        };
+        let saved_identity = workspace.and_then(|workspace| {
+            workspace.current_sigil().map(|name| {
+                let (run_path, checkpoint_path) = workspace.sigil_resume_paths(name);
+                (name.to_string(), run_path, checkpoint_path)
+            })
+        });
         self.rebis_runs.push(RebisRunEntry {
             id,
+            sigil: saved_identity.as_ref().map(|saved| saved.0.clone()),
+            saved_run_path: saved_identity.as_ref().map(|saved| saved.1.clone()),
+            saved_checkpoint_path: saved_identity.as_ref().map(|saved| saved.2.clone()),
+            request: request.clone(),
+            checkpoint_path: std::env::temp_dir()
+                .join(format!("kaos-rebis-{}-{id}.checkpoint", self.session_id)),
+            directive_path: std::env::temp_dir()
+                .join(format!("kaos-rebis-{}-{id}.directive", self.session_id)),
             scope: request.scope,
             preview: rebis_source_preview(&request.source),
             state,
@@ -902,13 +1190,23 @@ impl App {
             parallel,
             chaos: self.rebis_chaos_mode,
             paused: false,
+            pause_reason: None,
+            paused_at: None,
+            paused_total: Duration::ZERO,
         });
         self.rebis_run_choice = self.rebis_runs.len() - 1;
         id
     }
 
     fn has_active_jobs(&self) -> bool {
-        self.job.is_some() || !self.parallel_jobs.is_empty()
+        self.job.is_some()
+            || !self.parallel_jobs.is_empty()
+            || self.rebis_runs.iter().any(|run| {
+                !run.parallel
+                    && run.state == RebisRunState::Running
+                    && run.paused
+                    && self.job_for_run(run.id).is_none()
+            })
     }
 
     fn rebis_run_views(&self) -> Vec<RebisRunView> {
@@ -1001,19 +1299,16 @@ impl App {
                 }
                 RebisRunState::Queued => "queued · u/Delete removes · Tab expands",
                 RebisRunState::Running if run.paused => {
-                    "paused · p resumes · Tab stream · ↑/↓ scroll · ^C stops the run"
+                    "paused · p resumes · Tab stream · ↑/↓ scroll · ^C cancels the run"
                 }
                 RebisRunState::Running => {
-                    "running · p pauses · Tab stream · ↑/↓ scroll · ⇧↓ tail · ^C stops the run"
+                    "running · p pauses · Tab stream · ↑/↓ scroll · ⇧↑ top · ⇧↓ tail · ^C stops the run"
                 }
-                RebisRunState::Complete(0) => {
-                    "complete · Tab stream · ↑/↓ scroll · ⇧↓ tail · Pg scroll · u/Delete removes"
-                }
-                RebisRunState::Complete(_) => {
-                    "exited · Tab stream · ↑/↓ scroll · ⇧↓ tail · Pg scroll · u/Delete removes"
+                RebisRunState::Complete => {
+                    "complete · Tab stream · ↑/↓ scroll · ⇧↑ top · ⇧↓ tail · Pg scroll · u/Delete removes"
                 }
                 RebisRunState::Cancelled => {
-                    "cancelled · Tab stream · ↑/↓ scroll · ⇧↓ tail · Pg scroll · u/Delete removes"
+                    "cancelled · Tab stream · ↑/↓ scroll · ⇧↑ top · ⇧↓ tail · Pg scroll · u/Delete removes"
                 }
             };
             format!(
@@ -1042,22 +1337,21 @@ impl App {
 
     /// The subprocess of the run with `id`, whether it is the active serial job
     /// or one of the independent parallel jobs.
-    fn job_child_for_run(&self, id: u64) -> Option<&Arc<Mutex<Child>>> {
+    fn job_for_run(&self, id: u64) -> Option<&Job> {
         if let Some(job) = &self.job {
             if job.rebis_run_id == Some(id) {
-                return Some(&job.child);
+                return Some(job);
             }
         }
         self.parallel_jobs
             .iter()
             .find(|job| job.rebis_run_id == Some(id))
-            .map(|job| &job.child)
     }
 
-    /// Suspend or resume the selected run's subprocess with `p`. A running run
-    /// is stopped with SIGSTOP (it stays alive but makes no progress) and a
-    /// paused run is resumed with SIGCONT. Only a live `Running` run has a
-    /// subprocess to signal; anything else is a no-op with an explanatory note.
+    /// Suspend or resume the selected run with `p`. A live child receives
+    /// SIGSTOP/SIGCONT. If an interrupted child has already exited, `p` launches
+    /// a replacement from the captured request; its prompt journal replays every
+    /// completed answer and retries the first unfinished prompt.
     fn toggle_pause_selected_rebis_run(&mut self) -> bool {
         self.clamp_rebis_run_choice();
         let Some(selected) = self.rebis_runs.get(self.rebis_run_choice) else {
@@ -1071,24 +1365,40 @@ impl App {
         }
         let id = selected.id;
         let resume = selected.paused;
-        let Some(child) = self.job_child_for_run(id) else {
+        let request = selected.request.clone();
+        let parallel = selected.parallel;
+        if resume && self.job_for_run(id).is_none() {
+            if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+                resume_rebis_run_clock(run);
+                run.output.push(
+                    "resumed     ▶ rebuilding completed prompts · retrying first unfinished prompt"
+                        .to_string(),
+                );
+            }
+            self.start_rebis_run(id, request, parallel);
+            if let Some(workspace) = &mut self.rebis {
+                workspace.message =
+                    "run resumed from its last completed prompt · failed prompt will retry"
+                        .to_string();
+            }
+            return true;
+        }
+        let Some(job) = self.job_for_run(id) else {
             if let Some(workspace) = &mut self.rebis {
                 workspace.message = "this run has no live subprocess to pause".to_string();
             }
             return false;
         };
-        let pid = child
+        let pid = job
+            .child
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .id();
-        // No signal crate: `kill` sends SIGSTOP/SIGCONT to the child process.
+        let owns_process_group = job.owns_process_group;
+        // No signal crate: `kill` sends SIGSTOP/SIGCONT to the child or its
+        // hosted process group.
         let signal = if resume { "-CONT" } else { "-STOP" };
-        let sent = Command::new("kill")
-            .arg(signal)
-            .arg(pid.to_string())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
+        let sent = signal_process(pid, owns_process_group, signal);
         if !sent {
             if let Some(workspace) = &mut self.rebis {
                 workspace.message = "could not signal the run's subprocess".to_string();
@@ -1096,9 +1406,13 @@ impl App {
             return false;
         }
         if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
-            run.paused = !resume;
+            if resume {
+                resume_rebis_run_clock(run);
+            } else {
+                pause_rebis_run_clock(run, "paused manually");
+            }
             run.output.push(if resume {
-                "resumed     ▶ run continues".to_string()
+                "resumed     ▶ run continues at the current prompt".to_string()
             } else {
                 "paused      ⏸ run suspended · p resumes".to_string()
             });
@@ -1109,6 +1423,9 @@ impl App {
             } else {
                 "run paused · p resumes".to_string()
             };
+        }
+        if !resume {
+            let _ = self.persist_rebis_run(id);
         }
         true
     }
@@ -1129,6 +1446,9 @@ impl App {
         }
         let id = selected.id;
         let scope = selected.scope;
+        let checkpoint_path = selected.checkpoint_path.clone();
+        let directive_path = selected.directive_path.clone();
+        let durable_checkpoint = selected.saved_checkpoint_path.as_ref() == Some(&checkpoint_path);
         let was_queued = selected.state == RebisRunState::Queued;
         let was_awaiting_permission = selected.state == RebisRunState::AwaitingPermission;
         if was_awaiting_permission {
@@ -1152,6 +1472,10 @@ impl App {
             }
         }
         self.rebis_runs.remove(self.rebis_run_choice);
+        if !durable_checkpoint {
+            let _ = std::fs::remove_file(checkpoint_path);
+        }
+        let _ = std::fs::remove_file(directive_path);
         self.clamp_rebis_run_choice();
         let label = format!("Rebis {}", scope.label());
         if was_awaiting_permission || was_queued {
@@ -1166,8 +1490,8 @@ impl App {
                 })
                 .count();
             self.push_line(Line::from(vec![
-                Span::styled("↶ unqueued ", Style::new().fg(C_GOLD)),
-                Span::styled(label.clone(), Style::new().fg(C_BONE)),
+                Span::styled("↶ unqueued ", Style::new().fg(C_GOLD())),
+                Span::styled(label.clone(), Style::new().fg(C_BONE())),
             ]));
             if let Some(workspace) = &mut self.rebis {
                 workspace.message = if remaining == 0 {
@@ -1203,6 +1527,91 @@ impl App {
         }
     }
 
+    /// Route a wheel step through the pane geometry captured by the last draw.
+    /// Source scrolling detaches from the stationary edit cursor; keyboard
+    /// input reattaches it. Every vertical target clamps at its real end.
+    fn on_mouse_scroll(
+        &mut self,
+        delta: isize,
+        column: u16,
+        row: u16,
+        modifiers: KeyModifiers,
+        size: (u16, u16),
+    ) {
+        self.text_selection = None;
+        if self.rebis.is_none() {
+            if delta < 0 {
+                self.scroll_up(3);
+            } else {
+                self.scroll_down(3);
+            }
+            return;
+        }
+        if self
+            .rebis
+            .as_mut()
+            .is_some_and(RebisWorkspace::dismiss_chaos_star)
+        {
+            return;
+        }
+        let position = Position { x: column, y: row };
+        let pane = self
+            .text_panes
+            .iter()
+            .find(|pane| point_in_rect(position, pane.area))
+            .map(|pane| (pane.kind, pane.content_area()))
+            .unwrap_or_else(|| {
+                let workspace = self.rebis.as_ref().expect("checked above");
+                let kind = if mouse_over_rebis_graph(workspace, column, row, size) {
+                    TextPaneKind::RebisPanel
+                } else {
+                    TextPaneKind::RebisSource
+                };
+                (kind, Rect::new(0, 0, size.0.max(1), size.1.max(1)))
+            });
+        let vertical_amount = delta.saturating_mul(3);
+        let horizontal_amount = delta.saturating_mul(4);
+        match pane.0 {
+            TextPaneKind::Chat => {
+                if delta < 0 {
+                    self.scroll_up(3);
+                } else {
+                    self.scroll_down(3);
+                }
+            }
+            TextPaneKind::RebisPanel => {
+                let runs_visible = self
+                    .rebis
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.runs_visible);
+                if modifiers.contains(KeyModifiers::SHIFT) {
+                    if let Some(workspace) = &mut self.rebis {
+                        workspace.graph_left = workspace
+                            .graph_left
+                            .saturating_add_signed(horizontal_amount);
+                    }
+                } else if runs_visible {
+                    if let Some(workspace) = &mut self.rebis {
+                        workspace.graph_focus = true;
+                    }
+                    self.scroll_rebis_runs(vertical_amount);
+                } else if let Some(workspace) = &mut self.rebis {
+                    workspace.scroll_graph_vertical(vertical_amount, pane.1.height as usize);
+                }
+            }
+            TextPaneKind::RebisSource => {
+                if let Some(workspace) = &mut self.rebis {
+                    if modifiers.contains(KeyModifiers::SHIFT) {
+                        workspace
+                            .scroll_source_horizontal(horizontal_amount, pane.1.width as usize);
+                    } else {
+                        workspace.scroll_source_vertical(vertical_amount, pane.1.height as usize);
+                    }
+                }
+            }
+        }
+    }
+
     fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
@@ -1214,68 +1623,20 @@ impl App {
                     }
                     Event::Paste(text) => self.on_paste(&text),
                     Event::Mouse(m) => match m.kind {
-                        MouseEventKind::ScrollUp => {
-                            self.text_selection = None;
-                            let run_max_top = self.rebis_run_max_top();
-                            if let Some(workspace) = &mut self.rebis {
-                                if !workspace.dismiss_chaos_star() {
-                                    let over_graph = mouse_over_rebis_graph(
-                                        workspace,
-                                        m.column,
-                                        m.row,
-                                        crossterm::terminal::size().unwrap_or((80, 24)),
-                                    );
-                                    if over_graph && m.modifiers.contains(KeyModifiers::SHIFT) {
-                                        workspace.graph_left =
-                                            workspace.graph_left.saturating_sub(4);
-                                    } else if over_graph && workspace.runs_visible {
-                                        workspace.graph_focus = true;
-                                        self.rebis_run_top =
-                                            self.rebis_run_top.min(run_max_top).saturating_sub(3);
-                                    } else if over_graph {
-                                        workspace.graph_top = workspace.graph_top.saturating_sub(3);
-                                    } else if m.modifiers.contains(KeyModifiers::SHIFT) {
-                                        workspace.view_left = workspace.view_left.saturating_sub(4);
-                                    } else {
-                                        workspace.view_top = workspace.view_top.saturating_sub(3);
-                                    }
-                                }
-                            } else {
-                                self.scroll_up(3);
-                            }
-                        }
-                        MouseEventKind::ScrollDown => {
-                            self.text_selection = None;
-                            let run_max_top = self.rebis_run_max_top();
-                            if let Some(workspace) = &mut self.rebis {
-                                if !workspace.dismiss_chaos_star() {
-                                    let over_graph = mouse_over_rebis_graph(
-                                        workspace,
-                                        m.column,
-                                        m.row,
-                                        crossterm::terminal::size().unwrap_or((80, 24)),
-                                    );
-                                    if over_graph && m.modifiers.contains(KeyModifiers::SHIFT) {
-                                        workspace.graph_left += 4;
-                                    } else if over_graph && workspace.runs_visible {
-                                        workspace.graph_focus = true;
-                                        self.rebis_run_top = self
-                                            .rebis_run_top
-                                            .min(run_max_top)
-                                            .saturating_add(3)
-                                            .min(run_max_top);
-                                    } else if over_graph {
-                                        workspace.graph_top += 3;
-                                    } else if m.modifiers.contains(KeyModifiers::SHIFT) {
-                                        workspace.view_left += 4;
-                                    } else {
-                                        workspace.view_top += 3;
-                                    }
-                                }
-                            } else {
-                                self.scroll_down(3);
-                            }
-                        }
+                        MouseEventKind::ScrollUp => self.on_mouse_scroll(
+                            -1,
+                            m.column,
+                            m.row,
+                            m.modifiers,
+                            crossterm::terminal::size().unwrap_or((80, 24)),
+                        ),
+                        MouseEventKind::ScrollDown => self.on_mouse_scroll(
+                            1,
+                            m.column,
+                            m.row,
+                            m.modifiers,
+                            crossterm::terminal::size().unwrap_or((80, 24)),
+                        ),
                         MouseEventKind::Down(MouseButton::Left) => {
                             // The entry star remains a one-event veil. Once it
                             // is gone, defer pane clicks until mouse-up so a drag
@@ -1354,7 +1715,7 @@ impl App {
         const PROMPT: &str = "✴ ❯ ";
         let full_w = f.area().width.max(1) as usize;
         let mut input_cells: Vec<(char, Style)> = PROMPT.chars().map(|c| (c, red_bold())).collect();
-        let bone = Style::new().fg(C_BONE);
+        let bone = Style::new().fg(C_BONE());
         input_cells.extend(self.input.chars().map(|c| (c, bone)));
         let input_rows = hard_wrap(&input_cells, full_w);
         let cursor_cell = PROMPT.chars().count() + self.cursor;
@@ -1381,7 +1742,7 @@ impl App {
         let title = Line::from(vec![
             Span::styled("✴ kaos", red_bold()),
             Span::raw("   "),
-            Span::styled(format!("mind:{mind}"), Style::new().fg(C_ASH)),
+            Span::styled(format!("mind:{mind}"), Style::new().fg(C_ASH())),
         ]);
         f.render_widget(Paragraph::new(title), rows[0]);
 
@@ -1437,10 +1798,10 @@ impl App {
                         if index == selected {
                             Style::new()
                                 .fg(Color::Black)
-                                .bg(C_TEAL)
+                                .bg(C_TEAL())
                                 .add_modifier(Modifier::BOLD)
                         } else {
-                            Style::new().fg(C_BONE)
+                            Style::new().fg(C_BONE())
                         },
                     ))
                 })
@@ -1462,7 +1823,7 @@ impl App {
                 Span::styled("grant full authority?  ", red_bold()),
                 Span::styled(
                     "[y] unbound   [n] edits only   [Esc] cancel",
-                    Style::new().fg(C_ASH),
+                    Style::new().fg(C_ASH()),
                 ),
             ])
         } else {
@@ -1476,9 +1837,33 @@ impl App {
     fn status_line(&self, rows: &[ratatui::layout::Rect], max_scroll: u16) -> Line<'static> {
         match (&self.job, self.job_start) {
             (Some(job), Some(start)) => {
-                let ms = start.elapsed().as_millis();
+                if let Some(run) = job.rebis_run_id.and_then(|id| {
+                    self.rebis_runs
+                        .iter()
+                        .find(|run| run.id == id && run.paused)
+                }) {
+                    return Line::from(vec![
+                        Span::styled(
+                            "Ⅱ paused  ",
+                            Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(job.label.clone(), Style::new().fg(C_BONE())),
+                        Span::styled(
+                            format!(
+                                "  {} · p resumes",
+                                run.pause_reason.as_deref().unwrap_or("waiting")
+                            ),
+                            Style::new().fg(C_ASH()),
+                        ),
+                    ]);
+                }
+                let elapsed = job
+                    .rebis_run_id
+                    .and_then(|id| self.rebis_runs.iter().find(|run| run.id == id))
+                    .map_or_else(|| start.elapsed(), active_rebis_run_elapsed);
+                let ms = elapsed.as_millis();
                 let frame = SPIN[(ms / 90) as usize % SPIN.len()];
-                let secs = start.elapsed().as_secs();
+                let secs = elapsed.as_secs();
                 // Budget the activity text to the remaining width so it never wraps.
                 let queued = if self.queue.is_empty() {
                     String::new()
@@ -1495,18 +1880,18 @@ impl App {
                 let act = truncate(&self.activity, room.max(4));
                 Line::from(vec![
                     Span::styled(format!("{frame} "), red_bold()),
-                    Span::styled(job.label.clone(), Style::new().fg(C_BONE)),
-                    Span::styled(format!("  {secs}s"), Style::new().fg(C_OX)),
-                    Span::styled(parallel, Style::new().fg(C_TEAL)),
-                    Span::styled(queued, Style::new().fg(C_ASH)),
+                    Span::styled(job.label.clone(), Style::new().fg(C_BONE())),
+                    Span::styled(format!("  {secs}s"), Style::new().fg(C_OX())),
+                    Span::styled(parallel, Style::new().fg(C_TEAL())),
+                    Span::styled(queued, Style::new().fg(C_ASH())),
                     Span::styled(
                         "  ".to_string() + &act,
-                        Style::new().fg(C_ASH).add_modifier(Modifier::ITALIC),
+                        Style::new().fg(C_ASH()).add_modifier(Modifier::ITALIC),
                     ),
                 ])
             }
             _ if !self.parallel_jobs.is_empty() => Line::from(vec![
-                Span::styled("∥ ", Style::new().fg(C_TEAL).add_modifier(Modifier::BOLD)),
+                Span::styled("∥ ", Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format!(
                         "{} parallel Rebis run{} active",
@@ -1517,11 +1902,11 @@ impl App {
                             "s"
                         }
                     ),
-                    Style::new().fg(C_BONE),
+                    Style::new().fg(C_BONE()),
                 ),
                 Span::styled(
                     format!("  ⧗{} serial", self.queue.len()),
-                    Style::new().fg(C_ASH),
+                    Style::new().fg(C_ASH()),
                 ),
             ]),
             _ if !self.follow => {
@@ -1532,7 +1917,7 @@ impl App {
                     Span::styled("\u{25b2} scrollback ", red_bold()),
                     Span::styled(
                         format!("{above} above · {below} below — PgDn / End to return to live"),
-                        Style::new().fg(C_ASH),
+                        Style::new().fg(C_ASH()),
                     ),
                 ])
             }
@@ -1549,7 +1934,7 @@ impl App {
                         short_path(&self.cwd)
                     )
                 };
-                Line::from(Span::styled(hint, Style::new().fg(C_ASH)))
+                Line::from(Span::styled(hint, Style::new().fg(C_ASH())))
             }
         }
     }
@@ -1557,15 +1942,53 @@ impl App {
     // ── streaming ──────────────────────────────────────────────────
 
     fn pump(&mut self) {
+        self.handle_workspace_events();
+        let mut live_run_changed = false;
+        let sigil_chat_poll = self.sigil_chat_job.as_ref().map(|turn| poll_job(&turn.job));
+        if let Some(poll) = sigil_chat_poll {
+            for line in poll.lines {
+                let rendered = match crate::fold::classify(&line) {
+                    crate::fold::Marker::Open(summary) => {
+                        Some(format!("god     ▶ {}", strip_ansi(summary)))
+                    }
+                    crate::fold::Marker::Close => None,
+                    crate::fold::Marker::Line(content) => {
+                        let content = strip_ansi(content);
+                        (!content.trim().is_empty()).then(|| format!("god     {content}"))
+                    }
+                };
+                if let (Some(workspace), Some(rendered)) =
+                    (self.background_rebis_workspace(), rendered)
+                {
+                    workspace.push_sigil_chat_line(rendered);
+                }
+            }
+            if let Some(code) = poll.done {
+                let turn = self
+                    .sigil_chat_job
+                    .take()
+                    .expect("polled sigil-chat job must exist");
+                self.finish_sigil_chat_turn(turn, code);
+            }
+        }
+
         let primary_poll = self.job.as_ref().map(poll_job);
         if let Some(poll) = primary_poll {
             let run_id = self.job.as_ref().and_then(|job| job.rebis_run_id);
+            live_run_changed |= run_id.is_some() && (!poll.lines.is_empty() || poll.done.is_some());
             for line in poll.lines {
+                if self.handle_rebis_pause_marker(run_id, &line) {
+                    continue;
+                }
                 self.retain_rebis_stream(run_id, &line, false);
+                self.record_reply_line(&line);
                 self.push_stream_line(&line);
             }
             if let Some(code) = poll.done {
                 let job = self.job.take().expect("polled primary job must exist");
+                // The turn is over: fold the streamed reply into the session
+                // and persist, so a crash loses nothing already answered.
+                self.save_session();
                 self.finish_rebis_subprocess(job.rebis_run_id, code, false);
                 if code == 0 && job.claude_session {
                     self.resumed = true;
@@ -1574,10 +1997,16 @@ impl App {
                 self.activity.clear();
                 self.open_fold = None;
                 self.fold_depth = 0;
+                let resumable = code != 0 && job.rebis_run_id.is_some();
                 let note = if code == 0 {
-                    Span::styled("  ✴ done", Style::new().fg(Color::Rgb(90, 200, 110)))
+                    Span::styled("  ✴ done", Style::new().fg(C_DONE()))
+                } else if resumable {
+                    Span::styled(
+                        "  Ⅱ paused · p retries the unfinished prompt",
+                        Style::new().fg(C_GOLD()),
+                    )
                 } else {
-                    Span::styled(format!("  ✴ exited ({code})"), Style::new().fg(C_RED))
+                    Span::styled(format!("  ✴ exited ({code})"), Style::new().fg(C_RED()))
                 };
                 self.push_line(Line::from(note));
                 self.push_line(Line::raw(""));
@@ -1592,7 +2021,11 @@ impl App {
             .collect::<Vec<_>>();
         let mut completed = Vec::new();
         for (index, run_id, poll) in parallel_polls {
+            live_run_changed |= run_id.is_some() && (!poll.lines.is_empty() || poll.done.is_some());
             for line in poll.lines {
+                if self.handle_rebis_pause_marker(run_id, &line) {
+                    continue;
+                }
                 self.retain_rebis_stream(run_id, &line, true);
                 if let Some(run_id) = run_id {
                     self.push_parallel_stream_line(run_id, &line);
@@ -1607,20 +2040,208 @@ impl App {
             self.finish_rebis_subprocess(job.rebis_run_id, code, true);
             let id = job.rebis_run_id.unwrap_or_default();
             let note = if code == 0 {
-                Span::styled(
-                    format!("  ∥ run #{id} done"),
-                    Style::new().fg(Color::Rgb(90, 200, 110)),
-                )
+                Span::styled(format!("  ∥ run #{id} done"), Style::new().fg(C_DONE()))
             } else {
                 Span::styled(
-                    format!("  ∥ run #{id} exited ({code})"),
-                    Style::new().fg(C_RED),
+                    format!("  ∥ run #{id} paused ({code}) · p retries"),
+                    Style::new().fg(C_GOLD()),
                 )
             };
             self.push_line(Line::from(note));
         }
 
         self.drain_queue();
+        // Peer bots keep running while the bound bot is inspected. Refresh the
+        // shared snapshot atomically so the God Agent can reread current traces.
+        if live_run_changed {
+            self.refresh_sigil_chat_run_context();
+        }
+    }
+
+    fn finish_sigil_chat_turn(&mut self, turn: SigilChatJob, code: i32) {
+        let source_path = turn.bridge_dir.join("sigil.rebis");
+        let proposed = std::fs::read_to_string(&source_path);
+        let mut applied_source = None;
+        if code != 0 {
+            if let Some(workspace) = self.background_rebis_workspace() {
+                workspace.push_sigil_chat_line(format!(
+                    "system  god agent stopped ({code}); live source was not changed"
+                ));
+            }
+        } else {
+            match proposed {
+                Err(error) => {
+                    if let Some(workspace) = self.background_rebis_workspace() {
+                        workspace.push_sigil_chat_line(format!(
+                            "system  could not read the proposed source: {error}"
+                        ));
+                    }
+                }
+                Ok(proposed) if proposed == turn.base_source => {
+                    if let Some(workspace) = self.background_rebis_workspace() {
+                        workspace.push_sigil_chat_line("system  source unchanged");
+                    }
+                }
+                Ok(proposed) => {
+                    let current_matches = self
+                        .background_rebis_workspace()
+                        .is_some_and(|workspace| workspace.editor.source() == turn.base_source);
+                    if !current_matches {
+                        if let Some(workspace) = self.background_rebis_workspace() {
+                            workspace.push_sigil_chat_line(format!(
+                                "system  source conflict: the editor changed during this turn; proposal retained at {}",
+                                source_path.display()
+                            ));
+                        }
+                    } else if let Err(error) = rebis_lang::parse(&proposed) {
+                        if let Some(workspace) = self.background_rebis_workspace() {
+                            workspace.push_sigil_chat_line(format!(
+                                "system  rejected invalid Rebis ({error}); proposal retained at {}",
+                                source_path.display()
+                            ));
+                        }
+                    } else {
+                        if let Some(workspace) = self.background_rebis_workspace() {
+                            workspace.editor.replace(proposed.clone());
+                            workspace.refresh();
+                            workspace.push_sigil_chat_line(
+                                "system  ✓ valid source revision applied to the live editor",
+                            );
+                        }
+                        applied_source = Some(proposed);
+                    }
+                }
+            }
+        }
+
+        if let (Some(id), Some(source)) = (turn.run_id, applied_source.as_deref()) {
+            self.rewrite_rebis_run_source(id, source);
+            self.retire_rebis_child_for_rewrite(id);
+            let _ = self.persist_rebis_run(id);
+        }
+
+        if turn.resume_after {
+            if let Some(id) = turn.run_id {
+                if applied_source.is_some() {
+                    if let Some(run) = self.rebis_runs.iter().find(|run| run.id == id) {
+                        let request = run.request.clone();
+                        let parallel = run.parallel;
+                        if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+                            run.output.push(
+                                "resumed     ▶ source revised · rebuilding from retained prompts"
+                                    .to_string(),
+                            );
+                        }
+                        self.start_rebis_run(id, request, parallel);
+                    }
+                } else {
+                    self.resume_stopped_run(id);
+                }
+            }
+        }
+        if code == 0 {
+            self.apply_sigil_chat_run_controls(&turn.bridge_dir);
+        }
+        if let Some(workspace) = self.background_rebis_workspace() {
+            workspace.set_sigil_chat_busy(false);
+        }
+    }
+
+    /// Replace every not-yet-launched copy of a run request as well as the
+    /// durable browser entry. Completed prompt answers remain in the journal;
+    /// exact prompts replay, and the first changed prompt truncates only its
+    /// divergent tail.
+    fn rewrite_rebis_run_source(&mut self, id: u64, source: &str) {
+        if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+            run.request.source = source.to_string();
+            run.preview = rebis_source_preview(source);
+            pause_rebis_run_clock(run, "source revised by sigil chat");
+            run.output.push(
+                "source      god-agent revision installed · prompt journal retained".to_string(),
+            );
+        }
+        for work in &mut self.queue {
+            if let QueuedWork::Rebis {
+                id: queued,
+                request,
+            } = work
+            {
+                if *queued == id {
+                    request.source = source.to_string();
+                }
+            }
+        }
+        if let Some(pending) = &mut self.pending_rebis {
+            if pending.id == id {
+                pending.request.source = source.to_string();
+            }
+        }
+        for pending in &mut self.parallel_gate_queue {
+            if pending.id == id {
+                pending.request.source = source.to_string();
+            }
+        }
+    }
+
+    /// A stopped interpreter cannot adopt new syntax in-place. Retire only its
+    /// process, deliberately leaving the run state and atomic prompt journal
+    /// alive for immediate reconstruction.
+    fn retire_rebis_child_for_rewrite(&mut self, id: u64) {
+        if self
+            .job
+            .as_ref()
+            .is_some_and(|job| job.rebis_run_id == Some(id))
+        {
+            let job = self.job.take().expect("checked primary run child");
+            let mut child = job
+                .child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if job.owns_process_group {
+                let _ = signal_process(child.id(), true, "-KILL");
+            } else {
+                let _ = child.kill();
+            }
+            self.job_start = None;
+        }
+        if let Some(index) = self
+            .parallel_jobs
+            .iter()
+            .position(|job| job.rebis_run_id == Some(id))
+        {
+            let job = self.parallel_jobs.remove(index);
+            let mut child = job
+                .child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if job.owns_process_group {
+                let _ = signal_process(child.id(), true, "-KILL");
+            } else {
+                let _ = child.kill();
+            }
+        }
+    }
+
+    /// Consume the private child-to-parent pause protocol. The control marker
+    /// never leaks into user output; the run tree receives one readable event.
+    fn handle_rebis_pause_marker(&mut self, run_id: Option<u64>, line: &str) -> bool {
+        let Some(reason) = crate::pause::marker_reason(line) else {
+            return false;
+        };
+        let Some(run_id) = run_id else {
+            return true;
+        };
+        let reason = reason.to_string();
+        if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == run_id) {
+            pause_rebis_run_clock(run, &reason);
+            run.output
+                .push(format!("paused      ⏸ {reason} · p resumes"));
+        }
+        if let Some(workspace) = self.background_rebis_workspace() {
+            workspace.message = format!("Rebis run paused · {reason} · p resumes");
+        }
+        let _ = self.persist_rebis_run(run_id);
+        true
     }
 
     fn retain_rebis_stream(&mut self, run_id: Option<u64>, line: &str, parallel: bool) {
@@ -1642,13 +2263,47 @@ impl App {
         let Some(run_id) = run_id else {
             return;
         };
+        let saved_paths = self
+            .rebis_runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .and_then(|run| {
+                Some((
+                    run.saved_run_path.clone()?,
+                    run.saved_checkpoint_path.clone()?,
+                ))
+            });
         if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == run_id) {
-            finish_rebis_run_clock(run);
-            run.state = RebisRunState::Complete(code);
+            if code == 0 {
+                finish_rebis_run_clock(run);
+                run.state = RebisRunState::Complete;
+                let _ = std::fs::remove_file(&run.checkpoint_path);
+                let _ = std::fs::remove_file(&run.directive_path);
+            } else {
+                let reason = format!("child stopped unexpectedly ({code})");
+                pause_rebis_run_clock(run, &reason);
+                run.output.push(format!(
+                    "paused      ⏸ {reason} · p retries the first unfinished prompt"
+                ));
+            }
+        }
+        if code == 0 {
+            if let Some((run_path, checkpoint_path)) = saved_paths {
+                let _ = std::fs::remove_file(run_path);
+                let _ = std::fs::remove_file(checkpoint_path);
+            }
+        } else {
+            let _ = self.persist_rebis_run(run_id);
         }
         if !parallel {
             if let Some(workspace) = self.background_rebis_workspace() {
-                workspace.finish_run(code);
+                if code == 0 {
+                    workspace.finish_run(0);
+                } else {
+                    workspace.pause_run(&format!(
+                        "child stopped unexpectedly ({code}) · p retries the unfinished prompt"
+                    ));
+                }
             }
         }
     }
@@ -1668,9 +2323,9 @@ impl App {
         self.push_line(Line::from(vec![
             Span::styled(
                 format!("∥ #{run_id}  "),
-                Style::new().fg(C_TEAL).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(text, Style::new().fg(C_ASH)),
+            Span::styled(text, Style::new().fg(C_ASH())),
         ]));
     }
 
@@ -1816,14 +2471,14 @@ impl App {
                     let head_style = if selected {
                         red_bold()
                     } else {
-                        Style::new().fg(C_OX).add_modifier(Modifier::BOLD)
+                        Style::new().fg(C_OX()).add_modifier(Modifier::BOLD)
                     };
                     let mut spans = vec![Span::styled(format!("{caret} "), head_style)];
                     spans.extend(f.summary.spans.iter().cloned());
                     if f.collapsed {
                         spans.push(Span::styled(
                             format!("   ({} lines — Enter to expand)", f.body.len()),
-                            Style::new().fg(C_ASH),
+                            Style::new().fg(C_ASH()),
                         ));
                     }
                     out.push(Line::from(spans));
@@ -2009,6 +2664,7 @@ impl App {
             if !text.is_empty() && workspace.dismiss_chaos_star() {
                 return;
             }
+            workspace.follow_source_cursor();
             match workspace.mode {
                 RebisMode::Insert => {
                     if !text.is_empty() {
@@ -2066,7 +2722,7 @@ impl App {
                         workspace.graph_focus = true;
                         let selected = self.rebis_run_choice.min(rebis_runs.len() - 1);
                         workspace.message = format!(
-                            "Rebis {} {}/{} · Tab stream · ↑/↓ scroll · ⇧↓ tail · Pg scroll · u/Delete remove",
+                            "Rebis {} {}/{} · Tab stream · ↑/↓ scroll · ⇧↑ top · ⇧↓ tail · Pg scroll · u/Delete remove",
                             rebis_runs[selected].entry.scope.label(),
                             selected + 1,
                             rebis_runs.len()
@@ -2081,9 +2737,15 @@ impl App {
             return;
         }
         if over_graph == workspace.graph_focus {
+            if !over_graph {
+                workspace.follow_source_cursor();
+            }
             return;
         }
         workspace.graph_focus = over_graph;
+        if !over_graph {
+            workspace.follow_source_cursor();
+        }
         workspace.message = if over_graph {
             "mandala focus · click the source pane to return".to_string()
         } else {
@@ -2159,6 +2821,10 @@ impl App {
                     self.scroll_rebis_runs(1);
                     return;
                 }
+                KeyCode::Up if shift => {
+                    self.rebis_run_top = 0;
+                    return;
+                }
                 KeyCode::Up => {
                     self.scroll_rebis_runs(-1);
                     return;
@@ -2202,6 +2868,45 @@ impl App {
         let Some(workspace) = self.rebis.as_mut() else {
             return;
         };
+
+        if workspace.sigil_chat_visible()
+            && workspace.graph_focus
+            && !matches!(workspace.mode, RebisMode::Command | RebisMode::KaosCommand)
+        {
+            let visible_rows = workspace
+                .panel_inner
+                .map_or(1, |(_, _, _, height)| height.saturating_sub(3) as usize);
+            match code {
+                KeyCode::Esc => {
+                    workspace.graph_focus = false;
+                    workspace.message =
+                        "source focus · /sigil chat returns to the channel".to_string();
+                }
+                KeyCode::Enter => {
+                    if let Some(message) = workspace.take_sigil_chat_message() {
+                        action = WorkspaceAction::SigilChat(message);
+                    }
+                }
+                KeyCode::Char('u') if ctrl => workspace.clear_sigil_chat_input(),
+                KeyCode::Char(character) if !ctrl => workspace.insert_sigil_chat_char(character),
+                KeyCode::Backspace | KeyCode::Delete => workspace.backspace_sigil_chat(),
+                KeyCode::Up => workspace.scroll_graph_vertical(-1, visible_rows),
+                KeyCode::Down => workspace.scroll_graph_vertical(1, visible_rows),
+                KeyCode::PageUp => workspace.scroll_graph_vertical(-10, visible_rows),
+                KeyCode::PageDown => workspace.scroll_graph_vertical(10, visible_rows),
+                KeyCode::Home if ctrl || shift => workspace.graph_top = 0,
+                KeyCode::End if ctrl || shift => workspace.graph_top = usize::MAX,
+                _ => {}
+            }
+            self.handle_rebis_action(action);
+            return;
+        }
+
+        if !workspace.graph_focus
+            && !matches!(workspace.mode, RebisMode::Command | RebisMode::KaosCommand)
+        {
+            workspace.follow_source_cursor();
+        }
 
         if workspace.literal_next {
             workspace.literal_next = false;
@@ -2788,6 +3493,213 @@ impl App {
         }
     }
 
+    fn handle_workspace_events(&mut self) {
+        loop {
+            let event = self
+                .background_rebis_workspace()
+                .and_then(RebisWorkspace::take_host_event);
+            match event {
+                Some(WorkspaceEvent::SigilSaved(name)) => self.save_sigil_run_state(&name),
+                Some(WorkspaceEvent::SigilOpened(name)) => self.restore_sigil_run_state(&name),
+                None => break,
+            }
+        }
+    }
+
+    fn save_sigil_run_state(&mut self, name: &str) {
+        let paths = self
+            .background_rebis_workspace()
+            .map(|workspace| workspace.sigil_resume_paths(name));
+        let Some((run_path, checkpoint_path)) = paths else {
+            return;
+        };
+        let matching = self.rebis_runs.iter().rposition(|run| {
+            run.state == RebisRunState::Running && run.sigil.as_deref() == Some(name)
+        });
+        let selected = self
+            .rebis_runs
+            .get(self.rebis_run_choice)
+            .filter(|run| run.state == RebisRunState::Running)
+            .map(|_| self.rebis_run_choice);
+        let fallback = self
+            .rebis_runs
+            .iter()
+            .rposition(|run| run.state == RebisRunState::Running);
+        let Some(index) = matching.or(selected).or(fallback) else {
+            let _ = std::fs::remove_file(&run_path);
+            let _ = std::fs::remove_file(&checkpoint_path);
+            if let Some(workspace) = self.background_rebis_workspace() {
+                workspace
+                    .message
+                    .push_str(" · no unfinished run to checkpoint");
+            }
+            return;
+        };
+        let id = self.rebis_runs[index].id;
+        self.rebis_runs[index].sigil = Some(name.to_string());
+        self.rebis_runs[index].saved_run_path = Some(run_path);
+        self.rebis_runs[index].saved_checkpoint_path = Some(checkpoint_path);
+        match self.persist_rebis_run(id) {
+            Ok(()) => {
+                if let Some(workspace) = self.background_rebis_workspace() {
+                    workspace
+                        .message
+                        .push_str(" · resumable step, record, trace, and prompt journal saved");
+                }
+            }
+            Err(error) => {
+                if let Some(workspace) = self.background_rebis_workspace() {
+                    workspace
+                        .message
+                        .push_str(&format!(" · could not save resumable step: {error}"));
+                }
+            }
+        }
+    }
+
+    fn persist_rebis_run(&self, id: u64) -> Result<(), String> {
+        let run = self
+            .rebis_runs
+            .iter()
+            .find(|run| run.id == id)
+            .ok_or_else(|| format!("run #{id} no longer exists"))?;
+        let run_path = run
+            .saved_run_path
+            .as_ref()
+            .ok_or_else(|| "run has no saved sigil metadata path".to_string())?;
+        let saved_checkpoint = run
+            .saved_checkpoint_path
+            .as_ref()
+            .ok_or_else(|| "run has no saved sigil checkpoint path".to_string())?;
+        let saved = SavedRebisRun {
+            source: run.request.source.clone(),
+            input: run.request.input.clone(),
+            scope: run.scope,
+            parallel: run.parallel,
+            chaos: run.chaos,
+            output: run.output.clone(),
+            elapsed: active_rebis_run_elapsed(run),
+            pause_reason: run
+                .pause_reason
+                .clone()
+                .unwrap_or_else(|| "saved at the last completed prompt".to_string()),
+        };
+        atomic_write(run_path, &encode_saved_rebis_run(&saved))
+            .map_err(|error| format!("could not write {}: {error}", run_path.display()))?;
+        if run.checkpoint_path != *saved_checkpoint {
+            match std::fs::read(&run.checkpoint_path) {
+                Ok(checkpoint) => atomic_write(saved_checkpoint, &checkpoint).map_err(|error| {
+                    format!("could not write {}: {error}", saved_checkpoint.display())
+                })?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    let _ = std::fs::remove_file(saved_checkpoint);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "could not read {}: {error}",
+                        run.checkpoint_path.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_sigil_run_state(&mut self, name: &str) {
+        if let Some(index) = self.rebis_runs.iter().position(|run| {
+            run.state == RebisRunState::Running && run.sigil.as_deref() == Some(name)
+        }) {
+            self.rebis_run_choice = index;
+            let resident_id = self.rebis_runs[index].id;
+            if let Some(workspace) = self.background_rebis_workspace() {
+                workspace.message.push_str(&format!(
+                    " · unfinished run #{} is still resident · /runs then p resumes",
+                    resident_id
+                ));
+            }
+            return;
+        }
+        let Some((run_path, checkpoint_path)) = self
+            .background_rebis_workspace()
+            .map(|workspace| workspace.sigil_resume_paths(name))
+        else {
+            return;
+        };
+        let encoded = match std::fs::read(&run_path) {
+            Ok(encoded) => encoded,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(error) => {
+                if let Some(workspace) = self.background_rebis_workspace() {
+                    workspace.message.push_str(&format!(
+                        " · could not read saved run {}: {error}",
+                        run_path.display()
+                    ));
+                }
+                return;
+            }
+        };
+        let saved = match decode_saved_rebis_run(&encoded) {
+            Ok(saved) => saved,
+            Err(error) => {
+                if let Some(workspace) = self.background_rebis_workspace() {
+                    workspace
+                        .message
+                        .push_str(&format!(" · saved run ignored: {error}"));
+                }
+                return;
+            }
+        };
+        let program_source = self
+            .background_rebis_workspace()
+            .map(|workspace| workspace.editor.source().to_string())
+            .unwrap_or_else(|| saved.source.clone());
+        let source = if saved.scope == RunScope::Program {
+            program_source
+        } else {
+            saved.source.clone()
+        };
+        if let Err(error) = rebis_lang::parse(&source) {
+            if let Some(workspace) = self.background_rebis_workspace() {
+                workspace
+                    .message
+                    .push_str(&format!(" · saved run source is invalid: {error}"));
+            }
+            return;
+        }
+        let request = RunRequest {
+            source,
+            input: saved.input,
+            scope: saved.scope,
+        };
+        let id =
+            self.register_rebis_run_with_mode(&request, RebisRunState::Running, saved.parallel);
+        let now = Instant::now();
+        if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+            run.sigil = Some(name.to_string());
+            run.saved_run_path = Some(run_path);
+            run.saved_checkpoint_path = Some(checkpoint_path.clone());
+            run.checkpoint_path = checkpoint_path;
+            run.chaos = saved.chaos;
+            run.output = saved.output;
+            run.output.push(
+                "restored    Ⅱ saved sigil checkpoint · p reconstructs the unfinished prompt"
+                    .to_string(),
+            );
+            run.expanded = true;
+            run.started_at = now.checked_sub(saved.elapsed).or(Some(now));
+            run.elapsed = None;
+            run.paused = true;
+            run.paused_at = Some(now);
+            run.paused_total = Duration::ZERO;
+            run.pause_reason = Some(saved.pause_reason);
+        }
+        if let Some(workspace) = self.background_rebis_workspace() {
+            workspace.message.push_str(&format!(
+                " · run #{id} restored at its last completed prompt · /runs then p resumes"
+            ));
+        }
+    }
+
     fn handle_rebis_action(&mut self, action: WorkspaceAction) {
         match action {
             WorkspaceAction::None => {}
@@ -2799,6 +3711,13 @@ impl App {
                 }
             }
             WorkspaceAction::Discard => {
+                if self.sigil_chat_job.is_some() {
+                    if let Some(workspace) = &mut self.rebis {
+                        workspace.message =
+                            "god agent is still working · ^C cancels before :q!".to_string();
+                    }
+                    return;
+                }
                 if self.config_editor {
                     self.leave_config_editor();
                 } else {
@@ -2810,6 +3729,7 @@ impl App {
             WorkspaceAction::RunParallel(request) => self.submit_rebis_run(request, true),
             WorkspaceAction::BrowseRuns => {
                 if let Some(workspace) = &mut self.rebis {
+                    workspace.hide_sigil_chat();
                     workspace.panel_visible = true;
                     workspace.runs_visible = true;
                     workspace.graph_focus = true;
@@ -2828,6 +3748,8 @@ impl App {
                     self.describe_rebis_run_choice();
                 }
             }
+            WorkspaceAction::OpenSigilChat => self.open_sigil_chat_channel(),
+            WorkspaceAction::SigilChat(message) => self.submit_sigil_chat_message(message),
             WorkspaceAction::Kaos(command) => {
                 self.dispatch(&format!("/{command}"));
                 let mouse_captured = self.mouse_captured;
@@ -2859,6 +3781,497 @@ impl App {
         }
     }
 
+    fn sigil_chat_run_context(&self, bound_id: Option<u64>) -> String {
+        let live = self
+            .rebis_runs
+            .iter()
+            .filter(|run| {
+                matches!(
+                    run.state,
+                    RebisRunState::AwaitingPermission
+                        | RebisRunState::Queued
+                        | RebisRunState::Running
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut context = format!(
+            "GLOBAL LIVE BOT SNAPSHOT\nlive bots: {}\nbound mutation target: {}\npeer sources and state are read-only unless run-control.txt contains an explicit validated action\n",
+            live.len(),
+            bound_id.map_or_else(|| "none".to_string(), |id| format!("run #{id}"))
+        );
+        if live.is_empty() {
+            context.push_str("\nNO LIVE, PAUSED, QUEUED, OR PERMISSION-GATED REBIS BOTS\n");
+            return context;
+        }
+        for run in live {
+            let role = if Some(run.id) == bound_id {
+                "BOUND SOURCE/MUTATION TARGET"
+            } else {
+                "READ-ONLY PEER BOT"
+            };
+            let child = if self.job_for_run(run.id).is_some() {
+                "resident child"
+            } else {
+                "no resident child"
+            };
+            let checkpoint = std::fs::read(&run.checkpoint_path).map_or_else(
+                |_| "(no completed prompt checkpoint yet)".to_string(),
+                |bytes| String::from_utf8_lossy(&bytes).into_owned(),
+            );
+            let directive = crate::rebis_supervisor::read_directive(&run.directive_path)
+                .unwrap_or_else(|| "(none)".to_string());
+            let trace = if run.output.is_empty() {
+                "(no retained trace yet)".to_string()
+            } else {
+                run.output.join("\n")
+            };
+            context.push_str(&format!(
+                "\n===== RUN #{} · {role} =====\nstate: {:?}\npaused: {}\npause reason: {}\nchild: {child}\nsigil: {}\nscope: {}\nmode: {}\nparallel: {}\ntimer: {}\ncheckpoint path: {}\ndirective path: {}\n\nCURRENT SUPERVISOR DIRECTIVE\n{}\n\nCAPTURED SOURCE\n{}\n\nCAPTURED RECORD / INPUT\n{}\n\nPROMPT CHECKPOINT JOURNAL\n{}\n\nFULL RETAINED TRACE\n{}\n===== END RUN #{} =====\n",
+                run.id,
+                run.state,
+                run.paused,
+                run.pause_reason.as_deref().unwrap_or("none"),
+                run.sigil.as_deref().unwrap_or("unsaved"),
+                run.scope.label(),
+                if run.chaos { "CHAOS" } else { "DIRECT" },
+                run.parallel,
+                rebis_run_timer(run),
+                run.checkpoint_path.display(),
+                run.directive_path.display(),
+                directive,
+                run.request.source,
+                run.request.input,
+                checkpoint,
+                trace,
+                run.id
+            ));
+        }
+        context
+    }
+
+    fn write_sigil_chat_control_bridge(&self, bridge_dir: &std::path::Path) -> Result<(), String> {
+        let control = b"# GOD AGENT RUN CONTROL\n# Write only actions explicitly requested in the current USER TURN.\n# Valid actions: PAUSE ID, RESUME ID, APPLY_DIRECTIVE ID, CLEAR_DIRECTIVE ID\n# For APPLY_DIRECTIVE, first edit runs/ID/directive.txt.\n# Cancellation and deletion are intentionally unavailable.\n";
+        atomic_write(&bridge_dir.join("run-control.txt"), control)
+            .map_err(|error| format!("could not create run control manifest: {error}"))?;
+        for run in self.rebis_runs.iter().filter(|run| {
+            matches!(
+                run.state,
+                RebisRunState::AwaitingPermission | RebisRunState::Queued | RebisRunState::Running
+            )
+        }) {
+            let directory = bridge_dir.join("runs").join(run.id.to_string());
+            std::fs::create_dir_all(&directory)
+                .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
+            atomic_write(
+                &directory.join("source.rebis"),
+                run.request.source.as_bytes(),
+            )
+            .map_err(|error| format!("could not snapshot run #{} source: {error}", run.id))?;
+            atomic_write(&directory.join("input.txt"), run.request.input.as_bytes())
+                .map_err(|error| format!("could not snapshot run #{} input: {error}", run.id))?;
+            atomic_write(
+                &directory.join("trace.txt"),
+                run.output.join("\n").as_bytes(),
+            )
+            .map_err(|error| format!("could not snapshot run #{} trace: {error}", run.id))?;
+            let directive =
+                crate::rebis_supervisor::read_directive(&run.directive_path).unwrap_or_default();
+            atomic_write(&directory.join("directive.txt"), directive.as_bytes()).map_err(
+                |error| format!("could not snapshot run #{} directive: {error}", run.id),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn refresh_sigil_chat_run_context(&self) {
+        let Some(turn) = &self.sigil_chat_job else {
+            return;
+        };
+        let workspace = self.rebis.as_ref().or(self.suspended_rebis.as_ref());
+        let source_label =
+            workspace.map_or_else(|| "[unavailable]".to_string(), RebisWorkspace::path_label);
+        let channel_history = workspace.map_or_else(String::new, |workspace| {
+            workspace.sigil_chat_lines().join("\n")
+        });
+        let run_context = self.sigil_chat_run_context(turn.run_id);
+        let context = format!(
+            "SIGIL: {source_label}\nMODEL: {}\n\n{run_context}\nCHANNEL HISTORY\n{channel_history}\n",
+            self.model
+        );
+        let _ = atomic_write(&turn.bridge_dir.join("run-context.txt"), context.as_bytes());
+    }
+
+    /// Bind the panel channel to the selected unfinished run when possible.
+    /// Completed runs remain immutable evidence; with none unfinished, the god
+    /// agent can still revise the editor source for the next run.
+    fn open_sigil_chat_channel(&mut self) {
+        if let Some(run_id) = self.sigil_chat_job.as_ref().map(|turn| turn.run_id) {
+            if let Some(workspace) = &mut self.rebis {
+                workspace.bind_sigil_chat_run(run_id);
+                workspace.open_sigil_chat();
+            }
+            return;
+        }
+        let selected = self
+            .rebis_runs
+            .get(self.rebis_run_choice)
+            .filter(|run| {
+                matches!(
+                    run.state,
+                    RebisRunState::AwaitingPermission
+                        | RebisRunState::Queued
+                        | RebisRunState::Running
+                )
+            })
+            .map(|run| run.id);
+        let run_id = selected.or_else(|| {
+            self.rebis_runs
+                .iter()
+                .rev()
+                .find(|run| {
+                    matches!(
+                        run.state,
+                        RebisRunState::AwaitingPermission
+                            | RebisRunState::Queued
+                            | RebisRunState::Running
+                    )
+                })
+                .map(|run| run.id)
+        });
+        if let Some(workspace) = &mut self.rebis {
+            workspace.bind_sigil_chat_run(run_id);
+            workspace.open_sigil_chat();
+        }
+    }
+
+    /// Stop a live interpreter while its supervisor reasons over an exact
+    /// source/trace snapshot. This is SIGSTOP, not cancellation: the prompt
+    /// journal and process remain intact unless a valid source edit requires a
+    /// checkpoint reconstruction.
+    fn pause_rebis_run_by_id(&mut self, id: u64, reason: &str) -> Result<(), String> {
+        let Some(run) = self.rebis_runs.iter().find(|run| run.id == id) else {
+            return Err(format!("run #{id} does not exist"));
+        };
+        if run.state != RebisRunState::Running || run.paused {
+            return Err(format!("run #{id} is not an unpaused running bot"));
+        }
+        let Some(job) = self.job_for_run(id) else {
+            return Err(format!("run #{id} has no resident child to pause"));
+        };
+        let pid = job
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .id();
+        let owns_process_group = job.owns_process_group;
+        if !signal_process(pid, owns_process_group, "-STOP") {
+            return Err(format!("could not pause run #{id}"));
+        }
+        if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+            pause_rebis_run_clock(run, reason);
+            run.output.push(format!("paused      ⏸ {reason}"));
+        }
+        Ok(())
+    }
+
+    fn resume_rebis_run_by_id(&mut self, id: u64) -> Result<(), String> {
+        let Some(run) = self.rebis_runs.iter().find(|run| run.id == id) else {
+            return Err(format!("run #{id} does not exist"));
+        };
+        if run.state != RebisRunState::Running || !run.paused {
+            return Err(format!("run #{id} is not a paused running bot"));
+        }
+        let request = run.request.clone();
+        let parallel = run.parallel;
+        if let Some(job) = self.job_for_run(id) {
+            let pid = job
+                .child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .id();
+            if !signal_process(pid, job.owns_process_group, "-CONT") {
+                return Err(format!("could not resume run #{id}"));
+            }
+            if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+                resume_rebis_run_clock(run);
+                run.output
+                    .push("resumed     ▶ god-agent run control".to_string());
+            }
+        } else {
+            if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+                resume_rebis_run_clock(run);
+                run.output
+                    .push("resumed     ▶ god-agent control rebuilding from checkpoint".to_string());
+            }
+            self.start_rebis_run(id, request, parallel);
+        }
+        Ok(())
+    }
+
+    fn pause_run_for_sigil_chat(&mut self, id: u64) -> bool {
+        self.pause_rebis_run_by_id(id, "god agent inspecting source and global run context")
+            .is_ok()
+    }
+
+    fn apply_sigil_chat_run_controls(&mut self, bridge_dir: &std::path::Path) {
+        let control_path = bridge_dir.join("run-control.txt");
+        let source = match std::fs::read_to_string(&control_path) {
+            Ok(source) => source,
+            Err(error) => {
+                if let Some(workspace) = self.background_rebis_workspace() {
+                    workspace.push_sigil_chat_line(format!(
+                        "system  run control ignored: could not read {}: {error}",
+                        control_path.display()
+                    ));
+                }
+                return;
+            }
+        };
+        let controls = match parse_sigil_run_controls(&source) {
+            Ok(controls) => controls,
+            Err(error) => {
+                if let Some(workspace) = self.background_rebis_workspace() {
+                    workspace.push_sigil_chat_line(format!(
+                        "system  all run controls rejected: {error}"
+                    ));
+                }
+                return;
+            }
+        };
+        for control in controls {
+            let id = match control {
+                SigilRunControl::Pause(id)
+                | SigilRunControl::Resume(id)
+                | SigilRunControl::ApplyDirective(id)
+                | SigilRunControl::ClearDirective(id) => id,
+            };
+            let live = self.rebis_runs.iter().any(|run| {
+                run.id == id
+                    && matches!(
+                        run.state,
+                        RebisRunState::AwaitingPermission
+                            | RebisRunState::Queued
+                            | RebisRunState::Running
+                    )
+            });
+            if !live {
+                if let Some(workspace) = self.background_rebis_workspace() {
+                    workspace.push_sigil_chat_line(format!(
+                        "system  control rejected: run #{id} is not live"
+                    ));
+                }
+                continue;
+            }
+            let result = match control {
+                SigilRunControl::Pause(_) => self
+                    .pause_rebis_run_by_id(id, "paused by explicit god-agent run control")
+                    .map(|()| format!("run #{id} paused")),
+                SigilRunControl::Resume(_) => self
+                    .resume_rebis_run_by_id(id)
+                    .map(|()| format!("run #{id} resumed")),
+                SigilRunControl::ApplyDirective(_) => {
+                    let draft = bridge_dir
+                        .join("runs")
+                        .join(id.to_string())
+                        .join("directive.txt");
+                    match std::fs::read_to_string(&draft) {
+                        Ok(directive) if !directive.trim().is_empty() => {
+                            let directive = directive.trim().to_string();
+                            let runtime_path = self
+                                .rebis_runs
+                                .iter()
+                                .find(|run| run.id == id)
+                                .map(|run| run.directive_path.clone())
+                                .expect("live run checked");
+                            atomic_write(&runtime_path, directive.as_bytes())
+                                .map_err(|error| {
+                                    format!("could not set directive for run #{id}: {error}")
+                                })
+                                .map(|()| {
+                                    if let Some(run) =
+                                        self.rebis_runs.iter_mut().find(|run| run.id == id)
+                                    {
+                                        run.output.push(format!(
+                                            "directive   god agent set {} byte(s) of guidance",
+                                            directive.len()
+                                        ));
+                                    }
+                                    format!(
+                                        "run #{id} directive applied · affects its next unfinished prompt"
+                                    )
+                                })
+                        }
+                        Ok(_) => Err(format!(
+                            "run #{id} directive is empty; use CLEAR_DIRECTIVE to remove guidance"
+                        )),
+                        Err(error) => Err(format!(
+                            "could not read directive draft for run #{id}: {error}"
+                        )),
+                    }
+                }
+                SigilRunControl::ClearDirective(_) => {
+                    let runtime_path = self
+                        .rebis_runs
+                        .iter()
+                        .find(|run| run.id == id)
+                        .map(|run| run.directive_path.clone())
+                        .expect("live run checked");
+                    match std::fs::remove_file(&runtime_path) {
+                        Ok(()) => Ok(()),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                        Err(error) => {
+                            Err(format!("could not clear directive for run #{id}: {error}"))
+                        }
+                    }
+                    .map(|()| {
+                        if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+                            run.output
+                                .push("directive   god-agent guidance cleared".to_string());
+                        }
+                        format!("run #{id} directive cleared")
+                    })
+                }
+            };
+            if let Some(workspace) = self.background_rebis_workspace() {
+                workspace.push_sigil_chat_line(match result {
+                    Ok(message) => format!("system  ✓ {message}"),
+                    Err(error) => format!("system  control rejected: {error}"),
+                });
+            }
+        }
+    }
+
+    fn submit_sigil_chat_message(&mut self, message: String) {
+        if self.sigil_chat_job.is_some() {
+            if let Some(workspace) = &mut self.rebis {
+                workspace.push_sigil_chat_line("system  one god-agent turn is already running");
+                workspace.set_sigil_chat_busy(true);
+            }
+            return;
+        }
+        let Some(workspace) = &self.rebis else {
+            return;
+        };
+        let base_source = workspace.editor.source().to_string();
+        let source_label = workspace.path_label();
+        let run_id = workspace.sigil_chat_run_id();
+        let channel_history = workspace.sigil_chat_lines().join("\n");
+        let resume_after = run_id.is_some_and(|id| self.pause_run_for_sigil_chat(id));
+
+        let bridge_dir = std::env::temp_dir().join(format!("kaos-sigil-chat-{}", self.session_id));
+        if let Err(error) = std::fs::create_dir_all(&bridge_dir) {
+            if let Some(workspace) = &mut self.rebis {
+                workspace.push_sigil_chat_line(format!(
+                    "system  could not create isolated source bridge: {error}"
+                ));
+            }
+            if let Some(id) = run_id.filter(|_| resume_after) {
+                self.resume_stopped_run(id);
+            }
+            return;
+        }
+        let source_path = bridge_dir.join("sigil.rebis");
+        let context_path = bridge_dir.join("run-context.txt");
+        let run_context = self.sigil_chat_run_context(run_id);
+        let context = format!(
+            "SIGIL: {source_label}\nMODEL: {}\n\n{run_context}\nCHANNEL HISTORY\n{channel_history}\n",
+            self.model
+        );
+        let write_result = std::fs::write(&source_path, &base_source)
+            .and_then(|()| std::fs::write(&context_path, context))
+            .map_err(|error| error.to_string())
+            .and_then(|()| self.write_sigil_chat_control_bridge(&bridge_dir));
+        if let Err(error) = write_result {
+            if let Some(workspace) = &mut self.rebis {
+                workspace.push_sigil_chat_line(format!(
+                    "system  could not capture source and run context: {error}"
+                ));
+            }
+            if let Some(id) = run_id.filter(|_| resume_after) {
+                self.resume_stopped_run(id);
+            }
+            return;
+        }
+
+        let task = format!(
+            "You are the GOD AGENT supervising the complete live Rebis bot field. The current editor program is ./sigil.rebis. ./run-context.txt is a live-refreshed snapshot containing the full source, record/input, prompt checkpoint, directive, state, and retained trace of EVERY running, paused, queued, or permission-gated Rebis bot. Read both before answering. Per-run inspection files live under ./runs/ID/. One run is marked BOUND and is the only run whose source may be revised through ./sigil.rebis; peer sources are read-only. Preserve unrelated source and comments. The host rejects invalid Rebis and editor conflicts. A valid bound-source edit reconstructs that run from its prompt journal, preserving identical completed prompts.\n\nYou may control individual live bots only when the USER TURN explicitly requests it. Write validated actions to ./run-control.txt, one per line: PAUSE ID, RESUME ID, APPLY_DIRECTIVE ID, or CLEAR_DIRECTIVE ID. For APPLY_DIRECTIVE, first write the requested guidance to ./runs/ID/directive.txt. Directives are attached to that bot's next unfinished model prompt and remain active until replaced or cleared. Never invent actions, never target a completed/cancelled run, and never request cancellation or deletion. Do not directly launch, kill, or signal processes. Never claim an edit or control action unless you actually wrote the corresponding bridge file. Explain what you changed or answer directly.\n\nUSER TURN:\n{message}"
+        );
+        let before = self.parallel_jobs.len();
+        let launched = self.spawn_job_with_input(
+            vec!["code".to_string(), RAW_CHAT_TASK_ARG.to_string(), task],
+            None,
+            None,
+            Some(false),
+            true,
+            Some(bridge_dir.clone()),
+        );
+        if !launched || self.parallel_jobs.len() != before + 1 {
+            if let Some(workspace) = &mut self.rebis {
+                workspace.push_sigil_chat_line("system  god agent could not be launched");
+                workspace.set_sigil_chat_busy(false);
+            }
+            if let Some(id) = run_id.filter(|_| resume_after) {
+                self.resume_stopped_run(id);
+            }
+            return;
+        }
+        let job = self.parallel_jobs.pop().expect("new god-agent job");
+        self.sigil_chat_job = Some(SigilChatJob {
+            job,
+            base_source,
+            bridge_dir,
+            run_id,
+            resume_after,
+        });
+        if let Some(workspace) = &mut self.rebis {
+            workspace.set_sigil_chat_busy(true);
+            let live_count = self
+                .rebis_runs
+                .iter()
+                .filter(|run| {
+                    matches!(
+                        run.state,
+                        RebisRunState::AwaitingPermission
+                            | RebisRunState::Queued
+                            | RebisRunState::Running
+                    )
+                })
+                .count();
+            workspace.push_sigil_chat_line(match run_id {
+                Some(id) if resume_after => {
+                    format!("system  run #{id} paused · god agent sees all {live_count} live bots")
+                }
+                Some(id) => format!(
+                    "system  bound to run #{id} · god agent sees all {live_count} live bots"
+                ),
+                None => format!("system  inspecting current source and all {live_count} live bots"),
+            });
+        }
+    }
+
+    /// Continue a child that was stopped only to take a coherent supervisory
+    /// snapshot and whose source did not need interpreter reconstruction.
+    fn resume_stopped_run(&mut self, id: u64) -> bool {
+        let Some(job) = self.job_for_run(id) else {
+            return false;
+        };
+        let pid = job
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .id();
+        let owns_process_group = job.owns_process_group;
+        if !signal_process(pid, owns_process_group, "-CONT") {
+            return false;
+        }
+        if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+            resume_rebis_run_clock(run);
+            run.output
+                .push("resumed     ▶ god-agent inspection complete".to_string());
+        }
+        true
+    }
+
     fn submit_rebis_run(&mut self, request: RunRequest, parallel: bool) {
         if !parallel
             && (self.has_active_jobs() || self.pending.is_some() || self.pending_rebis.is_some())
@@ -2877,10 +4290,10 @@ impl App {
             self.push_line(Line::from(vec![
                 Span::styled(
                     "⧗ queued ",
-                    Style::new().fg(C_OX).add_modifier(Modifier::BOLD),
+                    Style::new().fg(C_OX()).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(label, Style::new().fg(C_BONE)),
-                Span::styled(format!("   ({position} in line)"), Style::new().fg(C_ASH)),
+                Span::styled(label, Style::new().fg(C_BONE())),
+                Span::styled(format!("   ({position} in line)"), Style::new().fg(C_ASH())),
             ]));
             return;
         }
@@ -2928,6 +4341,107 @@ impl App {
         }
     }
 
+    // ── durable chat sessions ───────────────────────────────────────────────
+
+    /// Write the conversation out. Called on every exit path, and after each
+    /// completed turn so a hard kill loses at most the turn in flight.
+    /// Silent on failure: a session that cannot be saved must never take the
+    /// app down or interrupt the reader.
+    fn save_session(&mut self) {
+        self.flush_reply();
+        if self.session.is_empty() {
+            return;
+        }
+        let _ = crate::sessions::Store::default_store().save(&self.session);
+    }
+
+    /// Fold whatever the running job streamed into one model turn.
+    fn flush_reply(&mut self) {
+        let reply = std::mem::take(&mut self.session_reply);
+        if !reply.trim().is_empty() {
+            self.session
+                .push(crate::sessions::Role::Model, reply.trim_end());
+        }
+    }
+
+    /// Record a line of model output for the session (plain text; the styling
+    /// is presentation and is not persisted).
+    fn record_reply_line(&mut self, text: &str) {
+        if self.session_reply.len() < 200_000 {
+            self.session_reply.push_str(text);
+            self.session_reply.push('\n');
+        }
+    }
+
+    /// `/chat sessions` — list what can be resumed.
+    fn list_sessions(&mut self) {
+        let store = crate::sessions::Store::default_store();
+        let list = store.list();
+        if list.is_empty() {
+            self.push_line(Line::from("no saved sessions yet"));
+            return;
+        }
+        self.push_line(Line::from(vec![Span::styled(
+            "sessions",
+            Style::default().fg(C_RED()).add_modifier(Modifier::BOLD),
+        )]));
+        for (i, s) in list.iter().enumerate().take(30) {
+            self.push_line(Line::from(format!(
+                "  {:>2}  {}  {:>3} turns  {}",
+                i + 1,
+                s.id,
+                s.turns,
+                s.title
+            )));
+        }
+        self.push_line(Line::from("resume with /chat resume [N | id]"));
+    }
+
+    /// `/chat resume [what]` — reopen a stored conversation.
+    fn resume_session(&mut self, what: &str) {
+        // Keep the current conversation before replacing it.
+        self.save_session();
+        let store = crate::sessions::Store::default_store();
+        let Some(found) = store.resolve(what) else {
+            let msg = if what.trim().is_empty() {
+                "no saved sessions to resume".to_string()
+            } else {
+                format!("no session matching '{}'", what.trim())
+            };
+            self.push_line(Line::from(msg));
+            return;
+        };
+        match store.load(&found.id) {
+            Ok(session) => {
+                self.transcript.clear();
+                self.open_fold = None;
+                self.fold_depth = 0;
+                self.sel_fold = None;
+                self.push_line(Line::from(vec![Span::styled(
+                    format!("resumed {}  ({})", found.id, session.title()),
+                    Style::default().fg(C_RED()).add_modifier(Modifier::BOLD),
+                )]));
+                for turn in &session.turns {
+                    let (tag, colour) = match turn.role {
+                        crate::sessions::Role::User => ("you", C_RED()),
+                        crate::sessions::Role::Model => ("model", C_ASH()),
+                    };
+                    for (i, line) in turn.text.lines().enumerate() {
+                        let prefix = if i == 0 { tag } else { "" };
+                        self.push_line(Line::from(vec![
+                            Span::styled(format!("{prefix:<7}"), Style::default().fg(colour)),
+                            Span::raw(line.to_string()),
+                        ]));
+                    }
+                }
+                self.session = session;
+                self.session_reply.clear();
+                self.follow = true;
+            }
+            Err(error) => self.push_line(Line::from(format!("could not resume: {error}"))),
+        }
+    }
+
     fn submit(&mut self) {
         let line = self.input.trim().to_string();
         self.input.clear();
@@ -2949,21 +4463,27 @@ impl App {
             self.push_line(Line::from(vec![
                 Span::styled(
                     "⧗ queued ",
-                    Style::new().fg(C_OX).add_modifier(Modifier::BOLD),
+                    Style::new().fg(C_OX()).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(line, Style::new().fg(C_BONE)),
+                Span::styled(line, Style::new().fg(C_BONE())),
                 Span::styled(
                     format!(
                         "   ({} in line — runs when the working ends)",
                         self.queue.len()
                     ),
-                    Style::new().fg(C_ASH),
+                    Style::new().fg(C_ASH()),
                 ),
             ]));
             self.follow = true;
             return;
         }
 
+        // A bare line is something said to the model, so it belongs in the
+        // session. Slash-commands are app control, not conversation.
+        if !line.starts_with('/') {
+            self.flush_reply();
+            self.session.push(crate::sessions::Role::User, line.clone());
+        }
         self.echo_prompt(&line);
         self.dispatch(&line);
     }
@@ -2972,7 +4492,7 @@ impl App {
     fn echo_prompt(&mut self, line: &str) {
         self.push_line(Line::from(vec![
             Span::styled("✴ ❯ ", red_bold()),
-            Span::styled(line.to_string(), Style::new().fg(C_BONE)),
+            Span::styled(line.to_string(), Style::new().fg(C_BONE())),
         ]));
         self.follow = true;
     }
@@ -3025,10 +4545,51 @@ impl App {
                 });
             }
             "new" | "forget" => {
+                // Keep the old conversation before starting a clean one.
+                self.save_session();
+                self.session = crate::sessions::Session::new(
+                    self.model.clone(),
+                    self.cwd.display().to_string(),
+                );
+                self.session_reply.clear();
                 self.session_id = gen_uuid();
                 self.resumed = false;
                 self.rebis_authority = false;
                 self.note("a fresh sigil — the adept remembers nothing prior.");
+            }
+            "theme" => {
+                let want = args.get(1).map(String::as_str).unwrap_or("");
+                match crate::theme::Mode::parse(want) {
+                    Some(mode) => match crate::theme::set_mode(mode) {
+                        // Persisted for both this app and `kaos visual`; the
+                        // terminal picks it up on restart.
+                        Ok(()) => self.note(&format!(
+                            "theme {} — restart kaos to repaint the terminal",
+                            mode.name()
+                        )),
+                        Err(error) => self.note(&format!("theme: {error}")),
+                    },
+                    None => self.note(&format!(
+                        "theme is {} · use /theme dark or /theme light",
+                        crate::theme::mode().name()
+                    )),
+                }
+            }
+            "sessions" => self.list_sessions(),
+            "resume" => {
+                let what = args.get(1..).map(|r| r.join(" ")).unwrap_or_default();
+                self.resume_session(&what);
+            }
+            "forget-session" => {
+                let what = args.get(1..).map(|r| r.join(" ")).unwrap_or_default();
+                let store = crate::sessions::Store::default_store();
+                match store.resolve(&what) {
+                    Some(found) => match store.delete(&found.id) {
+                        Ok(()) => self.note(&format!("deleted session {}", found.id)),
+                        Err(error) => self.note(&format!("could not delete: {error}")),
+                    },
+                    None => self.note("no matching session"),
+                }
             }
             "rebis" => self.open_rebis(args.get(1).map(String::as_str)),
             "runs" => {
@@ -3063,7 +4624,7 @@ impl App {
         let work = self.queue.remove(0);
         self.push_line(Line::from(Span::styled(
             format!("⧗ from the queue ({} remain):", self.queue.len()),
-            Style::new().fg(C_ASH),
+            Style::new().fg(C_ASH()),
         )));
         match work {
             QueuedWork::Line(line) => {
@@ -3073,7 +4634,7 @@ impl App {
             QueuedWork::Rebis { id, request } => {
                 self.push_line(Line::from(Span::styled(
                     format!("Rebis {}", request.scope.label()),
-                    Style::new().fg(C_BONE),
+                    Style::new().fg(C_BONE()),
                 )));
                 self.gate_rebis_run(id, request, false);
             }
@@ -3220,24 +4781,50 @@ impl App {
             .find(|run| run.id == id)
             .is_some_and(|run| run.chaos);
         if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+            let restarting = run.started_at.is_some();
+            if !restarting {
+                if let Some(saved_checkpoint) = run.saved_checkpoint_path.clone() {
+                    // Plain `/run` is fresh even for a sigil with an older
+                    // unfinished snapshot. Once launched, however, write new
+                    // prompt boundaries directly to the durable journal.
+                    if let Some(saved_run) = &run.saved_run_path {
+                        let _ = std::fs::remove_file(saved_run);
+                    }
+                    let _ = std::fs::remove_file(&saved_checkpoint);
+                    run.checkpoint_path = saved_checkpoint;
+                }
+            }
             run.state = RebisRunState::Running;
-            run.started_at = Some(Instant::now());
+            if !restarting {
+                run.started_at = Some(Instant::now());
+            }
             run.elapsed = None;
             run.expanded = true;
-            run.output.push(if chaos {
+            resume_rebis_run_clock(run);
+            run.output.push(if restarting {
+                "checkpoint  reconstructing interpreter · completed prompts replay locally"
+                    .to_string()
+            } else if chaos {
                 "mode        CHAOS · Kaos tool-agent expansion enabled".to_string()
             } else {
                 "mode        DIRECT · one tool agent per prompt".to_string()
             });
         }
+        let _ = self.persist_rebis_run(id);
         let mut args = vec!["rebis".to_string(), "run".to_string()];
         args.push("--allow-tools".to_string());
         if chaos {
             args.push("--chaos".to_string());
         }
         args.push(request.source);
-        let launched =
-            self.spawn_job_with_input(args, Some(request.input), Some(id), Some(chaos), parallel);
+        let launched = self.spawn_job_with_input(
+            args,
+            Some(request.input),
+            Some(id),
+            Some(chaos),
+            parallel,
+            None,
+        );
         let parallel_count = self.parallel_jobs.len();
         if let Some(workspace) = self.background_rebis_workspace() {
             if launched {
@@ -3259,8 +4846,11 @@ impl App {
         }
         if !launched {
             if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
-                finish_rebis_run_clock(run);
-                run.state = RebisRunState::Complete(-1);
+                pause_rebis_run_clock(run, "could not launch replacement child");
+                run.output.push(
+                    "paused      ⏸ child launch failed · p retries from the last completed prompt"
+                        .to_string(),
+                );
             }
         }
         self.focus_selected_rebis_run();
@@ -3286,7 +4876,7 @@ impl App {
             )));
             self.push_line(Line::from(Span::styled(
                 "     [y] unbound — it may run shell (tests, git, anything)     [n] edits only",
-                Style::new().fg(C_ASH),
+                Style::new().fg(C_ASH()),
             )));
             self.follow = true;
         } else {
@@ -3392,7 +4982,7 @@ impl App {
     }
 
     fn spawn_job(&mut self, args: Vec<String>) {
-        let _ = self.spawn_job_with_input(args, None, None, None, false);
+        let _ = self.spawn_job_with_input(args, None, None, None, false, None);
     }
 
     fn spawn_job_with_input(
@@ -3402,6 +4992,7 @@ impl App {
         rebis_run_id: Option<u64>,
         authority_override: Option<bool>,
         parallel: bool,
+        working_dir: Option<PathBuf>,
     ) -> bool {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kaos"));
         let mut cmd = Command::new(exe);
@@ -3413,7 +5004,7 @@ impl App {
             self.session_id.clone()
         };
         cmd.args(&transport.args)
-            .current_dir(&self.cwd)
+            .current_dir(working_dir.as_deref().unwrap_or(&self.cwd))
             .env("KAOS_MODEL", &self.model)
             .env(
                 "KAOS_CLAUDE_YOLO",
@@ -3446,6 +5037,33 @@ impl App {
         }
         if transport.raw_chat_task {
             cmd.env(RAW_CHAT_TASK_ENV, "1");
+        }
+        let owns_process_group = rebis_run_id.is_some() && cfg!(unix);
+        if rebis_run_id.is_some() {
+            cmd.env(crate::pause::ENABLE_ENV, "1");
+            if let Some(checkpoint_path) = rebis_run_id.and_then(|id| {
+                self.rebis_runs
+                    .iter()
+                    .find(|run| run.id == id)
+                    .map(|run| run.checkpoint_path.clone())
+            }) {
+                cmd.env(crate::rebis_checkpoint::PATH_ENV, checkpoint_path);
+            }
+            if let Some(directive_path) = rebis_run_id.and_then(|id| {
+                self.rebis_runs
+                    .iter()
+                    .find(|run| run.id == id)
+                    .map(|run| run.directive_path.clone())
+            }) {
+                cmd.env(crate::rebis_supervisor::DIRECTIVE_PATH_ENV, directive_path);
+            }
+            if owns_process_group {
+                cmd.env(crate::pause::PROCESS_GROUP_ENV, "1");
+            }
+        }
+        #[cfg(unix)]
+        if owns_process_group {
+            cmd.process_group(0);
         }
         match cmd.spawn() {
             Ok(mut child) => {
@@ -3491,6 +5109,7 @@ impl App {
                     label: transport.label,
                     claude_session,
                     rebis_run_id,
+                    owns_process_group,
                 };
                 if parallel {
                     self.parallel_jobs.push(job);
@@ -3598,6 +5217,18 @@ impl App {
     }
 
     fn cancel_all_work(&mut self, reason: &str) -> usize {
+        // A saved sigil treats app cancellation as "left here": snapshot the
+        // last completed prompt before any process or temporary file is torn
+        // down. Explicit removal of the saved sidecars is a separate action.
+        let durable_ids = self
+            .rebis_runs
+            .iter()
+            .filter(|run| run.state == RebisRunState::Running && run.saved_run_path.is_some())
+            .map(|run| run.id)
+            .collect::<Vec<_>>();
+        for id in durable_ids {
+            let _ = self.persist_rebis_run(id);
+        }
         let mut cancelled_any = false;
         let mut scattered = 0;
         if let Some(job) = self.job.take() {
@@ -3607,7 +5238,11 @@ impl App {
                 .child
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ = child.kill();
+            if job.owns_process_group {
+                let _ = signal_process(child.id(), true, "-KILL");
+            } else {
+                let _ = child.kill();
+            }
             drop(child);
             self.job_start = None;
             self.activity.clear();
@@ -3620,7 +5255,29 @@ impl App {
                     finish_rebis_run_clock(run);
                     run.state = RebisRunState::Cancelled;
                     run.output.push(format!("cancelled   {reason}"));
+                    if run.saved_checkpoint_path.as_ref() != Some(&run.checkpoint_path) {
+                        let _ = std::fs::remove_file(&run.checkpoint_path);
+                    }
                 }
+            }
+        }
+
+        if let Some(turn) = self.sigil_chat_job.take() {
+            cancelled_any = true;
+            let mut child = turn
+                .job
+                .child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if turn.job.owns_process_group {
+                let _ = signal_process(child.id(), true, "-KILL");
+            } else {
+                let _ = child.kill();
+            }
+            drop(child);
+            if let Some(workspace) = self.background_rebis_workspace() {
+                workspace.push_sigil_chat_line(format!("system  god agent cancelled · {reason}"));
+                workspace.set_sigil_chat_busy(false);
             }
         }
 
@@ -3632,13 +5289,20 @@ impl App {
                 .child
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ = child.kill();
+            if job.owns_process_group {
+                let _ = signal_process(child.id(), true, "-KILL");
+            } else {
+                let _ = child.kill();
+            }
             drop(child);
             if let Some(id) = job.rebis_run_id {
                 if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
                     finish_rebis_run_clock(run);
                     run.state = RebisRunState::Cancelled;
                     run.output.push(format!("cancelled   {reason}"));
+                    if run.saved_checkpoint_path.as_ref() != Some(&run.checkpoint_path) {
+                        let _ = std::fs::remove_file(&run.checkpoint_path);
+                    }
                 }
             }
         }
@@ -3758,7 +5422,7 @@ impl App {
     fn note(&mut self, s: &str) {
         self.push_line(Line::from(Span::styled(
             format!("  {s}"),
-            Style::new().fg(C_ASH),
+            Style::new().fg(C_ASH()),
         )));
         self.follow = true;
     }
@@ -3795,6 +5459,16 @@ fn mouse_over_rebis_graph(
 ) -> bool {
     if !workspace.panel_visible {
         return false;
+    }
+    // Prefer the rectangle actually rendered. Percentage reconstruction can
+    // disagree by a row/column after terminal resizing or narrow-layout
+    // rounding, causing wheel events to reach the wrong pane.
+    if let Some((x, y, panel_width, panel_height)) = workspace.panel_inner {
+        let left = x.saturating_sub(1);
+        let top = y.saturating_sub(1);
+        let right = x.saturating_add(panel_width).saturating_add(1);
+        let bottom = y.saturating_add(panel_height).saturating_add(1);
+        return column >= left && column < right && row >= top && row < bottom;
     }
     if width >= 78 {
         column >= width.saturating_mul(56) / 100
@@ -3898,7 +5572,7 @@ fn highlight_pane_selection(buffer: &mut Buffer, area: Rect, selection: &PaneSel
                 cell.set_style(
                     Style::new()
                         .fg(Color::Black)
-                        .bg(C_BLUE)
+                        .bg(C_BLUE())
                         .add_modifier(Modifier::BOLD),
                 );
             }
@@ -3921,9 +5595,48 @@ fn copy_to_terminal_clipboard(text: &str) -> io::Result<()> {
     }
 }
 
-fn finish_rebis_run_clock(run: &mut RebisRunEntry) {
+fn signal_process(pid: u32, process_group: bool, signal: &str) -> bool {
+    let target = if process_group {
+        format!("-{pid}")
+    } else {
+        pid.to_string()
+    };
+    Command::new("kill")
+        .arg(signal)
+        .arg("--")
+        .arg(target)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn pause_rebis_run_clock(run: &mut RebisRunEntry, reason: &str) {
+    if !run.paused {
+        run.paused = true;
+        run.paused_at = Some(Instant::now());
+    }
+    run.pause_reason = Some(reason.to_string());
+}
+
+fn resume_rebis_run_clock(run: &mut RebisRunEntry) {
+    if let Some(paused_at) = run.paused_at.take() {
+        run.paused_total = run.paused_total.saturating_add(paused_at.elapsed());
+    }
+    run.paused = false;
+    run.pause_reason = None;
+}
+
+fn active_rebis_run_elapsed(run: &RebisRunEntry) -> Duration {
     let origin = run.started_at.unwrap_or(run.queued_at);
-    run.elapsed = Some(origin.elapsed());
+    let current_pause = run.paused_at.map_or(Duration::ZERO, |at| at.elapsed());
+    origin
+        .elapsed()
+        .saturating_sub(run.paused_total.saturating_add(current_pause))
+}
+
+fn finish_rebis_run_clock(run: &mut RebisRunEntry) {
+    run.elapsed = Some(active_rebis_run_elapsed(run));
+    resume_rebis_run_clock(run);
 }
 
 fn format_run_duration(duration: Duration) -> String {
@@ -3945,9 +5658,9 @@ fn rebis_run_timer(run: &RebisRunEntry) -> String {
         }
         RebisRunState::Running => format!(
             "TIME {}",
-            format_run_duration(run.started_at.unwrap_or(run.queued_at).elapsed())
+            format_run_duration(active_rebis_run_elapsed(run))
         ),
-        RebisRunState::Complete(_) | RebisRunState::Cancelled => {
+        RebisRunState::Complete | RebisRunState::Cancelled => {
             let duration = run
                 .elapsed
                 .unwrap_or_else(|| run.started_at.unwrap_or(run.queued_at).elapsed());
@@ -4116,14 +5829,14 @@ fn draw_rebis_workspace(
         vec![
             Span::styled("⚙ CONFIG", red_bold()),
             Span::raw("   "),
-            Span::styled(workspace.path_label(), Style::new().fg(C_ASH)),
-            Span::styled(modified, Style::new().fg(C_GOLD)),
+            Span::styled(workspace.path_label(), Style::new().fg(C_ASH())),
+            Span::styled(modified, Style::new().fg(C_GOLD())),
         ]
     } else {
         let mut spans = vec![
             Span::styled(
                 "o-[]-o",
-                Style::new().fg(C_TEAL).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  REBIS", red_bold()),
             Span::raw("   "),
@@ -4133,8 +5846,8 @@ fn draw_rebis_workspace(
         }
         spans.extend([
             Span::raw("  "),
-            Span::styled(workspace.path_label(), Style::new().fg(C_ASH)),
-            Span::styled(modified, Style::new().fg(C_GOLD)),
+            Span::styled(workspace.path_label(), Style::new().fg(C_ASH())),
+            Span::styled(modified, Style::new().fg(C_GOLD())),
         ]);
         spans
     };
@@ -4154,14 +5867,14 @@ fn draw_rebis_workspace(
 
     let editor_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(C_OX))
+        .border_style(Style::new().fg(C_OX()))
         .title(Span::styled(
             if config_document {
                 " KAOS CONFIG "
             } else {
                 " SOURCE "
             },
-            Style::new().fg(C_GOLD),
+            Style::new().fg(C_GOLD()),
         ));
     let editor_inner = editor_block.inner(editor_area);
     f.render_widget(editor_block, editor_area);
@@ -4176,7 +5889,9 @@ fn draw_rebis_workspace(
         content_left: source_content_left,
     }];
 
-    let visualization_title = if workspace.runs_visible {
+    let visualization_title = if workspace.sigil_chat_visible() {
+        " SIGIL CHAT · GOD AGENT "
+    } else if workspace.runs_visible {
         " BACKGROUND RUNS "
     } else {
         match workspace.visualization {
@@ -4186,11 +5901,16 @@ fn draw_rebis_workspace(
         }
     };
     workspace.panel_inner = None;
+    let mut sigil_chat_cursor = None;
     if let Some(graph_area) = graph_area {
         let graph_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::new().fg(if workspace.graph_focus { C_GOLD } else { C_OX }))
-            .title(Span::styled(visualization_title, Style::new().fg(C_TEAL)));
+            .border_style(Style::new().fg(if workspace.graph_focus {
+                C_GOLD()
+            } else {
+                C_OX()
+            }))
+            .title(Span::styled(visualization_title, Style::new().fg(C_TEAL())));
         let graph_inner = graph_block.inner(graph_area);
         selectable_panes.push(TextPaneRegion::full(TextPaneKind::RebisPanel, graph_inner));
         workspace.panel_inner = Some((
@@ -4200,20 +5920,74 @@ fn draw_rebis_workspace(
             graph_inner.height,
         ));
         f.render_widget(graph_block, graph_area);
-        if !workspace.runs_visible {
+        if workspace.sigil_chat_visible() {
+            let chat_areas =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(graph_inner);
+            let history_width = chat_areas[0].width.saturating_sub(1) as usize;
+            let history = workspace
+                .sigil_chat_lines()
+                .iter()
+                .map(|line| {
+                    let style = if line.starts_with("you     ") {
+                        Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD)
+                    } else if line.starts_with("system  ") || line == "GOD CHANNEL" {
+                        Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new().fg(C_BONE())
+                    };
+                    Line::from(Span::styled(line.clone(), style))
+                })
+                .flat_map(|line| wrap_line(&line, history_width.max(1)))
+                .collect::<Vec<_>>();
+            let visible = chat_areas[0].height as usize;
+            let max_top = history.len().saturating_sub(visible.max(1));
+            workspace.graph_top = workspace.graph_top.min(max_top);
+            f.render_widget(
+                Paragraph::new(Text::from(history)).scroll((workspace.graph_top as u16, 0)),
+                chat_areas[0],
+            );
+            let input_title = if workspace.sigil_chat_busy() {
+                " GOD WORKING · streaming above "
+            } else {
+                " MESSAGE · Enter send · Esc source "
+            };
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(if workspace.sigil_chat_busy() {
+                    C_TEAL()
+                } else {
+                    C_GOLD()
+                }))
+                .title(Span::styled(input_title, Style::new().fg(C_GOLD())));
+            let input_inner = input_block.inner(chat_areas[1]);
+            f.render_widget(input_block, chat_areas[1]);
+            f.render_widget(
+                Paragraph::new(workspace.sigil_chat_input().to_string()),
+                input_inner,
+            );
+            if workspace.graph_focus && input_inner.width > 0 {
+                sigil_chat_cursor = Some(Position {
+                    x: input_inner
+                        .x
+                        .saturating_add(workspace.sigil_chat_input().chars().count() as u16)
+                        .min(input_inner.right().saturating_sub(1)),
+                    y: input_inner.y,
+                });
+            }
+        } else if !workspace.runs_visible {
             let graph_lines =
                 workspace.graph_lines(graph_inner.width as usize, graph_inner.height as usize);
             let graph_text = graph_lines
                 .into_iter()
                 .map(|line| {
                     let style = if line.starts_with("o-[]-o") {
-                        Style::new().fg(C_TEAL).add_modifier(Modifier::BOLD)
+                        Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD)
                     } else if matches!(line.as_str(), "REGION TREE" | "DIRECTED FLOW") {
-                        Style::new().fg(C_GOLD).add_modifier(Modifier::BOLD)
+                        Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD)
                     } else if line.contains('→') || line.contains('←') || line.contains('[') {
-                        Style::new().fg(C_TEAL)
+                        Style::new().fg(C_TEAL())
                     } else {
-                        Style::new().fg(C_BONE)
+                        Style::new().fg(C_BONE())
                     };
                     Line::from(Span::styled(line, style))
                 })
@@ -4245,9 +6019,9 @@ fn draw_rebis_workspace(
                             RebisRunState::Queued => {
                                 format!("⧗{} QUEUED", run.queue_position.unwrap_or_default())
                             }
+                            RebisRunState::Running if run.entry.paused => "Ⅱ PAUSED".to_string(),
                             RebisRunState::Running => "● RUNNING".to_string(),
-                            RebisRunState::Complete(0) => "✓ DONE".to_string(),
-                            RebisRunState::Complete(code) => format!("✗ EXIT {code}"),
+                            RebisRunState::Complete => "✓ DONE".to_string(),
                             RebisRunState::Cancelled => "× CANCELLED".to_string(),
                         };
                         let timer = rebis_run_timer(&run.entry);
@@ -4265,10 +6039,10 @@ fn draw_rebis_workspace(
                             if *index == selected {
                                 Style::new()
                                     .fg(Color::Black)
-                                    .bg(C_GOLD)
+                                    .bg(C_GOLD())
                                     .add_modifier(Modifier::BOLD)
                             } else {
-                                Style::new().fg(C_BONE)
+                                Style::new().fg(C_BONE())
                             },
                         ))
                     }
@@ -4298,27 +6072,31 @@ fn draw_rebis_workspace(
                             if *run == selected {
                                 Style::new()
                                     .fg(if *kind == RebisRunSectionKind::Agent {
-                                        C_TEAL
+                                        C_TEAL()
                                     } else {
-                                        C_GOLD
+                                        C_GOLD()
                                     })
                                     .add_modifier(Modifier::BOLD)
                             } else {
-                                Style::new().fg(C_OX)
+                                Style::new().fg(C_OX())
                             },
                         ))
                     }
                     RebisRunTreeRow::Output { run, depth, text } => Line::from(Span::styled(
                         format!("    │ {}{text}", "  ".repeat(*depth)),
                         if *run == selected {
-                            Style::new().fg(C_ASH)
+                            Style::new().fg(C_ASH())
                         } else {
-                            Style::new().fg(C_OX)
+                            Style::new().fg(C_OX())
                         },
                     )),
                 })
                 .collect::<Vec<_>>();
-            let border = if workspace.graph_focus { C_GOLD } else { C_OX };
+            let border = if workspace.graph_focus {
+                C_GOLD()
+            } else {
+                C_OX()
+            };
             f.render_widget(
                 Paragraph::new(lines).scroll((0, 0)).block(
                     Block::default()
@@ -4326,7 +6104,7 @@ fn draw_rebis_workspace(
                         .border_style(Style::new().fg(border))
                         .title(Span::styled(
                             " RUNS · j/k RUN · ↑/↓ SCROLL · ⇧↓ TAIL · Pg SCROLL · Tab OPEN ",
-                            Style::new().fg(C_GOLD).add_modifier(Modifier::BOLD),
+                            Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD),
                         )),
                 ),
                 area,
@@ -4361,10 +6139,10 @@ fn draw_rebis_workspace(
                         if index == selected {
                             Style::new()
                                 .fg(Color::Black)
-                                .bg(C_TEAL)
+                                .bg(C_TEAL())
                                 .add_modifier(Modifier::BOLD)
                         } else {
-                            Style::new().fg(C_BONE)
+                            Style::new().fg(C_BONE())
                         },
                     ))
                 })
@@ -4384,11 +6162,11 @@ fn draw_rebis_workspace(
         Line::from(vec![
             Span::styled(
                 "⚙ CONFIG  ",
-                Style::new().fg(C_TEAL).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "plain key/value file · provider credentials remain separate",
-                Style::new().fg(C_ASH),
+                Style::new().fg(C_ASH()),
             ),
         ])
     } else if workspace.chaos_star_visible() {
@@ -4397,11 +6175,11 @@ fn draw_rebis_workspace(
         Line::from(vec![
             Span::styled(
                 "✗ INVALID  ",
-                Style::new().fg(C_RED).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_RED()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 truncate(error, rows[2].width.saturating_sub(11) as usize),
-                Style::new().fg(C_RED),
+                Style::new().fg(C_RED()),
             ),
         ])
     } else {
@@ -4409,13 +6187,11 @@ fn draw_rebis_workspace(
         Line::from(vec![
             Span::styled(
                 "✓ VALID  ",
-                Style::new()
-                    .fg(Color::Rgb(90, 200, 110))
-                    .add_modifier(Modifier::BOLD),
+                Style::new().fg(C_DONE()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 truncate(canonical, rows[2].width.saturating_sub(9) as usize),
-                Style::new().fg(C_ASH),
+                Style::new().fg(C_ASH()),
             ),
         ])
     };
@@ -4432,7 +6208,7 @@ fn draw_rebis_workspace(
                 },
                 red_bold(),
             ),
-            Span::styled(workspace.command.clone(), Style::new().fg(C_BONE)),
+            Span::styled(workspace.command.clone(), Style::new().fg(C_BONE())),
         ])
     } else {
         let hint = if config_document {
@@ -4462,25 +6238,28 @@ fn draw_rebis_workspace(
                 if workspace.mode == RebisMode::Insert {
                     Style::new()
                         .fg(Color::Black)
-                        .bg(C_TEAL)
+                        .bg(C_TEAL())
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::new()
-                        .fg(C_BONE)
-                        .bg(C_OX)
+                        .fg(C_BONE())
+                        .bg(C_OX())
                         .add_modifier(Modifier::BOLD)
                 },
             ),
             Span::styled(
                 format!("  {}:{}  ", row + 1, column + 1),
-                Style::new().fg(C_ASH),
+                Style::new().fg(C_ASH()),
             ),
-            Span::styled(queued, Style::new().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                queued,
+                Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 truncate(&workspace.message, message_width),
-                Style::new().fg(C_ASH),
+                Style::new().fg(C_ASH()),
             ),
-            Span::styled(hint, Style::new().fg(C_OX)),
+            Span::styled(hint, Style::new().fg(C_OX())),
         ])
     };
     let status_area = render_footer_with_model(f, rows[3], status, selected_model);
@@ -4494,6 +6273,8 @@ fn draw_rebis_workspace(
             .saturating_add(workspace.command.chars().count() as u16)
             .min(status_area.right().saturating_sub(1));
         f.set_cursor_position(Position { x, y: rows[3].y });
+    } else if let Some(position) = sigil_chat_cursor {
+        f.set_cursor_position(position);
     } else if workspace.mode == RebisMode::Insert {
         if let Some(position) = editor_cursor {
             f.set_cursor_position(position);
@@ -4520,7 +6301,9 @@ fn render_rebis_source(
     let code_width = (area.width as usize)
         .saturating_sub(number_width + 2)
         .max(1);
-    workspace.ensure_visible(area.height as usize, code_width);
+    if workspace.source_follows_cursor() {
+        workspace.ensure_visible(area.height as usize, code_width);
+    }
 
     let source = workspace.editor.source();
     let chars: Vec<char> = source.chars().collect();
@@ -4561,28 +6344,28 @@ fn render_rebis_source(
         let mut spans = vec![
             Span::styled(
                 format!("{:>number_width$} ", row + 1),
-                Style::new().fg(if row == cursor_row { C_GOLD } else { C_OX }),
+                Style::new().fg(if row == cursor_row { C_GOLD() } else { C_OX() }),
             ),
-            Span::styled("│", Style::new().fg(C_OX)),
+            Span::styled("│", Style::new().fg(C_OX())),
         ];
         let visible_start = start + workspace.view_left.min(end - start);
         let visible_end = (visible_start + code_width).min(end);
         for index in visible_start..visible_end {
             let mut style = rebis_highlight_style(colours[index]);
             if matched.is_some_and(|(left, right)| index == left || index == right) {
-                style = style.bg(C_OX).add_modifier(Modifier::BOLD);
+                style = style.bg(C_OX()).add_modifier(Modifier::BOLD);
             }
             if error == Some(index) {
-                style = style.fg(C_RED).add_modifier(Modifier::UNDERLINED);
+                style = style.fg(C_RED()).add_modifier(Modifier::UNDERLINED);
             }
             if visual.is_some_and(|(start, end)| index >= start && index <= end) {
-                style = style.bg(C_BLUE).add_modifier(Modifier::BOLD);
+                style = style.bg(C_BLUE()).add_modifier(Modifier::BOLD);
             }
             if block.is_some_and(|(top, bottom, left, right)| {
                 let column = index - start;
                 row >= top && row <= bottom && column >= left && column <= right
             }) {
-                style = style.bg(C_BLUE).add_modifier(Modifier::BOLD);
+                style = style.bg(C_BLUE()).add_modifier(Modifier::BOLD);
             }
             if workspace.mode == RebisMode::Normal && cursor == index {
                 style = style.add_modifier(Modifier::REVERSED);
@@ -4593,9 +6376,9 @@ fn render_rebis_source(
         // empty lines) without altering the source.
         if row == cursor_row && cursor == end && cursor_column >= workspace.view_left {
             let style = if workspace.mode == RebisMode::Normal {
-                Style::new().fg(C_BONE).add_modifier(Modifier::REVERSED)
+                Style::new().fg(C_BONE()).add_modifier(Modifier::REVERSED)
             } else {
-                Style::new().fg(C_BONE)
+                Style::new().fg(C_BONE())
             };
             spans.push(Span::styled(" ", style));
         }
@@ -4644,21 +6427,21 @@ fn render_chaos_star(f: &mut Frame, area: Rect) {
 
 fn rebis_highlight_style(highlight: Highlight) -> Style {
     match highlight {
-        Highlight::Atom => Style::new().fg(C_BONE),
-        Highlight::Prompt => Style::new().fg(C_TEAL),
+        Highlight::Atom => Style::new().fg(C_BONE()),
+        Highlight::Prompt => Style::new().fg(C_TEAL()),
         Highlight::Forward
         | Highlight::Mediate
         | Highlight::Import
         | Highlight::Backflow
         | Highlight::Parenthesis => rebis_operator_style(),
-        Highlight::Whitespace => Style::new().fg(C_BONE),
-        Highlight::Comment => Style::new().fg(C_ASH).add_modifier(Modifier::ITALIC),
-        Highlight::Invalid => Style::new().fg(C_RED).add_modifier(Modifier::UNDERLINED),
+        Highlight::Whitespace => Style::new().fg(C_BONE()),
+        Highlight::Comment => Style::new().fg(C_ASH()).add_modifier(Modifier::ITALIC),
+        Highlight::Invalid => Style::new().fg(C_RED()).add_modifier(Modifier::UNDERLINED),
     }
 }
 
 fn rebis_operator_style() -> Style {
-    Style::new().fg(C_GOLD).add_modifier(Modifier::BOLD)
+    Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD)
 }
 
 fn spawn_reader(r: impl Read + Send + 'static, tx: Sender<Msg>, is_err: bool) {
@@ -5007,6 +6790,7 @@ mod tests {
                 label: "parallel test job".to_string(),
                 claude_session: false,
                 rebis_run_id,
+                owns_process_group: false,
             },
             tx,
         )
@@ -5026,6 +6810,10 @@ mod tests {
         assert_eq!(
             completions("record ", REBIS_SLASH_COMMANDS)[0].display,
             "record [FILE]"
+        );
+        assert_eq!(
+            completions("search ", REBIS_SLASH_COMMANDS)[0].display,
+            "search [TEXT]"
         );
         let displays = REBIS_SLASH_COMMANDS
             .iter()
@@ -5048,6 +6836,228 @@ mod tests {
             rebis_completions("run block p"),
             vec![command("run block parallel", "run block parallel")]
         );
+        assert_eq!(
+            rebis_completions("sigil c"),
+            vec![command("sigil chat", "sigil chat")]
+        );
+    }
+
+    #[test]
+    fn saved_rebis_run_codec_round_trips_multiline_context() {
+        let saved = SavedRebisRun {
+            source: "(-> \"α\" \"β\")\n".to_string(),
+            input: "record line 1\nrecord line 2".to_string(),
+            scope: RunScope::Block,
+            parallel: true,
+            chaos: true,
+            output: vec!["first\nwrapped".to_string(), "final ✓".to_string()],
+            elapsed: Duration::from_millis(12_345),
+            pause_reason: "model allowance reached".to_string(),
+        };
+        assert_eq!(
+            decode_saved_rebis_run(&encode_saved_rebis_run(&saved)),
+            Ok(saved)
+        );
+    }
+
+    #[test]
+    fn god_agent_context_contains_every_live_bot_and_no_terminal_bot() {
+        let mut app = App::new();
+        app.open_rebis(None);
+        let first = RunRequest {
+            source: "(-> \"first source\" \"first result\")".to_string(),
+            input: "first record".to_string(),
+            scope: RunScope::Program,
+        };
+        let second = RunRequest {
+            source: "\"second source\"".to_string(),
+            input: "second record".to_string(),
+            scope: RunScope::Block,
+        };
+        let finished = RunRequest {
+            source: "\"finished source\"".to_string(),
+            input: "finished record".to_string(),
+            scope: RunScope::Program,
+        };
+        let first_id = app.register_rebis_run(&first, RebisRunState::Running);
+        let second_id = app.register_rebis_run(&second, RebisRunState::Queued);
+        let finished_id = app.register_rebis_run(&finished, RebisRunState::Complete);
+        app.rebis_runs[0]
+            .output
+            .push("first bot retained trace".to_string());
+        app.rebis_runs[1]
+            .output
+            .push("second bot queued trace".to_string());
+        std::fs::write(&app.rebis_runs[0].checkpoint_path, "checkpoint one").unwrap();
+        std::fs::write(&app.rebis_runs[1].directive_path, "compare with run one").unwrap();
+
+        let context = app.sigil_chat_run_context(Some(first_id));
+
+        assert!(context.contains("live bots: 2"), "{context}");
+        assert!(context.contains(&format!("RUN #{first_id} · BOUND")));
+        assert!(context.contains(&format!("RUN #{second_id} · READ-ONLY PEER")));
+        assert!(!context.contains(&format!("RUN #{finished_id} ·")));
+        for retained in [
+            "first source",
+            "second source",
+            "first record",
+            "second record",
+            "checkpoint one",
+            "compare with run one",
+            "first bot retained trace",
+            "second bot queued trace",
+        ] {
+            assert!(
+                context.contains(retained),
+                "missing {retained:?}: {context}"
+            );
+        }
+        let _ = std::fs::remove_file(&app.rebis_runs[0].checkpoint_path);
+        let _ = std::fs::remove_file(&app.rebis_runs[1].directive_path);
+    }
+
+    #[test]
+    fn god_agent_applies_and_clears_a_directive_for_one_targeted_bot() {
+        let mut app = App::new();
+        app.open_rebis(None);
+        let request = RunRequest {
+            source: "\"work\"".to_string(),
+            input: String::new(),
+            scope: RunScope::Program,
+        };
+        let id = app.register_rebis_run(&request, RebisRunState::Running);
+        let bridge = std::env::temp_dir().join(format!("kaos-god-control-{}", gen_uuid()));
+        std::fs::create_dir_all(&bridge).unwrap();
+        app.write_sigil_chat_control_bridge(&bridge).unwrap();
+        std::fs::write(
+            bridge
+                .join("runs")
+                .join(id.to_string())
+                .join("directive.txt"),
+            "audit every claim before returning",
+        )
+        .unwrap();
+        std::fs::write(
+            bridge.join("run-control.txt"),
+            format!("APPLY_DIRECTIVE {id}\n"),
+        )
+        .unwrap();
+
+        app.apply_sigil_chat_run_controls(&bridge);
+        assert_eq!(
+            crate::rebis_supervisor::read_directive(&app.rebis_runs[0].directive_path).as_deref(),
+            Some("audit every claim before returning")
+        );
+        assert!(app.rebis_runs[0]
+            .output
+            .iter()
+            .any(|line| line.contains("directive")));
+
+        std::fs::write(
+            bridge.join("run-control.txt"),
+            format!("CLEAR_DIRECTIVE {id}\n"),
+        )
+        .unwrap();
+        app.apply_sigil_chat_run_controls(&bridge);
+        assert!(!app.rebis_runs[0].directive_path.exists());
+        let _ = std::fs::remove_dir_all(bridge);
+    }
+
+    #[test]
+    fn god_agent_control_manifest_is_strict_and_has_no_kill_action() {
+        assert_eq!(
+            parse_sigil_run_controls("# requested actions\nPAUSE 2\nRESUME 3\n"),
+            Ok(vec![SigilRunControl::Pause(2), SigilRunControl::Resume(3)])
+        );
+        assert!(parse_sigil_run_controls("KILL 2").is_err());
+        assert!(parse_sigil_run_controls("PAUSE 2 now").is_err());
+    }
+
+    #[test]
+    fn saved_sigil_restores_an_unfinished_run_in_a_new_app() {
+        let root = std::env::temp_dir().join(format!(
+            "kaos-saved-run-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = "(-> \"first prompt\" \"unfinished prompt\")";
+
+        let mut first = App::new();
+        first.open_rebis(None);
+        {
+            let workspace = first.rebis.as_mut().unwrap();
+            workspace.set_sigils_root_for_test(root.clone());
+            workspace.dismiss_chaos_star();
+            workspace.editor.replace(source.to_string());
+            workspace.refresh();
+        }
+        let request = RunRequest {
+            source: source.to_string(),
+            input: "durable record".to_string(),
+            scope: RunScope::Program,
+        };
+        let id = first.register_rebis_run(&request, RebisRunState::Running);
+        first.rebis_runs[0]
+            .output
+            .push("answer   first prompt complete".to_string());
+        let temporary_checkpoint = first.rebis_runs[0].checkpoint_path.clone();
+        let journal = b"KAOS_REBIS_PROMPTS_V1\n66697273742070726f6d7074\tS646f6e65\n";
+        std::fs::write(&temporary_checkpoint, journal).unwrap();
+        first.rebis_run_choice = 0;
+        first.rebis.as_mut().unwrap().command = "sigil save durable/loop".to_string();
+        let action = first.rebis.as_mut().unwrap().execute_kaos_command();
+        first.handle_rebis_action(action);
+        first.pump();
+
+        assert_eq!(first.rebis_runs[0].id, id);
+        assert_eq!(first.rebis_runs[0].sigil.as_deref(), Some("durable/loop"));
+        assert!(root.join("durable/loop.run").is_file());
+        assert_eq!(
+            std::fs::read(root.join("durable/loop.checkpoint")).unwrap(),
+            journal
+        );
+
+        let mut reopened = App::new();
+        reopened.open_rebis(None);
+        reopened
+            .rebis
+            .as_mut()
+            .unwrap()
+            .set_sigils_root_for_test(root.clone());
+        reopened.rebis.as_mut().unwrap().command = "sigil open durable/loop".to_string();
+        let action = reopened.rebis.as_mut().unwrap().execute_kaos_command();
+        reopened.handle_rebis_action(action);
+        reopened.pump();
+
+        assert_eq!(reopened.rebis_runs.len(), 1);
+        let restored = &reopened.rebis_runs[0];
+        assert_eq!(restored.state, RebisRunState::Running);
+        assert!(restored.paused);
+        assert_eq!(restored.request.source, source);
+        assert_eq!(restored.request.input, "durable record");
+        assert_eq!(
+            restored.checkpoint_path,
+            root.join("durable/loop.checkpoint")
+        );
+        assert!(restored
+            .output
+            .iter()
+            .any(|line| line.contains("saved sigil checkpoint")));
+        assert!(reopened
+            .rebis
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("p resumes"));
+
+        let restored_id = restored.id;
+        reopened.finish_rebis_subprocess(Some(restored_id), 0, false);
+        assert!(!root.join("durable/loop.run").exists());
+        assert!(!root.join("durable/loop.checkpoint").exists());
+
+        let _ = std::fs::remove_file(temporary_checkpoint);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -5318,6 +7328,7 @@ mod tests {
             label: "Rebis background test".to_string(),
             claude_session: false,
             rebis_run_id: Some(id),
+            owns_process_group: false,
         });
         app.job_start = Some(Instant::now());
 
@@ -5367,7 +7378,7 @@ mod tests {
         tx.send(Msg::Done(0)).unwrap();
         app.pump();
         assert!(app.job.is_none());
-        assert_eq!(app.rebis_runs[0].state, RebisRunState::Complete(0));
+        assert_eq!(app.rebis_runs[0].state, RebisRunState::Complete);
     }
 
     #[test]
@@ -5396,6 +7407,7 @@ mod tests {
             label: "pause test".to_string(),
             claude_session: false,
             rebis_run_id: Some(id),
+            owns_process_group: false,
         });
         app.rebis_run_choice = 0;
 
@@ -5427,7 +7439,186 @@ mod tests {
     }
 
     #[test]
-    fn parallel_rebis_jobs_stream_and_complete_independently() {
+    fn sigil_chat_rewrites_a_paused_run_without_deleting_its_checkpoint() {
+        let mut app = App::new();
+        app.open_rebis(None);
+        let request = RunRequest {
+            source: "(-> \"old\" \"report\")".to_string(),
+            input: "retained record".to_string(),
+            scope: RunScope::Program,
+        };
+        let id = app.register_rebis_run(&request, RebisRunState::Running);
+        let checkpoint = app.rebis_runs[0].checkpoint_path.clone();
+        std::fs::write(&checkpoint, "checkpoint sentinel").unwrap();
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        app.job = Some(Job {
+            child: Arc::new(Mutex::new(child)),
+            rx: mpsc::channel().1,
+            label: "sigil chat rewrite test".to_string(),
+            claude_session: false,
+            rebis_run_id: Some(id),
+            owns_process_group: false,
+        });
+
+        app.handle_rebis_action(WorkspaceAction::OpenSigilChat);
+        assert_eq!(app.rebis.as_ref().unwrap().sigil_chat_run_id(), Some(id));
+        assert!(app.pause_run_for_sigil_chat(id));
+        app.rewrite_rebis_run_source(id, "(-> \"old\" \"revised report\")");
+        app.retire_rebis_child_for_rewrite(id);
+
+        assert!(app.job.is_none());
+        assert_eq!(
+            app.rebis_runs[0].request.source,
+            "(-> \"old\" \"revised report\")"
+        );
+        assert_eq!(app.rebis_runs[0].request.input, "retained record");
+        assert!(app.rebis_runs[0].paused);
+        assert_eq!(
+            std::fs::read_to_string(&checkpoint).unwrap(),
+            "checkpoint sentinel"
+        );
+        let _ = std::fs::remove_file(checkpoint);
+    }
+
+    #[test]
+    fn completed_god_turn_merges_only_valid_unchanged_base_source() {
+        let mut app = App::new();
+        app.open_rebis(None);
+        let base = "(-> \"inspect\" \"old report\")";
+        let revised = "(-> \"inspect\" \"revised report\")";
+        {
+            let workspace = app.rebis.as_mut().unwrap();
+            workspace.dismiss_chaos_star();
+            workspace.editor.replace(base.to_string());
+            workspace.refresh();
+        }
+        let request = RunRequest {
+            source: base.to_string(),
+            input: "evidence stays".to_string(),
+            scope: RunScope::Program,
+        };
+        let id = app.register_rebis_run(&request, RebisRunState::Running);
+        let bridge_dir =
+            std::env::temp_dir().join(format!("kaos-sigil-chat-merge-test-{}", std::process::id()));
+        std::fs::create_dir_all(&bridge_dir).unwrap();
+        std::fs::write(bridge_dir.join("sigil.rebis"), revised).unwrap();
+        let (job, _tx) = test_job("exit 0", None);
+
+        app.finish_sigil_chat_turn(
+            SigilChatJob {
+                job,
+                base_source: base.to_string(),
+                bridge_dir: bridge_dir.clone(),
+                run_id: Some(id),
+                resume_after: false,
+            },
+            0,
+        );
+
+        assert_eq!(app.rebis.as_ref().unwrap().editor.source(), revised);
+        assert_eq!(app.rebis_runs[0].request.source, revised);
+        assert_eq!(app.rebis_runs[0].request.input, "evidence stays");
+        assert!(app
+            .rebis
+            .as_ref()
+            .unwrap()
+            .sigil_chat_lines()
+            .iter()
+            .any(|line| line.contains("valid source revision applied")));
+        let _ = std::fs::remove_dir_all(bridge_dir);
+    }
+
+    #[test]
+    fn child_pause_marker_keeps_the_rebis_job_live_and_resumable() {
+        let mut app = App::new();
+        app.open_rebis(None);
+        app.rebis.as_mut().unwrap().dismiss_chaos_star();
+        let request = RunRequest {
+            source: "\"slow model\"".to_string(),
+            input: String::new(),
+            scope: RunScope::Program,
+        };
+        let id = app.register_rebis_run(&request, RebisRunState::Running);
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let (tx, rx) = mpsc::channel();
+        app.job = Some(Job {
+            child: Arc::new(Mutex::new(child)),
+            rx,
+            label: "automatic pause test".to_string(),
+            claude_session: false,
+            rebis_run_id: Some(id),
+            owns_process_group: false,
+        });
+        app.job_start = Some(Instant::now());
+
+        tx.send(Msg::Line(format!(
+            "{}model turn timed out after 30s",
+            crate::pause::PAUSED_MARKER
+        )))
+        .unwrap();
+        app.pump();
+
+        let run = &app.rebis_runs[0];
+        assert!(app.job.is_some(), "a pause must retain the live child");
+        assert!(run.paused);
+        assert_eq!(run.state, RebisRunState::Running);
+        assert_eq!(
+            run.pause_reason.as_deref(),
+            Some("model turn timed out after 30s")
+        );
+        assert!(run.output.iter().any(|line| line.contains("p resumes")));
+        assert!(run
+            .output
+            .iter()
+            .all(|line| !line.contains(crate::pause::PAUSED_MARKER)));
+
+        assert!(app.toggle_pause_selected_rebis_run());
+        assert!(!app.rebis_runs[0].paused);
+        assert!(app.job.is_some());
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+
+    #[test]
+    fn p_relaunches_a_vanished_child_from_its_prompt_checkpoint() {
+        let mut app = App::new();
+        app.open_rebis(None);
+        app.rebis.as_mut().unwrap().dismiss_chaos_star();
+        let request = RunRequest {
+            source: "\"first\" \"failed prompt\"".to_string(),
+            input: "original record".to_string(),
+            scope: RunScope::Program,
+        };
+        let id = app.register_rebis_run(&request, RebisRunState::Running);
+
+        // The subprocess is already gone. A non-success status must preserve a
+        // resumable run instead of creating a terminal failure state.
+        app.finish_rebis_subprocess(Some(id), 9, false);
+        assert!(app.rebis_runs[0].paused);
+        assert_eq!(app.rebis_runs[0].state, RebisRunState::Running);
+        assert!(
+            app.has_active_jobs(),
+            "the paused serial run keeps its lane"
+        );
+        assert!(app.job.is_none());
+
+        // Under test current_exe is the test harness, but the production launch
+        // path and retained argv/stdin/checkpoint wiring are the same. The job
+        // remains owned until pump observes its status.
+        assert!(app.toggle_pause_selected_rebis_run());
+        assert!(!app.rebis_runs[0].paused);
+        assert_eq!(app.rebis_runs[0].request, request);
+        assert!(app.job.is_some(), "p must launch the replacement child");
+        assert!(app.rebis_runs[0]
+            .output
+            .iter()
+            .any(|line| line.contains("completed prompts replay locally")));
+
+        app.cancel_all_work("test cleanup");
+    }
+
+    #[test]
+    fn parallel_rebis_jobs_finish_or_pause_independently() {
         let mut app = App::new();
         app.open_rebis(None);
         app.rebis.as_mut().unwrap().dismiss_chaos_star();
@@ -5475,8 +7666,13 @@ mod tests {
             .iter()
             .find(|run| run.id == right_id)
             .unwrap();
-        assert_eq!(left.state, RebisRunState::Complete(0));
-        assert_eq!(right.state, RebisRunState::Complete(7));
+        assert_eq!(left.state, RebisRunState::Complete);
+        assert_eq!(right.state, RebisRunState::Running);
+        assert!(right.paused);
+        assert!(right
+            .pause_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("unexpectedly (7)")));
         assert!(left.parallel && right.parallel);
         assert!(left
             .output
@@ -5874,10 +8070,13 @@ mod tests {
         run.started_at = Some(Instant::now() - Duration::from_secs(65));
         assert_eq!(rebis_run_timer(run), "TIME 1m 05s");
 
+        run.paused_total = Duration::from_secs(5);
+        assert_eq!(rebis_run_timer(run), "TIME 1m 00s");
+
         finish_rebis_run_clock(run);
-        run.state = RebisRunState::Complete(0);
+        run.state = RebisRunState::Complete;
         let frozen = rebis_run_timer(run);
-        assert_eq!(frozen, "TIME 1m 05s");
+        assert_eq!(frozen, "TIME 1m 00s");
         assert!(run.elapsed.is_some());
     }
 
@@ -5896,7 +8095,7 @@ mod tests {
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
-        run.state = RebisRunState::Complete(0);
+        run.state = RebisRunState::Complete;
         run.expanded = false;
         run.output = vec!["first streamed line".to_string(), "final value".to_string()];
 
@@ -5930,7 +8129,7 @@ mod tests {
             workspace.dismiss_chaos_star();
             workspace.begin_run(RunScope::Program);
         }
-        let id = app.register_rebis_run(&request, RebisRunState::Complete(0));
+        let id = app.register_rebis_run(&request, RebisRunState::Complete);
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
         run.expanded = true;
         run.output = vec![
@@ -6019,7 +8218,7 @@ mod tests {
             input: String::new(),
             scope: RunScope::Block,
         };
-        app.register_rebis_run(&completed, RebisRunState::Complete(0));
+        app.register_rebis_run(&completed, RebisRunState::Complete);
         app.register_rebis_run(&active, RebisRunState::Running);
         {
             let workspace = app.rebis.as_mut().unwrap();
@@ -6051,7 +8250,7 @@ mod tests {
             input: String::new(),
             scope: RunScope::Program,
         };
-        let id = app.register_rebis_run(&request, RebisRunState::Complete(0));
+        let id = app.register_rebis_run(&request, RebisRunState::Complete);
         let output = format!("BEGIN-{}-END-UNTRUNCATED", "x".repeat(160));
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
         run.expanded = true;
@@ -6092,7 +8291,7 @@ mod tests {
             input: String::new(),
             scope: RunScope::Program,
         };
-        let id = app.register_rebis_run(&request, RebisRunState::Complete(0));
+        let id = app.register_rebis_run(&request, RebisRunState::Complete);
         let title = "Rebis agent 1 · Design a falsifiable ritual whose complete instruction must remain visible";
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
         run.expanded = true;
@@ -6120,7 +8319,7 @@ mod tests {
             input: String::new(),
             scope: RunScope::Program,
         };
-        let id = app.register_rebis_run(&request, RebisRunState::Complete(0));
+        let id = app.register_rebis_run(&request, RebisRunState::Complete);
         let title = "model turn 123 · complete response that wraps across several narrow rows";
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
         run.expanded = true;
@@ -6143,7 +8342,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_down_jumps_to_the_tail_while_plain_arrows_scroll_run_output() {
+    fn shifted_arrows_jump_to_log_ends_while_plain_arrows_scroll_run_output() {
         let mut app = App::new();
         app.open_rebis(None);
         {
@@ -6157,7 +8356,7 @@ mod tests {
             input: String::new(),
             scope: RunScope::Program,
         };
-        let id = app.register_rebis_run(&request, RebisRunState::Complete(0));
+        let id = app.register_rebis_run(&request, RebisRunState::Complete);
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
         run.expanded = true;
         run.output = (0..60)
@@ -6177,6 +8376,11 @@ mod tests {
         assert_eq!(app.rebis_run_choice, 0);
         app.on_rebis_key(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(app.rebis_run_top, max_top - 1);
+        app.on_rebis_key(KeyCode::Up, KeyModifiers::SHIFT);
+        assert_eq!(app.rebis_run_top, 0);
+        assert_eq!(app.rebis_run_choice, 0);
+        app.on_rebis_key(KeyCode::Down, KeyModifiers::SHIFT);
+        assert_eq!(app.rebis_run_top, max_top);
         app.on_rebis_key(KeyCode::Home, KeyModifiers::NONE);
         assert_eq!(app.rebis_run_top, 0);
         app.on_rebis_key(KeyCode::PageDown, KeyModifiers::NONE);
@@ -6474,6 +8678,7 @@ mod tests {
             label: "rebis run".to_string(),
             claude_session: false,
             rebis_run_id: None,
+            owns_process_group: false,
         });
         app.job_start = Some(Instant::now());
 
@@ -6532,6 +8737,7 @@ mod tests {
             label: "active test work".to_string(),
             claude_session: false,
             rebis_run_id: None,
+            owns_process_group: false,
         });
         app.job_start = Some(Instant::now());
         app.input = "the next intent, mid-typing".to_string();
@@ -6559,11 +8765,98 @@ mod tests {
 
     #[test]
     fn mouse_wheel_target_tracks_the_rebis_pane_under_pointer() {
-        let workspace = RebisWorkspace::open(PathBuf::from("."), None).unwrap();
+        let mut workspace = RebisWorkspace::open(PathBuf::from("."), None).unwrap();
         assert!(!mouse_over_rebis_graph(&workspace, 20, 10, (100, 30)));
         assert!(mouse_over_rebis_graph(&workspace, 80, 10, (100, 30)));
         assert!(!mouse_over_rebis_graph(&workspace, 20, 5, (70, 30)));
         assert!(mouse_over_rebis_graph(&workspace, 20, 24, (70, 30)));
+
+        // Once drawn, exact pane geometry wins over percentage estimates and
+        // includes the panel border without stealing the adjacent source row.
+        workspace.panel_inner = Some((1, 18, 68, 9));
+        assert!(!mouse_over_rebis_graph(&workspace, 20, 16, (70, 30)));
+        assert!(mouse_over_rebis_graph(&workspace, 20, 17, (70, 30)));
+    }
+
+    #[test]
+    fn mouse_wheel_scroll_persists_away_from_the_source_cursor_and_is_bounded() {
+        let mut app = App::new();
+        app.open_rebis(None);
+        {
+            let workspace = app.rebis.as_mut().unwrap();
+            workspace.dismiss_chaos_star();
+            workspace.editor = rebis_workspace::Editor::new(
+                (0..80)
+                    .map(|line| format!("line {line:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            workspace.refresh();
+        }
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let source = app
+            .text_panes
+            .iter()
+            .find(|pane| pane.kind == TextPaneKind::RebisSource)
+            .unwrap()
+            .clone();
+        let column = source.area.x + 1;
+        let row = source.area.y + 1;
+
+        app.on_mouse_scroll(1, column, row, KeyModifiers::NONE, (120, 24));
+        assert_eq!(app.rebis.as_ref().unwrap().view_top, 3);
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(
+            app.rebis.as_ref().unwrap().view_top,
+            3,
+            "drawing must not snap a manually scrolled viewport back to the cursor"
+        );
+
+        app.on_mouse_scroll(100, column, row, KeyModifiers::NONE, (120, 24));
+        let top = app.rebis.as_ref().unwrap().view_top;
+        app.on_mouse_scroll(1, column, row, KeyModifiers::NONE, (120, 24));
+        assert_eq!(app.rebis.as_ref().unwrap().view_top, top);
+        app.on_mouse_scroll(-1, column, row, KeyModifiers::NONE, (120, 24));
+        assert_eq!(app.rebis.as_ref().unwrap().view_top, top - 3);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_the_drawn_run_pane_in_both_directions() {
+        let mut app = App::new();
+        app.open_rebis(None);
+        app.rebis.as_mut().unwrap().dismiss_chaos_star();
+        let request = RunRequest {
+            source: "\"wheel output\"".to_string(),
+            input: String::new(),
+            scope: RunScope::Program,
+        };
+        let id = app.register_rebis_run(&request, RebisRunState::Complete);
+        let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
+        run.expanded = true;
+        run.output = (0..60).map(|line| format!("log {line:02}")).collect();
+        {
+            let workspace = app.rebis.as_mut().unwrap();
+            workspace.runs_visible = true;
+            workspace.graph_focus = true;
+        }
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let panel = app
+            .text_panes
+            .iter()
+            .find(|pane| pane.kind == TextPaneKind::RebisPanel)
+            .unwrap()
+            .clone();
+        let column = panel.area.x + 1;
+        let row = panel.area.y + 1;
+
+        app.on_mouse_scroll(1, column, row, KeyModifiers::NONE, (120, 24));
+        assert_eq!(app.rebis_run_top, 3);
+        app.on_mouse_scroll(-1, column, row, KeyModifiers::NONE, (120, 24));
+        assert_eq!(app.rebis_run_top, 0);
     }
 
     #[test]
