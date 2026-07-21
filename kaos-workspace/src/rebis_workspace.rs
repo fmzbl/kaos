@@ -2248,7 +2248,11 @@ impl Workspace {
         )
     }
 
-    #[cfg(test)]
+    /// Point the sigil explorer at a temporary library.
+    ///
+    /// Exposed rather than `#[cfg(test)]` because the terminal app's own tests
+    /// live in another crate now and cannot see this one's test build.
+    #[doc(hidden)]
     pub fn set_sigils_root_for_test(&mut self, root: PathBuf) {
         self.sigils_root = root;
     }
@@ -3335,7 +3339,7 @@ impl Workspace {
             self.message = "visual · nothing to draw".to_string();
             return;
         }
-        if let Err(error) = crate::visual::Mandala::from_rebis(source) {
+        if let Err(error) = kaos_core::visual::Mandala::from_rebis(source) {
             self.message = format!("visual · {error}");
             return;
         }
@@ -3659,11 +3663,11 @@ impl Workspace {
 }
 
 fn load_vim_setting() -> bool {
-    crate::config::enabled("vim_mode") || crate::config::enabled("vim")
+    kaos_core::config::enabled("vim_mode") || kaos_core::config::enabled("vim")
 }
 
 fn save_vim_setting(enabled: bool) -> Result<(), String> {
-    crate::config::set_value("vim_mode", &enabled.to_string()).map(|_| ())
+    kaos_core::config::set_value("vim_mode", &enabled.to_string()).map(|_| ())
 }
 
 fn resolve(cwd: &Path, requested: &str) -> PathBuf {
@@ -3708,8 +3712,8 @@ mod tests {
         assert!(workspace.diagnostic().is_none());
         assert_eq!(workspace.visualization, Visualization::Sigils);
         assert_eq!(workspace.graph_lines(80, 24)[0], "SIGILS");
-        assert_eq!(crate::theme::chaos_star_lines().len(), 11);
-        assert!(crate::theme::chaos_star_lines()[5].contains('◯'));
+        assert_eq!(kaos_core::theme::chaos_star_lines().len(), 11);
+        assert!(kaos_core::theme::chaos_star_lines()[5].contains('◯'));
         // The first interaction lifts the star but adds no source.
         workspace.dismiss_chaos_star();
         workspace.refresh();

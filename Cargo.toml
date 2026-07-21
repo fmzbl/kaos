@@ -14,7 +14,7 @@ license = "GPL-3.0-or-later"
 # members are the app (here) and `kaos-core`, which holds everything that does
 # not need a terminal or a window — see that crate's docs for the split.
 [workspace]
-members = ["kaos-agent", "kaos-core", "kaos-pact", "kaos-visual"]
+members = ["kaos-agent", "kaos-core", "kaos-pact", "kaos-visual", "kaos-workspace"]
 
 [dependencies]
 # The fullscreen TUI. ratatui draws it, crossterm is the terminal backend, and
@@ -38,6 +38,8 @@ kaos-core = { path = "kaos-core" }
 kaos-pact = { path = "kaos-pact" }
 # The agent runtime: providers, backends, the conductor.
 kaos-agent = { path = "kaos-agent" }
+# The Rebis workspace: editor state with no interface of its own.
+kaos-workspace = { path = "kaos-workspace" }
 # HTTP providers (OpenAI + Anthropic APIs). ureq is blocking with pure-rust TLS in
 # one crate; serde_json builds/parses the request+response bodies. Behind `api`.
 ureq = { version = "2", features = ["json", "tls"], optional = true }

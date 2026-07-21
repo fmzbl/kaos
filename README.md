@@ -636,6 +636,10 @@ kaos-core/               no terminal, no window — shared by both front-ends
   src/sigils.rs          the personal library of saved Rebis programs
   src/tabs.rs            an ordered set of tabs, generic over their content
   src/visual.rs          the mandala model, Rebis codegen and loading
+kaos-workspace/          the Rebis editor — buffer, Vim behaviour, sigils,
+                         runs and checkpoints; returns actions instead of
+                         drawing, so a terminal and a window can drive one
+                         editor
 kaos-agent/              the agent runtime — providers, backends, the
                          conductor's tool-using loop (knows no terminal
                          and no window)

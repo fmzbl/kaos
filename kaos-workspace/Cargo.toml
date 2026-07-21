@@ -1,0 +1,10 @@
+[package]
+name = "kaos-workspace"
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "The Rebis workspace: editor state, Vim behaviour, sigils, runs and checkpoints, with no interface of its own."
+
+[dependencies]
+kaos-core = { path = "../kaos-core" }
+rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }

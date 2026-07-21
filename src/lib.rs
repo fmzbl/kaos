@@ -40,18 +40,17 @@ pub use kaos_core::{config, runs, sessions, sigils, tabs, theme, visual};
 // The agent runtime — everything that fires a prompt or spawns a child.
 #[cfg(feature = "api")]
 pub use kaos_agent::hand;
+// The editor itself — state only, no drawing.
 pub use kaos_agent::{
     agent, auth, backend, conductor, familiar, myth, pause, provider, scry, solve, spiral,
 };
 pub use kaos_pact::{
     adept, charge, dream, egregore, equation, gnosis, grade, order, ray, rite, rng, sigil,
 };
+pub use kaos_workspace::{rebis_checkpoint, rebis_supervisor, rebis_workspace};
 
 pub mod fold;
 pub mod input;
-pub mod rebis_checkpoint;
-pub mod rebis_supervisor;
-pub mod rebis_workspace;
 #[cfg(feature = "tui")]
 pub mod tui;
 /// The visual editor, in its own crate.
