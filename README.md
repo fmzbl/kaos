@@ -506,6 +506,9 @@ terminal app and `kaos visual` read the same palette.
 /theme          report the current mode
 ```
 
+In light mode the app paints its own white page rather than inheriting the
+terminal's background, so a light theme is genuinely light in both interfaces.
+
 The choice is persisted in the Kaos config and read by **both** interfaces, so
 the terminal app and [`kaos visual`](#visual-mandala-editor) always agree.
 `kaos visual` picks it up the next time it opens; the terminal repaints on

@@ -72,6 +72,10 @@ fn C_BONE() -> Color {
 }
 // The accents. With colour gone these separate by brightness instead of hue,
 // which is why the palette carries a `mid` tone between ink and faint.
+/// The page the whole app is drawn on.
+fn c_ground() -> Color {
+    tone(PALETTE.ground)
+}
 #[allow(non_snake_case)]
 fn C_GOLD() -> Color {
     tone(PALETTE.accent)
@@ -1688,6 +1692,13 @@ impl App {
     // ── rendering ──────────────────────────────────────────────────
 
     fn draw(&mut self, f: &mut Frame) {
+        // Paint the ground first. Without this the app inherits whatever the
+        // terminal is set to, so light mode would put dark ink on a dark
+        // background — the one thing a light theme must not do.
+        f.render_widget(
+            Block::default().style(Style::new().bg(c_ground()).fg(c_ink())),
+            f.area(),
+        );
         let queue_len = self.queue.len();
         self.clamp_rebis_run_choice();
         let rebis_runs = self.rebis_run_views();
@@ -7154,6 +7165,35 @@ mod tests {
         assert_eq!(spec.kind, crate::provider::Kind::ClaudeCli);
         assert_eq!(spec.claude_tag(), Some("fable"));
         assert!(spec.readiness().is_ok());
+    }
+
+    /// The app paints its own page, so a light theme is genuinely light rather
+    /// than dark ink on whatever the terminal happens to be set to.
+    #[test]
+    fn every_cell_is_painted_with_the_configured_ground() {
+        let mut app = App::new();
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let ground = c_ground();
+        let buffer = terminal.backend().buffer();
+        // Widgets may set their own background; what must never happen is a
+        // cell left on the terminal's default, which is what makes a light
+        // theme unreadable.
+        let unpainted = buffer
+            .content()
+            .iter()
+            .filter(|cell| cell.bg == Color::Reset)
+            .count();
+        assert_eq!(
+            unpainted, 0,
+            "{unpainted} cells left on the terminal's own background"
+        );
+        assert!(
+            buffer.content().iter().any(|cell| cell.bg == ground),
+            "nothing was painted with the configured ground"
+        );
     }
 
     #[test]
