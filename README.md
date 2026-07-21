@@ -585,6 +585,22 @@ Without default features, Kaos builds a plain REPL suitable for pipes and CI.
 The `visual` feature is off by default; its model and Rebis code generation
 (`src/visual.rs`) are plain Rust and are covered by `cargo test` either way.
 
+The workspace splits along one line: whether a thing needs a screen.
+
+```text
+kaos-core/               no terminal, no window — shared by both front-ends
+  src/config.rs          persistent non-secret configuration
+  src/theme.rs           the monochrome palette and its two modes
+  src/sessions.rs        durable chat transcripts
+  src/visual.rs          the mandala model, Rebis codegen and loading
+kaos/                    the application
+```
+
+`kaos-core` has one dependency (the Rebis parser) and no knowledge of ratatui,
+egui, or any I/O beyond its own files. Rules that both front-ends must agree on
+— what a drawing means, what a theme is, what a session contains — live there
+once and are tested without either interface on screen.
+
 The main integration points are:
 
 ```text

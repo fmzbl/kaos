@@ -10,9 +10,11 @@ license = "GPL-3.0-or-later"
 # sit behind the default `tui` and `api` features, so
 # `cargo build --no-default-features` restores a std-only binary (plain line REPL,
 # shell-out backends only). The magick stays in the policy.
-# An empty [workspace] makes kaos its own standalone workspace root, so it is
-# fully independent of the sibling `trick-code` package one directory up.
+# Kaos is its own workspace root, independent of any sibling package. The
+# members are the app (here) and `kaos-core`, which holds everything that does
+# not need a terminal or a window — see that crate's docs for the split.
 [workspace]
+members = ["kaos-core"]
 
 [dependencies]
 # The fullscreen TUI. ratatui draws it, crossterm is the terminal backend, and
@@ -30,6 +32,8 @@ arboard = { version = "3.6", default-features = false, optional = true }
 # Rebis is the model-interface language.  KAOS is a host of the language; the
 # dependency is deliberately one-way (rebis-lang has no knowledge of KAOS).
 rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+# The shared, front-end-agnostic core: config, palette, sessions, mandala model.
+kaos-core = { path = "kaos-core" }
 # HTTP providers (OpenAI + Anthropic APIs). ureq is blocking with pure-rust TLS in
 # one crate; serde_json builds/parses the request+response bodies. Behind `api`.
 ureq = { version = "2", features = ["json", "tls"], optional = true }

@@ -1,0 +1,11 @@
+[package]
+name = "kaos-core"
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "The dependency-free heart of Kaos: configuration, palette, chat sessions, and the mandala model."
+
+[dependencies]
+# The mandala model generates and loads Rebis source, so it needs the language.
+# Nothing else here has a dependency at all.
+rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }

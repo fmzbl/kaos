@@ -1367,10 +1367,18 @@ dependencies = [
  "base64",
  "crossterm",
  "eframe",
+ "kaos-core",
  "ratatui",
  "rebis-lang",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "kaos-core"
+version = "0.0.1"
+dependencies = [
+ "rebis-lang",
 ]
 
 [[package]]

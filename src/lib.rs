@@ -32,13 +32,17 @@
 //! [`backend`] shells out to the authed `claude` CLI to fire a charged sigil for
 //! real, without changing any of the orchestration above.
 
+// The front-end-agnostic core lives in its own crate. Re-exported so the app's
+// `crate::config` / `crate::theme` / `crate::sessions` / `crate::visual` paths
+// keep meaning what they always did.
+pub use kaos_core::{config, sessions, theme, visual};
+
 pub mod adept;
 pub mod agent;
 pub mod auth;
 pub mod backend;
 pub mod charge;
 pub mod conductor;
-pub mod config;
 pub mod dream;
 pub mod egregore;
 pub mod equation;
@@ -60,14 +64,11 @@ pub mod rebis_workspace;
 pub mod rite;
 pub mod rng;
 pub mod scry;
-pub mod sessions;
 pub mod sigil;
 pub mod solve;
 pub mod spiral;
-pub mod theme;
 #[cfg(feature = "tui")]
 pub mod tui;
-pub mod visual;
 #[cfg(feature = "visual")]
 pub mod visual_ui;
 pub mod working;
