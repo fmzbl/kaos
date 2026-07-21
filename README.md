@@ -611,6 +611,8 @@ kaos-core/               no terminal, no window — shared by both front-ends
   src/sigils.rs          the personal library of saved Rebis programs
   src/tabs.rs            an ordered set of tabs, generic over their content
   src/visual.rs          the mandala model, Rebis codegen and loading
+kaos-pact/               the Pact — sigils, rays, grades, the equation
+                         (offline and deterministic; no model, socket or screen)
 kaos-visual/             the egui editor — draws the core, knows no terminal
 kaos/                    the application
 ```

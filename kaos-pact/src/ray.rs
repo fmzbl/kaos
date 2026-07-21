@@ -112,7 +112,7 @@ impl Ray {
             Purple => 1,
             Black => 0,
         };
-        let p = crate::theme::current();
+        let p = kaos_core::theme::current();
         let (lo, hi) = (i16::from(p.faint.0), i16::from(p.ink.0));
         let v = (lo + (hi - lo) * i16::from(step) / 7).clamp(0, 255) as u8;
         (v, v, v)

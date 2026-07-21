@@ -14,7 +14,7 @@ license = "GPL-3.0-or-later"
 # members are the app (here) and `kaos-core`, which holds everything that does
 # not need a terminal or a window — see that crate's docs for the split.
 [workspace]
-members = ["kaos-core", "kaos-visual"]
+members = ["kaos-core", "kaos-pact", "kaos-visual"]
 
 [dependencies]
 # The fullscreen TUI. ratatui draws it, crossterm is the terminal backend, and
@@ -34,6 +34,8 @@ arboard = { version = "3.6", default-features = false, optional = true }
 rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
 # The shared, front-end-agnostic core: config, palette, sessions, mandala model.
 kaos-core = { path = "kaos-core" }
+# The offline, deterministic simulation core.
+kaos-pact = { path = "kaos-pact" }
 # HTTP providers (OpenAI + Anthropic APIs). ureq is blocking with pure-rust TLS in
 # one crate; serde_json builds/parses the request+response bodies. Behind `api`.
 ureq = { version = "2", features = ["json", "tls"], optional = true }

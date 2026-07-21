@@ -1,0 +1,12 @@
+[package]
+name = "kaos-pact"
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "The Pact: Kaos's offline, deterministic simulation core — sigils, rays, grades, and the equation of magic."
+
+[dependencies]
+# Only the shared palette, so a ray can say how it is drawn. Everything else
+# here is std: the Pact is deterministic and offline by design, which is what
+# makes it testable without a model, a network, or a screen.
+kaos-core = { path = "../kaos-core" }

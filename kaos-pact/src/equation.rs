@@ -58,7 +58,7 @@
 //! `1−(1−p)^k − p`, has the same shape as Carroll's `(1−P)·M^(1/P)`: zero at both
 //! ends, maximal in the middle. The second equation is a **compute-allocation
 //! policy**: spend the conclave where P is mid-band; a single charge suffices at
-//! the ceiling, and no amount of sampling rescues P ≈ 0. See [`crate::scry`] for
+//! the ceiling, and no amount of sampling rescues P ≈ 0. See `scry` for
 //! the mechanism that acts on this.
 
 /// The four factors of a single magical act, each clamped to [0, 1].

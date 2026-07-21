@@ -36,35 +36,27 @@
 // `crate::config` / `crate::theme` / `crate::sessions` / `crate::visual` paths
 // keep meaning what they always did.
 pub use kaos_core::{config, sessions, sigils, tabs, theme, visual};
+// The Pact — offline and deterministic, in its own crate.
+pub use kaos_pact::{
+    adept, charge, dream, egregore, equation, gnosis, grade, order, ray, rite, rng, sigil,
+};
 
-pub mod adept;
 pub mod agent;
 pub mod auth;
 pub mod backend;
-pub mod charge;
 pub mod conductor;
-pub mod dream;
-pub mod egregore;
-pub mod equation;
 pub mod familiar;
 pub mod fold;
-pub mod gnosis;
-pub mod grade;
 #[cfg(feature = "api")]
 pub mod hand;
 pub mod input;
 pub mod myth;
-pub mod order;
 pub mod pause;
 pub mod provider;
-pub mod ray;
 pub mod rebis_checkpoint;
 pub mod rebis_supervisor;
 pub mod rebis_workspace;
-pub mod rite;
-pub mod rng;
 pub mod scry;
-pub mod sigil;
 pub mod solve;
 pub mod spiral;
 #[cfg(feature = "tui")]

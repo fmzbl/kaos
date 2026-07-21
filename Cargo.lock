@@ -1367,6 +1367,7 @@ dependencies = [
  "base64",
  "crossterm",
  "kaos-core",
+ "kaos-pact",
  "kaos-visual",
  "ratatui",
  "rebis-lang",
@@ -1379,6 +1380,13 @@ name = "kaos-core"
 version = "0.0.1"
 dependencies = [
  "rebis-lang",
+]
+
+[[package]]
+name = "kaos-pact"
+version = "0.0.1"
+dependencies = [
+ "kaos-core",
 ]
 
 [[package]]
