@@ -27,6 +27,38 @@ struct Doc {
     selected: Option<NodeId>,
 }
 
+/// A conversation, with the same durable sessions the terminal app writes.
+/// Opening one here and resuming it there is the same store and the same
+/// format — the transcript is not a second, parallel notion of a chat.
+struct ChatPane {
+    session: crate::sessions::Session,
+    input: String,
+    /// Showing the session list rather than a transcript.
+    browsing: bool,
+}
+
+impl Default for ChatPane {
+    fn default() -> Self {
+        Self {
+            session: crate::sessions::Session::new(
+                crate::config::value("KAOS_MODEL").unwrap_or_else(|| "sim".into()),
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            ),
+            input: String::new(),
+            browsing: true,
+        }
+    }
+}
+
+/// What a tab holds. The tab machinery is generic, so adding a kind is adding
+/// a variant here rather than another parallel list.
+enum Pane {
+    Mandala(Doc),
+    Chat(ChatPane),
+}
+
 // ── palette ─────────────────────────────────────────────────────────────────
 //
 // Monochrome, from `theme.rs`, so the editor and the terminal app wear the same
@@ -153,7 +185,10 @@ struct Editor {
     /// all resolve from here, exactly as in the terminal app, so a program
     /// drawn here means the same thing when it is run.
     cwd: std::path::PathBuf,
-    tabs: Tabs<Doc>,
+    tabs: Tabs<Pane>,
+    /// Stands in while a chat tab is active, so the canvas code never has to
+    /// ask whether there is a drawing. It is never drawn.
+    scratch: Doc,
     /// The tool is deliberately shared across tabs: it is a mode of working,
     /// not a property of a drawing.
     tool: Tool,
@@ -166,31 +201,41 @@ impl Editor {
         let mut tabs = Tabs::new();
         tabs.open(
             "mandala",
-            Doc {
+            Pane::Mandala(Doc {
                 mandala,
                 ..Doc::default()
-            },
+            }),
         );
         Self {
             ink: Ink::load(),
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             tabs,
+            scratch: Doc::default(),
             tool: Tool::Place(Form::Prompt),
             drag: Drag::None,
             notice: None,
         }
     }
 
-    /// The open drawing. The editor always keeps at least one tab, so the
-    /// front-end never has to render an empty canvas.
+    /// The open drawing, or a stand-in while a conversation is on screen — so
+    /// the canvas code never has to ask which kind of tab is active.
     fn doc(&self) -> &Doc {
-        self.tabs.active().expect("the editor keeps one tab open")
+        match self.tabs.active() {
+            Some(Pane::Mandala(d)) => d,
+            _ => &self.scratch,
+        }
     }
 
     fn doc_mut(&mut self) -> &mut Doc {
-        self.tabs
-            .active_mut()
-            .expect("the editor keeps one tab open")
+        match self.tabs.active_mut() {
+            Some(Pane::Mandala(d)) => d,
+            _ => &mut self.scratch,
+        }
+    }
+
+    /// Whether a drawing is on screen, as opposed to a conversation.
+    fn on_mandala(&self) -> bool {
+        matches!(self.tabs.active(), Some(Pane::Mandala(_)))
     }
 }
 
@@ -199,12 +244,21 @@ impl eframe::App for Editor {
         self.handle_keys(ctx);
         self.header(ctx);
         self.tab_bar(ctx);
-        self.palette(ctx);
-        self.side(ctx);
+        if self.on_mandala() {
+            self.palette(ctx);
+            self.side(ctx);
+        }
         self.footer(ctx);
+        let on_mandala = self.on_mandala();
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(self.ink.ground))
-            .show(ctx, |ui| self.canvas(ui));
+            .show(ctx, |ui| {
+                if on_mandala {
+                    self.canvas(ui);
+                } else {
+                    self.chat(ui);
+                }
+            });
     }
 }
 
@@ -270,9 +324,13 @@ impl Editor {
                     }
                     ui.separator();
                 }
-                if ui.small_button("+").clicked() {
+                if ui.small_button("+ mandala").clicked() {
                     let n = self.tabs.len() + 1;
-                    self.tabs.open(format!("mandala {n}"), Doc::default());
+                    self.tabs
+                        .open(format!("mandala {n}"), Pane::Mandala(Doc::default()));
+                }
+                if ui.small_button("+ chat").clicked() {
+                    self.tabs.open("chat", Pane::Chat(ChatPane::default()));
                 }
                 if let Some(id) = select {
                     self.tabs.select(id);
@@ -281,6 +339,92 @@ impl Editor {
                     self.tabs.close(id);
                 }
             });
+        });
+    }
+
+    /// A conversation tab: browse the saved sessions, or read and extend one.
+    ///
+    /// These are the same sessions `/resume` reads in the terminal app — same
+    /// store, same format — so a conversation started in either interface can
+    /// be picked up in the other.
+    fn chat(&mut self, ui: &mut egui::Ui) {
+        let k = self.ink;
+        let Some(Pane::Chat(chat)) = self.tabs.active_mut() else {
+            return;
+        };
+
+        if chat.browsing {
+            let store = crate::sessions::Store::default_store();
+            let list = store.list();
+            ui.add_space(8.0);
+            ui.colored_label(k.faint, "SESSIONS");
+            if list.is_empty() {
+                ui.colored_label(k.faint, "none saved yet — start typing below");
+            }
+            let mut resume = None;
+            egui::ScrollArea::vertical()
+                .max_height(ui.available_height() - 90.0)
+                .show(ui, |ui| {
+                    for s in &list {
+                        let line = format!("{:>3} turns   {}", s.turns, s.title);
+                        if ui.selectable_label(false, line).clicked() {
+                            resume = Some(s.id.clone());
+                        }
+                    }
+                });
+            if let Some(id) = resume {
+                if let Ok(loaded) = store.load(&id) {
+                    chat.session = loaded;
+                    chat.browsing = false;
+                }
+            }
+            if ui.button("new conversation").clicked() {
+                chat.browsing = false;
+            }
+        } else {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.colored_label(k.faint, chat.session.title());
+                if ui.small_button("sessions").clicked() {
+                    chat.browsing = true;
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .max_height(ui.available_height() - 60.0)
+                .show(ui, |ui| {
+                    for turn in &chat.session.turns {
+                        let (who, tone) = match turn.role {
+                            crate::sessions::Role::User => ("you", k.ink),
+                            crate::sessions::Role::Model => ("model", k.faint),
+                        };
+                        ui.horizontal_top(|ui| {
+                            ui.colored_label(tone, format!("{who:<6}"));
+                            ui.add(egui::Label::new(egui::RichText::new(&turn.text)).wrap());
+                        });
+                    }
+                });
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            let send = ui
+                .add(
+                    egui::TextEdit::singleline(&mut chat.input)
+                        .desired_width(ui.available_width() - 70.0)
+                        .hint_text("say something"),
+                )
+                .lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (send || ui.button("send").clicked()) && !chat.input.trim().is_empty() {
+                chat.browsing = false;
+                let said = std::mem::take(&mut chat.input);
+                chat.session.push(crate::sessions::Role::User, said);
+                // Persist immediately: the terminal app saves on every turn for
+                // the same reason, so a crash loses nothing already said.
+                let _ = crate::sessions::Store::default_store().save(&chat.session);
+            }
         });
     }
 
@@ -416,7 +560,8 @@ impl Editor {
         }
         if open {
             let n = self.tabs.len() + 1;
-            self.tabs.open(format!("mandala {n}"), Doc::default());
+            self.tabs
+                .open(format!("mandala {n}"), Pane::Mandala(Doc::default()));
         }
         if close && self.tabs.len() > 1 {
             if let Some(id) = self.tabs.active_id() {

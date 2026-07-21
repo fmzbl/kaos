@@ -417,6 +417,11 @@ way. It parses first, so an undrawable buffer reports on the status line
 instead of opening an empty window, and the editor runs in its own window while
 the terminal app keeps going.
 
+Tabs hold either a drawing or a conversation. A chat tab browses and resumes
+the same durable sessions `/resume` reads in the terminal app — the same store
+and the same format, so a conversation started in either interface continues in
+the other.
+
 The editor is tabbed: `Ctrl-T` opens a drawing, `Ctrl-Tab` and `Ctrl-←` cycle,
 `Ctrl-W` closes. Each tab keeps its own canvas, viewport and selection, so
 switching back returns you where you were. The tab rules live in

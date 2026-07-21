@@ -106,6 +106,15 @@ impl Session {
         self.turns.is_empty()
     }
 
+    /// Whether this is a conversation worth keeping.
+    ///
+    /// A session with only model output — a command's stream flushed with
+    /// nothing actually asked — is not a conversation, and saving it litters
+    /// the resume list with untitled entries.
+    pub fn is_conversation(&self) -> bool {
+        self.turns.iter().any(|t| t.role == Role::User)
+    }
+
     /// A one-line name, taken from the opening message.
     pub fn title(&self) -> String {
         let first = self
@@ -264,8 +273,8 @@ impl Store {
     }
 
     pub fn save(&self, session: &Session) -> Result<(), String> {
-        if session.is_empty() {
-            return Ok(()); // nothing said; leave no file behind
+        if !session.is_conversation() {
+            return Ok(()); // nothing was actually said; leave no file behind
         }
         fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
         let path = self.path(&session.id);
@@ -412,6 +421,18 @@ mod tests {
         assert_eq!(store.load(&s.id).unwrap(), s);
         store.delete(&s.id).unwrap();
         assert!(store.load(&s.id).is_err());
+        let _ = fs::remove_dir_all(store.dir());
+    }
+
+    #[test]
+    fn a_session_with_only_model_output_is_not_saved() {
+        // A command's stream flushed with nothing asked is not a conversation.
+        let store = temp_store("modelonly");
+        let mut s = Session::new("m", "/c");
+        s.push(Role::Model, "some streamed output");
+        assert!(!s.is_conversation());
+        store.save(&s).unwrap();
+        assert!(store.list().is_empty());
         let _ = fs::remove_dir_all(store.dir());
     }
 
