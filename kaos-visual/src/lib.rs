@@ -224,6 +224,11 @@ struct Editor {
     tool: Tool,
     drag: Drag,
     notice: Option<String>,
+    /// Evidence a run resolves against, and the last answer. Held on the
+    /// editor rather than a tab: the record is the context you are working in,
+    /// not a property of one drawing.
+    record: String,
+    outcome: Option<String>,
 }
 
 impl Editor {
@@ -244,7 +249,22 @@ impl Editor {
             tool: Tool::Place(Form::Prompt),
             drag: Drag::None,
             notice: None,
+            record: String::new(),
+            outcome: None,
         }
+    }
+
+    /// Run `source` deterministically and keep the answer for display.
+    ///
+    /// This is the offline calculus, not a model call — it needs no provider
+    /// and no child process, which is why the editor can offer it while
+    /// standing alone.
+    fn run_source(&mut self, source: &str) {
+        let record = kaos_core::runs::record_from_text(&self.record);
+        self.outcome = Some(match kaos_core::runs::evaluate(source, &record) {
+            Ok(out) => out.to_string(),
+            Err(e) => e,
+        });
     }
 
     /// The open drawing, or a stand-in while a conversation is on screen — so
@@ -279,6 +299,7 @@ impl eframe::App for Editor {
             self.side(ctx);
         }
         self.footer(ctx);
+        self.runs(ctx);
         let on_mandala = self.on_mandala();
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(self.ink.ground))
@@ -561,6 +582,7 @@ impl Editor {
         let k = self.ink;
         let mut draw: Option<String> = None;
         let mut save: Option<(String, String)> = None;
+        let mut run: Option<String> = None;
         let Some(Pane::Source { name, text, notice }) = self.tabs.active_mut() else {
             return;
         };
@@ -578,6 +600,9 @@ impl Editor {
             }
             if ui.button("draw").clicked() {
                 draw = Some(text.clone());
+            }
+            if ui.button("run").clicked() {
+                run = Some(text.clone());
             }
         });
 
@@ -601,6 +626,9 @@ impl Editor {
             );
         });
 
+        if let Some(text) = run {
+            self.run_source(&text);
+        }
         if let Some((name, text)) = save {
             let result = kaos_core::sigils::Library::default_library().save(&name, &text);
             if let Some(Pane::Source { notice, .. }) = self.tabs.active_mut() {
@@ -711,6 +739,43 @@ impl Editor {
                         }
                     }
                 });
+            });
+    }
+
+    /// The run panel: the evidence a run resolves against, and the last answer.
+    fn runs(&mut self, ctx: &egui::Context) {
+        let k = self.ink;
+        egui::TopBottomPanel::bottom("runs")
+            .resizable(true)
+            .default_height(150.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.colored_label(k.faint, "RECORD");
+                    if ui.small_button("run this drawing").clicked() {
+                        // A drawing runs by way of the source it generates, so
+                        // both tabs mean the same thing by "run".
+                        if let Some(Pane::Mandala(d)) = self.tabs.active() {
+                            match d.mandala.to_rebis() {
+                                Ok(src) => self.run_source(&src),
+                                Err(e) => self.outcome = Some(e.to_string()),
+                            }
+                        }
+                    }
+                    if ui.small_button("clear").clicked() {
+                        self.outcome = None;
+                    }
+                });
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.record)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(3)
+                        .hint_text("one line of evidence per line"),
+                );
+                if let Some(out) = &self.outcome {
+                    ui.separator();
+                    ui.add(egui::Label::new(egui::RichText::new(out).monospace()).wrap());
+                }
             });
     }
 

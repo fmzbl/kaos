@@ -9,11 +9,13 @@
 //! - [`config`] — the persistent, non-secret settings file.
 //! - [`theme`] — the monochrome palette and its two modes.
 //! - [`sessions`] — durable chat transcripts.
+//! - [`runs`] — deterministic, offline evaluation of a program.
 //! - [`sigils`] — the personal library of saved Rebis programs.
 //! - [`tabs`] — an ordered set of tabs, generic over what they hold.
 //! - [`visual`] — the mandala model, Rebis code generation and loading.
 
 pub mod config;
+pub mod runs;
 pub mod sessions;
 pub mod sigils;
 pub mod tabs;

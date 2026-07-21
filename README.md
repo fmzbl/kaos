@@ -426,6 +426,11 @@ way. It parses first, so an undrawable buffer reports on the status line
 instead of opening an empty window, and the editor runs in its own window while
 the terminal app keeps going.
 
+A run panel sits under every tab: type evidence into the record, then run the
+drawing or the source. This is the deterministic concept calculus — no model,
+no provider, no child process — so it works with nothing else installed. A
+model-backed run belongs to the terminal app's agent stack.
+
 Tabs hold a drawing, Rebis source, a conversation, or the sigil library. A
 source tab checks as you type with the same parser the workspace uses, saves to
 the same library, and `draw` lays it out as a mandala; a drawing's `edit as
