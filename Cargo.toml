@@ -14,7 +14,7 @@ license = "GPL-3.0-or-later"
 # members are the app (here) and `kaos-core`, which holds everything that does
 # not need a terminal or a window — see that crate's docs for the split.
 [workspace]
-members = ["kaos-core"]
+members = ["kaos-core", "kaos-visual"]
 
 [dependencies]
 # The fullscreen TUI. ratatui draws it, crossterm is the terminal backend, and
@@ -43,12 +43,9 @@ serde_json = { version = "1", optional = true }
 # `visual::Mandala`, which stays std-only and testable without any of this.
 # Behind the non-default `visual` feature so the ordinary build keeps its
 # current dependency set.
-eframe = { version = "0.29", optional = true, default-features = false, features = [
-    "glow",
-    # Without this egui embeds no font and every label renders blank — the
-    # shapes draw fine, so the omission is invisible until you look at it.
-    "default_fonts",
-] }
+# The visual editor is its own crate: it draws the shared core and knows
+# nothing of the terminal app.
+kaos-visual = { path = "kaos-visual", optional = true }
 
 [features]
 default = ["tui", "api"]
@@ -69,16 +66,7 @@ api = ["dep:ureq", "dep:serde_json"]
 # `visual`: the `kaos visual` mandala editor (egui, native OpenGL). Non-default
 # only to keep the ordinary build small — the `visual` module's model and Rebis
 # codegen build and test without it.
-visual = ["dep:eframe"]
-
-# The Linux/BSD windowing backends. Kept out of the portable dependency above so
-# macOS (which uses AppKit through winit) never requests them; Cargo unions the
-# feature sets on the platforms that do.
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-eframe = { version = "0.29", optional = true, default-features = false, features = [
-    "wayland",
-    "x11",
-] }
+visual = ["dep:kaos-visual"]
 
 [[bin]]
 name = "kaos"

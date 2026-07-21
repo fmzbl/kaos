@@ -1,8 +1,8 @@
-//! The `kaos visual` mandala editor: a native egui window over [`crate::visual`].
+//! The `kaos visual` mandala editor: a native egui window over [`kaos_core::visual`].
 //!
 //! Deliberately thin. Every rule about what a drawing *means* — the forms,
 //! their arity, code generation, loading, hit-testing, the sigil geometry and
-//! the viewport math — lives in [`crate::visual`] and is tested without a
+//! the viewport math — lives in [`kaos_core::visual`] and is tested without a
 //! window. This file paints those shapes and routes pointer events.
 //!
 //! Rendering is native (egui on glow), not a webview, so the editor needs no
@@ -14,8 +14,8 @@
 use eframe::egui;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke as UiStroke, Vec2};
 
-use crate::tabs::{TabId, Tabs};
-use crate::visual::{Form, Mandala, NodeId, Shape, Stroke, View, NODE_R, NODE_RY};
+use kaos_core::tabs::{TabId, Tabs};
+use kaos_core::visual::{Form, Mandala, NodeId, Shape, Stroke, View, NODE_R, NODE_RY};
 
 /// One open drawing. Each tab keeps its own canvas *and its own viewport and
 /// selection*, so switching tabs returns you to exactly where you were.
@@ -31,7 +31,7 @@ struct Doc {
 /// Opening one here and resuming it there is the same store and the same
 /// format — the transcript is not a second, parallel notion of a chat.
 struct ChatPane {
-    session: crate::sessions::Session,
+    session: kaos_core::sessions::Session,
     input: String,
     /// Showing the session list rather than a transcript.
     browsing: bool,
@@ -40,8 +40,8 @@ struct ChatPane {
 impl Default for ChatPane {
     fn default() -> Self {
         Self {
-            session: crate::sessions::Session::new(
-                crate::config::value("KAOS_MODEL").unwrap_or_else(|| "sim".into()),
+            session: kaos_core::sessions::Session::new(
+                kaos_core::config::value("KAOS_MODEL").unwrap_or_else(|| "sim".into()),
                 std::env::current_dir()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default(),
@@ -93,7 +93,7 @@ struct Ink {
 
 impl Ink {
     fn load() -> Self {
-        let p = crate::theme::current();
+        let p = kaos_core::theme::current();
         Self {
             ground: rgb(p.ground),
             chrome: rgb(p.chrome),
@@ -156,7 +156,7 @@ pub fn run(start: Mandala) {
 
 /// Dress egui in the kaos palette so the editor matches the terminal app.
 fn install_theme(ctx: &egui::Context, k: Ink) {
-    let mut visuals = if crate::theme::mode() == crate::theme::Mode::Light {
+    let mut visuals = if kaos_core::theme::mode() == kaos_core::theme::Mode::Light {
         egui::Visuals::light()
     } else {
         egui::Visuals::dark()
@@ -397,7 +397,7 @@ impl Editor {
         };
 
         if chat.browsing {
-            let store = crate::sessions::Store::default_store();
+            let store = kaos_core::sessions::Store::default_store();
             let list = store.list();
             ui.add_space(8.0);
             ui.colored_label(k.faint, "SESSIONS");
@@ -439,8 +439,8 @@ impl Editor {
                 .show(ui, |ui| {
                     for turn in &chat.session.turns {
                         let (who, tone) = match turn.role {
-                            crate::sessions::Role::User => ("you", k.ink),
-                            crate::sessions::Role::Model => ("model", k.faint),
+                            kaos_core::sessions::Role::User => ("you", k.ink),
+                            kaos_core::sessions::Role::Model => ("model", k.faint),
                         };
                         ui.horizontal_top(|ui| {
                             ui.colored_label(tone, format!("{who:<6}"));
@@ -463,10 +463,10 @@ impl Editor {
             if (send || ui.button("send").clicked()) && !chat.input.trim().is_empty() {
                 chat.browsing = false;
                 let said = std::mem::take(&mut chat.input);
-                chat.session.push(crate::sessions::Role::User, said);
+                chat.session.push(kaos_core::sessions::Role::User, said);
                 // Persist immediately: the terminal app saves on every turn for
                 // the same reason, so a crash loses nothing already said.
-                let _ = crate::sessions::Store::default_store().save(&chat.session);
+                let _ = kaos_core::sessions::Store::default_store().save(&chat.session);
             }
         });
     }
@@ -492,7 +492,7 @@ impl Editor {
             ui.colored_label(k.faint, note);
         }
         ui.separator();
-        let lib = crate::sigils::Library::default_library();
+        let lib = kaos_core::sigils::Library::default_library();
         let found = lib.search(query);
         if found.is_empty() {
             ui.colored_label(k.faint, "nothing saved yet");
@@ -585,7 +585,7 @@ impl Editor {
         });
 
         if let Some((name, text)) = save {
-            let result = crate::sigils::Library::default_library().save(&name, &text);
+            let result = kaos_core::sigils::Library::default_library().save(&name, &text);
             if let Some(Pane::Source { notice, .. }) = self.tabs.active_mut() {
                 *notice = Some(match result {
                     Ok(p) => format!("saved {}", p.display()),
@@ -975,7 +975,7 @@ impl Editor {
             if hot {
                 painter.circle_stroke(
                     at(n.x, n.y),
-                    crate::visual::ARROW_HANDLE as f32 * zoom,
+                    kaos_core::visual::ARROW_HANDLE as f32 * zoom,
                     UiStroke::new(1.5 * zoom, k.ink),
                 );
             }

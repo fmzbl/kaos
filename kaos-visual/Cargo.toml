@@ -1,0 +1,23 @@
+[package]
+name = "kaos-visual"
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "The Kaos visual editor: a native egui window over the shared Kaos core."
+
+[dependencies]
+# Everything this window draws — forms, sessions, sigils, tabs, palette — comes
+# from the core. It has no dependency on the terminal app at all, which is why
+# it can stand as its own crate.
+kaos-core = { path = "../kaos-core" }
+rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+eframe = { version = "0.29", default-features = false, features = [
+    "glow",
+    "default_fonts",
+] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+eframe = { version = "0.29", default-features = false, features = [
+    "wayland",
+    "x11",
+] }

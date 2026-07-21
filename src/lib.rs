@@ -69,6 +69,7 @@ pub mod solve;
 pub mod spiral;
 #[cfg(feature = "tui")]
 pub mod tui;
+/// The visual editor, in its own crate.
 #[cfg(feature = "visual")]
-pub mod visual_ui;
+pub use kaos_visual as visual_ui;
 pub mod working;

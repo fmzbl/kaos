@@ -1366,8 +1366,8 @@ dependencies = [
  "arboard",
  "base64",
  "crossterm",
- "eframe",
  "kaos-core",
+ "kaos-visual",
  "ratatui",
  "rebis-lang",
  "serde_json",
@@ -1378,6 +1378,15 @@ dependencies = [
 name = "kaos-core"
 version = "0.0.1"
 dependencies = [
+ "rebis-lang",
+]
+
+[[package]]
+name = "kaos-visual"
+version = "0.0.1"
+dependencies = [
+ "eframe",
+ "kaos-core",
  "rebis-lang",
 ]
 
