@@ -7,6 +7,58 @@ this makes a **real model more correct**. So we built [`realbench.rs`](../src/re
 fire objectively-checkable tasks at a live `ollama` model in three arms and score
 with deterministic checkers (last-integer / token match) — no LLM judge, no human.
 
+## Sisyphus: enwik8 positive, text8 failure, long-context edge (2026-07-18)
+
+Kaos now carries a model-level experiment distinct from the agent-orchestration
+results below. [Sisyphus](../sisyphus/README.md) reimagines Thoth's
+counter-recursive decoder as a parameter-shared Rebis operator cell. It was
+tested on the exact 100MB enwik8 Wikipedia corpus against a modern Transformer,
+not against a simulated objective or private task set.
+
+```text
+                                  Sisyphus   Transformer
+parameters                           29,811        29,792
+mean held-out bits/byte              3.7491        3.8013
+paired wins                              4/5           1/5
+mean paired difference             -0.0522 bpb
+paired bootstrap 95% CI      [-0.0971, -0.0061]
+context-128 training bytes/s           1,025         5,213
+context-4096 inference bytes/s         30,920         6,140
+```
+
+The predeclared narrow quality rule passes: all five fixed seeds completed,
+Sisyphus won at least four, and the paired interval is wholly below zero. The
+second recursive pass improved the first on all five seeds (mean −0.0645 bpb),
+so revision is mechanistically doing useful work rather than merely adding
+depth.
+
+But the architecture was calibrated after observing seed-0 enwik8 test scores,
+so this was not an untouched-corpus confirmation. With every model and training
+setting frozen in advance, a new five-seed text8 study reversed the result:
+
+```text
+                                  Sisyphus   Transformer
+mean held-out bits/byte              3.1493        3.0679
+paired wins                              0/5           5/5
+mean paired difference             +0.0814 bpb
+paired bootstrap 95% CI      [+0.0439, +0.1248]
+```
+
+That confirmation fails decisively. The evidence does not support a general
+short-context quality edge. It supports a dataset-specific enwik8 positive,
+plus internal revision that improved round one in all ten seeds across both
+corpora without consistently beating the control.
+
+The honest boundary matters. These are 30k-parameter, 256k-training-byte
+micro-studies, not state of the art or evidence of general reasoning. At the
+trained context the Transformer is about 5.1× faster. Sisyphus's
+runtime advantage emerges only at long context in this CPU backend: measured
+crossover at 2,048, rising to 5.04× throughput and 83.3% lower peak RSS at
+4,096. See the [paper](../sisyphus/PAPER.md),
+[frozen protocol](../sisyphus/PROTOCOL.md), retained
+[enwik8 summary](../sisyphus/results/enwik8_v1/summary.json), and
+[untouched text8 confirmation](../sisyphus/CONFIRMATION.md).
+
 - **raw** — a natural, slightly chatty prompt. 1 sample. The naive baseline.
 - **terse** — the task + "reply with only the final answer". 1 sample. The *cheap
   control*: if kaos only matches this, the win is "be concise" and needs no magick.

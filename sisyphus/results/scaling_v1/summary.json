@@ -1,0 +1,72 @@
+{
+  "claim": "Sisyphus has a measured CPU inference throughput edge at and above the reported crossover among tested contexts only.",
+  "measured_inference_crossover_context": 2048,
+  "pairs": [
+    {
+      "context_length": 32,
+      "sisyphus_parameters": 29729,
+      "sisyphus_peak_rss_kib": 145384,
+      "sisyphus_peak_rss_reduction_percent": -2.2678671918964444,
+      "sisyphus_speedup": 0.837480479392126,
+      "sisyphus_tokens_per_second": 7337.64374208072,
+      "transformer_parameters": 29792,
+      "transformer_peak_rss_kib": 142160,
+      "transformer_tokens_per_second": 8761.569878508273
+    },
+    {
+      "context_length": 128,
+      "sisyphus_parameters": 29811,
+      "sisyphus_peak_rss_kib": 152372,
+      "sisyphus_peak_rss_reduction_percent": -6.816779765576797,
+      "sisyphus_speedup": 0.3553879784950746,
+      "sisyphus_tokens_per_second": 3990.1669817177744,
+      "transformer_parameters": 29792,
+      "transformer_peak_rss_kib": 142648,
+      "transformer_tokens_per_second": 11227.63633878256
+    },
+    {
+      "context_length": 512,
+      "sisyphus_parameters": 29893,
+      "sisyphus_peak_rss_kib": 159960,
+      "sisyphus_peak_rss_reduction_percent": -1.427955461993058,
+      "sisyphus_speedup": 0.6627786031468931,
+      "sisyphus_tokens_per_second": 11155.369217066087,
+      "transformer_parameters": 29792,
+      "transformer_peak_rss_kib": 157708,
+      "transformer_tokens_per_second": 16831.21507559244
+    },
+    {
+      "context_length": 1024,
+      "sisyphus_parameters": 29934,
+      "sisyphus_peak_rss_kib": 165732,
+      "sisyphus_peak_rss_reduction_percent": 18.447003247711834,
+      "sisyphus_speedup": 0.8566024207940438,
+      "sisyphus_tokens_per_second": 17251.451709530553,
+      "transformer_parameters": 29792,
+      "transformer_peak_rss_kib": 203220,
+      "transformer_tokens_per_second": 20139.391730342057
+    },
+    {
+      "context_length": 2048,
+      "sisyphus_parameters": 29975,
+      "sisyphus_peak_rss_kib": 171960,
+      "sisyphus_peak_rss_reduction_percent": 55.2951208352398,
+      "sisyphus_speedup": 1.6069424191625012,
+      "sisyphus_tokens_per_second": 18585.99526733718,
+      "transformer_parameters": 29792,
+      "transformer_peak_rss_kib": 384656,
+      "transformer_tokens_per_second": 11566.06176158057
+    },
+    {
+      "context_length": 4096,
+      "sisyphus_parameters": 30016,
+      "sisyphus_peak_rss_kib": 178948,
+      "sisyphus_peak_rss_reduction_percent": 83.33401630947014,
+      "sisyphus_speedup": 5.035774799930506,
+      "sisyphus_tokens_per_second": 30920.161082718856,
+      "transformer_parameters": 29792,
+      "transformer_peak_rss_kib": 1073732,
+      "transformer_tokens_per_second": 6140.100046401113
+    }
+  ]
+}

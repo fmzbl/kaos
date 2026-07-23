@@ -1575,6 +1575,7 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             ExecutionEvent::MacroExpanded { name, remaining } => {
                 println!("event    macro {name} expanded · {remaining} remaining");
             }
+            ExecutionEvent::SyntaxInverted => println!("event    syntax orientation inverted"),
             ExecutionEvent::ModuleLoaded {
                 module,
                 definitions,

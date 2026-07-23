@@ -1,0 +1,71 @@
+; ---------------------------------------------------------------------------
+; Recursive self-improvement loop: evolve a NEW auto-bot profile for
+; ~/code/finances that beats the current champion — MAX_RETURN_PROFILE in
+; src/trade/bot/plan.ts, applied by the auto bot in src/trade/auto/index.ts,
+; measured at ~100%/yr — by at least 5x (>=500% annualized).
+;
+; The evaluate and stop steps are grounded in the project's REAL backtests
+; (src/trade/bot/backtest.ts via scripts/portfolio-backtest.mjs and
+; scripts/deep-backtest.mjs), not the model's own return estimates.
+;
+; COST WARNING: this is a bounded recursive loop. Every iteration fires:
+;   - study-champion  (+ with-evidence fan-out)
+;   - three proposal branches + one convergence mediator
+;   - one measured backtest evaluation
+;   - one rewrite
+;   - one yes/no stop check
+; Total model calls = per-iteration cost x number of iterations. It stops when
+; `done` returns yes; otherwise only Rebis's runtime model-call and
+; macro-expansion limits bound it. Validate the shape with /tree (or
+; `kaos rebis run --dry`) BEFORE spending live calls.
+; ---------------------------------------------------------------------------
+
+(# std/loops)   ; loop  (bounded recursive refinement)
+(# std/canon)   ; yes-no (forces the stop check to answer exactly yes/no)
+(# std/spread)  ; with-evidence (makes the study cite the real source)
+
+; The fixed objective — a text constant (no model call), woven into prompts
+; with $ (never fired).
+(~ objective ()
+  "Project: ~/code/finances. Champion: MAX_RETURN_PROFILE in src/trade/bot/plan.ts (anchorOrigin, targetMode, targetScale, minConsensus), applied on top of DEFAULT_BOT_CONFIG by the auto bot in src/trade/auto/index.ts, returning ~100%/yr in the project's own backtests. Goal: design a NEW profile — a concrete set of BotConfig overrides plus auto-bot settings (interval, universe, sizing, limits) — that the project's realistic backtest (src/trade/bot/backtest.ts, driven via scripts/portfolio-backtest.mjs or scripts/deep-backtest.mjs) measures at >=5x the champion (>=500% annualized), with max drawdown no worse than the champion and no look-ahead or overfitting tricks.")
+
+; Reconstruct the current champion from the actual source. `goal` (text) is
+; woven in with $; the running value from the previous iteration arrives as
+; arrow INPUT.
+(~ study-champion (goal)
+  (with-evidence
+    ($ goal
+       "\n\nUsing the progress supplied in INPUT, read src/trade/bot/plan.ts and src/trade/auto/index.ts in ~/code/finances and reconstruct the champion exactly: the MAX_RETURN_PROFILE values, the DEFAULT_BOT_CONFIG fields it overrides, the auto bot's universe/interval/sizing rails, and the measured result. State the three assumptions its ~100%/yr edge depends on.")))
+
+; Generate three independent candidate profiles, then converge on the best.
+; As an arrow stage, each branch receives the champion study as INPUT.
+(~ propose ()
+  (["Select the candidate most likely to measure >=5x the champion in the project's own backtest while staying robust out of sample."]
+    "Propose a candidate profile that scales the champion's existing edge: sizing, compounding, interval, and consensus-threshold changes to MAX_RETURN_PROFILE, expressed as exact BotConfig overrides."
+    "Propose a candidate profile built on a different edge than the champion — e.g. the swing/fast/stocks plan variants in src/trade/bot/ or a different signal mix — expressed as exact BotConfig overrides plus auto-bot settings."
+    "Propose a candidate profile that fuses the champion with hedging or regime filters to raise return per unit of drawdown, expressed as exact BotConfig overrides plus auto-bot settings."))
+
+; Measured evaluation: run the project's real backtests on the candidate.
+(~ evaluate ()
+  "Apply the candidate profile from INPUT to ~/code/finances and MEASURE it: run scripts/portfolio-backtest.mjs (and scripts/deep-backtest.mjs for robustness) with the candidate's overrides, and run the same backtests on the unmodified champion for a baseline. Report the measured annualized return, max drawdown, and trade count for both, plus scripts/edge-significance.mjs output if applicable. State the measured multiple over the champion. Do not estimate — if a backtest cannot be run, say so explicitly and report what blocked it.")
+
+; One self-improvement step: study -> propose -> measure -> rewrite.
+(~ improve (value)
+  (->
+    value
+    (study-champion (objective))
+    (propose)
+    (evaluate)
+    "Rewrite the candidate using the measured results above: keep only changes the backtest supports, and give exact implementation-ready values — the BotConfig override object for src/trade/bot/plan.ts and the auto-bot settings for src/trade/auto/index.ts — plus the measured numbers that justify them."))
+
+; Stop only when the MEASURED numbers clear the bar.
+(~ done (value)
+  (yes-no
+    (-> value
+        "Do the MEASURED backtest numbers in this report show >=5x the champion's annualized return (>=500%/yr), with max drawdown no worse than the champion, from an actually-executed backtest run (not an estimate)? Answer yes only if ALL conditions hold.")))
+
+; The recursive loop: seed with the objective, self-improve until `done` says yes.
+(loop
+  (objective)
+  improve
+  done)

@@ -1,0 +1,15 @@
+{
+  "context_length": 32,
+  "environment": {
+    "device": "CPU",
+    "platform": "Linux-6.12.85+deb13-amd64-x86_64-with-glibc2.41"
+  },
+  "median_seconds": 0.003652313505881466,
+  "model": "transformer",
+  "parameters": 29792,
+  "peak_rss_kib": 142160,
+  "repeats": 10,
+  "structural_work_definition": "layers * heads * context^2 attention scores",
+  "structural_work_units": 8192,
+  "tokens_per_second": 8761.569878508273
+}

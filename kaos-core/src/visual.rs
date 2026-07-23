@@ -15,6 +15,7 @@
 //! (# module)          Import    module          no children
 //! 'x                  Quote     —               1
 //! ,x                  Unquote   —               1
+//! (^ x)               Invert    —               1
 //! (-> a b)            Forward   —               2
 //! (<- a b)            Backflow  —               2
 //! ([m] a b …)         Square    —               mediator, then branches
@@ -32,9 +33,9 @@
 //! round-trips.
 //!
 //! The whiteboard alphabet is a *rendering* of this, not a restriction on it:
-//! forms with no children draw as `o`, forms with children draw as `[]`, and
-//! every child edge is an arrow ([`Form::shape`]). Three shapes on screen, the
-//! entire grammar underneath.
+//! prompts, symbols, and combining forms use the `o-[]-o` outlines; source
+//! sigils—including `^`—are their own drawn shapes; every child edge is an
+//! arrow ([`Form::shape`]).
 //!
 //! This module is pure and std-only — no UI, no rendering, no I/O — so the
 //! editor front-end is a thin shell over it.
@@ -61,6 +62,8 @@ pub enum Form {
     Quote,
     /// `,x` — syntax spliced into the surrounding quote.
     Unquote,
+    /// `(^ x)` — the recursive orientation dual of `x`.
+    Invert,
     /// `(-> a b)` — left-to-right value flow.
     Forward,
     /// `(<- a b)` — right-to-left value flow.
@@ -126,13 +129,14 @@ impl Form {
         ("# import", || Form::Import, "std/flow"),
         ("' quote", || Form::Quote, ""),
         (", unquote", || Form::Unquote, ""),
+        ("^ invert", || Form::Invert, ""),
         ("program", || Form::Program, ""),
     ];
 
     /// How the form is drawn.
     ///
     /// Forms whose source syntax *is* a sigil are drawn as that sigil, so the
-    /// canvas reads like the language: `$`, `~`, `#`, `'` and `,` are their own
+    /// canvas reads like the language: `$`, `~`, `#`, `'`, `,`, and `^` are their own
     /// shapes rather than boxes with a caption. The rest fall back to the
     /// whiteboard alphabet — terminals are `o`, combining forms are `[]`.
     pub fn shape(&self) -> Shape {
@@ -144,6 +148,7 @@ impl Form {
             Form::Import => Shape::Hash,
             Form::Quote => Shape::Quote,
             Form::Unquote => Shape::Comma,
+            Form::Invert => Shape::Caret,
             // Flow is drawn as the connecting arrow itself, never as a box
             // sitting between two arrows.
             Form::Forward | Form::Backflow => Shape::Arrow,
@@ -154,7 +159,7 @@ impl Form {
     pub fn arity(&self) -> Arity {
         match self {
             Form::Prompt | Form::Symbol | Form::Import => Arity::Exactly(0),
-            Form::Quote | Form::Unquote | Form::Function(_) => Arity::Exactly(1),
+            Form::Quote | Form::Unquote | Form::Invert | Form::Function(_) => Arity::Exactly(1),
             Form::Forward | Form::Backflow => Arity::Exactly(2),
             Form::Square => Arity::AtLeast(1),
             Form::Program => Arity::AtLeast(2),
@@ -177,6 +182,7 @@ impl Form {
             Form::Import => "import",
             Form::Quote => "quote",
             Form::Unquote => "unquote",
+            Form::Invert => "invert",
             Form::Forward => "forward",
             Form::Backflow => "backflow",
             Form::Square => "square",
@@ -211,6 +217,8 @@ pub enum Shape {
     Quote,
     /// `,` — an unquote.
     Comma,
+    /// `^` — recursive syntax orientation inversion.
+    Caret,
     /// `->` / `<-` — drawn as the arrow between its two children, with a small
     /// handle at the midpoint so it can still be selected and deleted.
     Arrow,
@@ -267,6 +275,8 @@ impl Shape {
                 (1.0, 12.0),
                 (-3.0, 16.0),
             ])],
+            // A crisp caret, kept open so it remains legible at low zoom.
+            Shape::Caret => &[Stroke::Poly(&[(-16.0, 10.0), (0.0, -12.0), (16.0, 10.0)])],
             Shape::Circle | Shape::Square | Shape::Diamond | Shape::Arrow => &[],
         }
     }
@@ -331,7 +341,7 @@ impl Node {
             Form::Compose => "( )".into(),
             Form::Program => "program".into(),
             // Drawn as their own sigil; nothing to write on top.
-            Form::Concat | Form::Quote | Form::Unquote => String::new(),
+            Form::Concat | Form::Quote | Form::Unquote | Form::Invert => String::new(),
             _ => self.form.name().into(),
         }
     }
@@ -656,6 +666,7 @@ impl Mandala {
             Form::Import => format!("(# {text})"),
             Form::Quote => format!("'{}", parts[0]),
             Form::Unquote => format!(",{}", parts[0]),
+            Form::Invert => format!("(^ {})", parts[0]),
             Form::Forward => format!("(-> {} {})", parts[0], parts[1]),
             Form::Backflow => format!("(<- {} {})", parts[0], parts[1]),
             Form::Square => format!("([{}] {})", parts[0], parts[1..].join(" ")),
@@ -724,6 +735,7 @@ impl Mandala {
             Expr::Import { module } => (Form::Import, module.to_string(), vec![]),
             Expr::Quote(x) => (Form::Quote, String::new(), vec![x]),
             Expr::Unquote(x) => (Form::Unquote, String::new(), vec![x]),
+            Expr::Invert(x) => (Form::Invert, String::new(), vec![x]),
             Expr::Forward(a, b) => (Form::Forward, String::new(), vec![a, b]),
             Expr::Backflow(a, b) => (Form::Backflow, String::new(), vec![a, b]),
             Expr::Square { mediator, branches } => {
@@ -806,6 +818,7 @@ mod tests {
         assert_round_trip("(# std/flow)"); // Import
         assert_round_trip("(~ f (x) '(-> x x))"); // Quote
         assert_round_trip("(~ f (x) '(-> ,x ,x))"); // Unquote
+        assert_round_trip("(^ (-> a b))"); // Invert
         assert_round_trip("(-> \"a\" \"b\")"); // Forward
         assert_round_trip("(<- \"a\" \"b\")"); // Backflow
         assert_round_trip("([\"m\"] \"a\" \"b\")"); // Square
@@ -848,6 +861,20 @@ mod tests {
         assert_round_trip("(f)");
     }
 
+    #[test]
+    fn syntax_inverter_round_trips_as_a_drawn_unary_form() {
+        assert_round_trip("(^ (-> \"source\" (<- a b)))");
+
+        let mandala = Mandala::from_rebis("(^ (-> a b))").unwrap();
+        let inverter = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Invert)
+            .expect("inverter node");
+        assert_eq!(inverter.shape(), Shape::Caret);
+        assert_eq!(mandala.children(inverter.id).len(), 1);
+    }
+
     // ── shapes are a rendering of the form ─────────────────────────────────
 
     #[test]
@@ -857,6 +884,7 @@ mod tests {
         assert_eq!(Form::Import.shape(), Shape::Hash);
         assert_eq!(Form::Quote.shape(), Shape::Quote);
         assert_eq!(Form::Unquote.shape(), Shape::Comma);
+        assert_eq!(Form::Invert.shape(), Shape::Caret);
     }
 
     // ── drawing an arrow creates the flow node ─────────────────────────────
@@ -1001,7 +1029,7 @@ mod tests {
                 distinct.push(s);
             }
         }
-        assert_eq!(distinct.len(), 6, "expected ◇ $ ~ # ' , to be drawn");
+        assert_eq!(distinct.len(), 7, "expected ◇ $ ~ # ' , ^ to be drawn");
     }
 
     #[test]
@@ -1012,6 +1040,7 @@ mod tests {
             Shape::Hash,
             Shape::Quote,
             Shape::Comma,
+            Shape::Caret,
         ] {
             assert!(!s.strokes().is_empty(), "{s:?} draws nothing");
         }
@@ -1031,6 +1060,7 @@ mod tests {
             Shape::Hash,
             Shape::Quote,
             Shape::Comma,
+            Shape::Caret,
         ] {
             for stroke in s.strokes() {
                 let points: Vec<(f32, f32)> = match stroke {
@@ -1049,7 +1079,7 @@ mod tests {
 
     #[test]
     fn polylines_have_at_least_two_points() {
-        for s in [Shape::Hash, Shape::Dollar] {
+        for s in [Shape::Hash, Shape::Dollar, Shape::Caret] {
             for stroke in s.strokes() {
                 if let Stroke::Poly(p) = stroke {
                     assert!(p.len() >= 2, "{s:?} has a polyline with {} points", p.len());
@@ -1085,6 +1115,7 @@ mod tests {
             Shape::Hash,
             Shape::Quote,
             Shape::Comma,
+            Shape::Caret,
         ] {
             assert!(shape.contains(NODE_R * 0.7, NODE_R * 0.7), "{shape:?}");
             assert!(!shape.contains(NODE_R + 1.0, 0.0), "{shape:?}");
@@ -1109,8 +1140,10 @@ mod tests {
         let mut m = Mandala::new();
         let c = m.add(Form::Concat, "", 0.0, 0.0);
         let q = m.add(Form::Quote, "", 0.0, 0.0);
+        let i = m.add(Form::Invert, "", 0.0, 0.0);
         assert_eq!(m.node(c).unwrap().caption(), "");
         assert_eq!(m.node(q).unwrap().caption(), "");
+        assert_eq!(m.node(i).unwrap().caption(), "");
         // A named sigil still reports its name for the renderer to place.
         let f = m.add(Form::Function(vec!["x".into()]), "twice", 0.0, 0.0);
         assert_eq!(m.node(f).unwrap().caption(), "twice");
@@ -1123,8 +1156,8 @@ mod tests {
         // only two absent here.
         let names: HashSet<&str> = Form::ALL.iter().map(|(_, f, _)| f().name()).collect();
         for expected in [
-            "prompt", "symbol", "import", "quote", "unquote", "square", "concat", "compose",
-            "call", "function", "program",
+            "prompt", "symbol", "import", "quote", "unquote", "invert", "square", "concat",
+            "compose", "call", "function", "program",
         ] {
             assert!(names.contains(expected), "palette is missing {expected}");
         }

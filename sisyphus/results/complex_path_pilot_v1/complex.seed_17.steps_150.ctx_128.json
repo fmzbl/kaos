@@ -1,0 +1,69 @@
+{
+  "environment": {
+    "device": "CPU",
+    "platform": "Linux-6.12.85+deb13-amd64-x86_64-with-glibc2.41"
+  },
+  "final_test": {
+    "bits_per_byte": 7.022331708475407,
+    "elapsed_seconds": 3.148688803004916,
+    "nats_per_byte": 4.867509424686432,
+    "perplexity": 129.99674669071888,
+    "tokens": 4096,
+    "tokens_per_second": 1300.8589467752508
+  },
+  "final_validation": {
+    "bits_per_byte": 7.041038519383731,
+    "elapsed_seconds": 2.8698426600021776,
+    "nats_per_byte": 4.880475997924805,
+    "perplexity": 131.69333472309148,
+    "tokens": 2048,
+    "tokens_per_second": 713.6279729002447
+  },
+  "path_diagnostics_last_batch": [
+    {
+      "phase_circular_mean": 0.8183689713478088,
+      "phase_std": 1.644657850265503,
+      "radius_max": 6.360285758972168,
+      "radius_mean": 2.7739267349243164
+    },
+    {
+      "phase_circular_mean": 0.815733790397644,
+      "phase_std": 1.6464097499847412,
+      "radius_max": 12.71561336517334,
+      "radius_mean": 5.802417755126953
+    }
+  ],
+  "protocol": {
+    "batch_size": 4,
+    "context_length": 128,
+    "corpus_bytes": 200000,
+    "corpus_sha256": "650afa43b5b793c41c9b0783da50dfe82bc21759c2d6e3bd0f147050f0b8a0f4",
+    "data_seed": 10017,
+    "implementation_sha256": {
+      "benchmark_complex_path.py": "17652b1c4bdb4da58edf1dd1e0080bfe356e5af91802fc231e4930ac22cf1341",
+      "complex_path.py": "8be3c41ba5cac21ac64b0207f5f83fa3370f37f1d5ca79a3a79e57adb6be61bc",
+      "synthetic_data.py": "b76030824ecea0837ea3d4d4d5542b42e43958b9023f46161dca5e125eff677c"
+    },
+    "model": {
+      "arm": "complex",
+      "complex_mode": true,
+      "context_length": 128,
+      "ffn_hidden": 80,
+      "name": "rebis-path-complex",
+      "phase_destroy": false,
+      "rounds": 2,
+      "vocab_size": 256,
+      "width": 20
+    },
+    "parameters": 32171,
+    "schedule_sha256": "e003235ddd494c73f6106e867c0a825750a62d5af898f9e14961989a5845b285",
+    "seed": 17,
+    "steps": 150,
+    "version": "rebis-path-pilot-v1"
+  },
+  "run_id": "complex.seed_17.steps_150.ctx_128",
+  "status": "complete",
+  "train_final_loss": 5.584461688995361,
+  "train_first_loss": 6.626166820526123,
+  "training_elapsed_seconds": 218.18566864600143
+}

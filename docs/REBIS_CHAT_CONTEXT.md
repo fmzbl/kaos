@@ -34,6 +34,12 @@ language but follow the node prompt and return only its flow value.
   `INPUT:` to the next stage; the value is `C`.
 - `(<- A B)` is deliberately simple reverse-flow sugar and is exactly
   equivalent to `(-> B A)`. Do not assign adversarial or hidden semantics to it.
+- `(^ E)` is the pure syntax inverter. It recursively exchanges `->` and `<-`
+  while preserving written operand order. Groups, squares, and quotes retain
+  their structure; prompts, symbols, imports, macro definitions, and all of `$`
+  are fixed. A macro call expands before its resulting graph is inverted. It makes
+  no model call, and `(^ (^ E))` is exactly `E`. This is an orientation dual,
+  not a semantic undo operation for natural-language prompts.
 - `([M] A B C)` is convergence. The branches run, absent answers and `nothing`
   are dropped, and executable mediator `M` receives the remaining labeled
   results. A prompt mediator calls the model; a symbol mediator judges
@@ -56,13 +62,26 @@ language but follow the node prompt and return only its flow value.
 - `nothing` is the intentional absence/refusal value. Do not quote it when the
   language value is intended.
 - Nested source multiplies calls when an argument is structurally repeated.
-  Runtime macro, module, model-call, concurrency, and timeout limits are hard
-  backstops; recursive/search examples should mention their cost.
+  Runtime macro, module, model-call, concurrency, and timeout limits are
+  backstops; in the hosted TUI, failed prompts, timeouts, clean allowances, and
+  vanished children pause. `p` resumes and retries the first unfinished prompt.
+  Recursive/search examples should still mention their cost.
 
 Useful editor commands are `/run`, `/run block`, `/run parallel`,
-`/run block parallel`, `/runs`, `/format`, `/tree`, `/mandala`, `/output`, and
-`/sigil save NAME`. A visual selection followed by `/run` evaluates only that
-selection while carrying top-level definitions and imports with it.
+`/run block parallel`, `/runs`, `/search [TEXT]`, `/format`, `/tree`, `/mandala`,
+`/output`, `/sigil save NAME`, and `/sigil chat`. `/sigil chat` opens a right-panel
+God Agent channel with the current source and every live bot's source, input,
+state, directive, trace, and checkpoint context. Valid source revisions rebuild
+only the bound run from its unchanged completed prompt prefix. Explicit user
+requests may pause/resume a named live run or apply/clear guidance for its next
+unfinished prompts; the channel cannot cancel or delete runs.
+`/search TEXT` finds the next literal source
+match with wraparound; `/search` repeats the previous query. Saving a sigil also
+retains its last successful output and any unfinished run's record, trace, and
+atomic prompt checkpoint; reopening restores a paused run that `p` can resume.
+A visual selection
+followed by `/run` evaluates only that selection while carrying top-level
+definitions and imports with it.
 
 ## Example 1: deeply nested evidence synthesis
 

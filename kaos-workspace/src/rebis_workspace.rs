@@ -56,6 +56,8 @@ pub enum Highlight {
     Mediate,
     /// The `#` module import symbol.
     Import,
+    /// The `^` syntax inverter.
+    Invert,
     Backflow,
     Parenthesis,
     Whitespace,
@@ -67,7 +69,7 @@ pub enum Highlight {
 /// Complete punctuation token set accepted by Rebis, in reference-manual
 /// order. The editor renders this as a compact top-bar language legend.
 pub const REBIS_SYMBOLS: &[&str] = &[
-    "(", ")", "[", "]", "~", "#", "'", ",", "$", "->", "<-", ";", "\"",
+    "(", ")", "[", "]", "~", "#", "'", ",", "$", "^", "->", "<-", ";", "\"",
 ];
 
 /// Visual projection shown beside the source editor.
@@ -1882,6 +1884,7 @@ fn highlight_for(
         | TokenKind::Quote
         | TokenKind::Unquote
         | TokenKind::Dollar => Highlight::Mediate,
+        TokenKind::Invert => Highlight::Invert,
         TokenKind::Forward => Highlight::Forward,
         TokenKind::Backflow => Highlight::Backflow,
         TokenKind::Comment => Highlight::Comment,
@@ -3798,6 +3801,7 @@ mod tests {
         assert_eq!(highlights("'(,work)")[2], Highlight::Mediate);
         // `$` composition heads read as operators, not as invalid characters.
         assert_eq!(highlights("($ a)")[1], Highlight::Mediate);
+        assert_eq!(highlights("(^ (-> a b))")[1], Highlight::Invert);
     }
 
     #[test]

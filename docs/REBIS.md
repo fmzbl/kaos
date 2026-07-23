@@ -5,6 +5,8 @@ prompts, bare atoms are Lisp-like symbols, `~` defines structural macros, arrows
 answers, and `[M]` contains executable mediator code. `($ ...)` interpolates a
 string from the text of its operands (nothing inside it fires); variables are
 macro parameters, and a text constant is simply a macro whose body is a prompt.
+`(^ E)` purely dualizes syntax orientation by recursively exchanging `->` and
+`<-`; it makes no model call and applying it twice returns `E`.
 
 Kaos compiles the rules and the complex, nested examples in
 [`REBIS_CHAT_CONTEXT.md`](REBIS_CHAT_CONTEXT.md) into both `/chat` and every
@@ -96,7 +98,7 @@ repeats the previous query. Press `Ctrl-K` for Kaos commands such as `/search`,
 `/format`, `/run`, `/tree`, and `/mandala`. Vim `:` remains
 reserved for `:w`, `:e`, `:q`, `:q!`, and `:wq`.
 The top bar shows the complete Rebis punctuation set horizontally—symbols only:
-`( ) [ ] ~ # ' , -> <- ; "`. Structural operators and delimiters use one shared
+`( ) [ ] ~ # ' , $ ^ -> <- ; "`. Structural operators and delimiters use one shared
 operator color in both that legend and source text.
 Semicolons begin line comments only outside quoted prompts. Inside `"..."`, a
 semicolon is ordinary prompt text, including in multiline strings and after an
@@ -253,6 +255,7 @@ o "prompt"       prompt or value terminal
 ~[f(x)]          named macro template
 [f]              expanded macro call
 → / ←            answer flow
+^                syntax inverter
 ```
 
 For example, `(inspect "parser")` appears as:
@@ -269,8 +272,8 @@ The definition appears as a reusable template:
 
 Use `/mandala` to open this projection and `/tree` for the structural AST.
 
-The projection also runs backwards. `kaos visual` opens a canvas where the same
-three elements are drawn rather than read, and the Rebis source is generated
+The projection also runs backwards. `kaos visual` opens a canvas where every
+Rebis form is drawn rather than read, and the Rebis source is generated
 from the drawing — see [the README](../README.md#visual-mandala-editor).
 `kaos visual FILE` and `/visual` load an existing program onto that canvas, so
 the projection round-trips: source to drawing and back to the same source. It

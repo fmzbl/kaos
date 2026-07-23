@@ -6443,6 +6443,7 @@ fn rebis_highlight_style(highlight: Highlight) -> Style {
         Highlight::Forward
         | Highlight::Mediate
         | Highlight::Import
+        | Highlight::Invert
         | Highlight::Backflow
         | Highlight::Parenthesis => rebis_operator_style(),
         Highlight::Whitespace => Style::new().fg(C_BONE()),
@@ -7895,13 +7896,14 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("( ) [ ] ~ # ' , $ -> <- ; \""));
+        assert!(screen.contains("( ) [ ] ~ # ' , $ ^ -> <- ; \""));
 
         let operator_style = rebis_operator_style();
         for highlight in [
             Highlight::Forward,
             Highlight::Mediate,
             Highlight::Import,
+            Highlight::Invert,
             Highlight::Backflow,
             Highlight::Parenthesis,
         ] {

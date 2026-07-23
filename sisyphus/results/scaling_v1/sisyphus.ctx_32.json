@@ -1,0 +1,15 @@
+{
+  "context_length": 32,
+  "environment": {
+    "device": "CPU",
+    "platform": "Linux-6.12.85+deb13-amd64-x86_64-with-glibc2.41"
+  },
+  "median_seconds": 0.004361072999017779,
+  "model": "sisyphus",
+  "parameters": 29729,
+  "peak_rss_kib": 145384,
+  "repeats": 10,
+  "structural_work_definition": "layers * rounds * log2(context) * positions",
+  "structural_work_units": 320,
+  "tokens_per_second": 7337.64374208072
+}
