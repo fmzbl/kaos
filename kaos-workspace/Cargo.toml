@@ -7,4 +7,4 @@ description = "The Rebis workspace: editor state, Vim behaviour, sigils, runs an
 
 [dependencies]
 kaos-core = { path = "../kaos-core" }
-rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+rebis-lang = { path = "../../rebis" }

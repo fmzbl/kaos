@@ -1,12 +1,10 @@
 //! The palette, shared by the terminal app and `kaos visual`.
 //!
-//! Two modes, each a neutral grey scale plus a single purple accent. The
-//! shapes, sigils and rules carry the meaning through brightness; the accent is
-//! spent only on what the eye should find first, so it never competes with
-//! itself. Both the terminal app and `kaos visual` read this one palette. `/theme dark`
-//! and `/theme light` persist the choice in the Kaos config, and both
-//! interfaces read it back through [`mode`]. Pure std — these are just escape
-//! codes.
+//! Two modes, each a neutral grey scale with two semantic colours. Purple
+//! marks focus, recursion, and chaos; blue carries flow. Both the terminal app
+//! and `kaos visual` read this one palette. `/theme dark` and `/theme light`
+//! persist the choice in the Kaos config, and both interfaces read it back
+//! through [`mode`]. Pure std — these are just escape codes.
 
 // The four roles the one-shot CLI output uses. They resolve from the current
 // mode rather than being fixed, so `kaos scry`, `kaos auth` and the rest follow
@@ -34,13 +32,14 @@ pub fn BONE() -> (u8, u8, u8) {
     current().ink
 }
 
-// ── monochrome modes ────────────────────────────────────────────────────────
+// ── neutral modes with semantic accents ────────────────────────────────────
 
 /// Which way round the interface runs.
 ///
-/// The palette is deliberately black and white: the shapes, glyphs and rules
-/// carry the meaning, so colour is left to do nothing but separate figure from
-/// ground. One mode is the other inverted.
+/// The structural palette is deliberately neutral: shapes, glyphs and rules
+/// carry meaning through form and brightness. Purple marks interaction and
+/// recursion; blue marks flow. One mode reverses the neutral figure and
+/// ground.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Mode {
     #[default]
@@ -90,10 +89,11 @@ pub struct Palette {
     pub mid: (u8, u8, u8),
     /// Secondary text and rules.
     pub faint: (u8, u8, u8),
-    /// The one colour: purple, for what the eye should go to first —
-    /// headings, the selection, the active tool, a live arrow. Everything
-    /// else stays neutral so the accent keeps its force.
+    /// Purple, for what the eye should go to first — headings, selection,
+    /// recursion, the active tool, and the chaos star.
     pub accent: (u8, u8, u8),
+    /// Blue, for executable flow, navigation, live data, and range selections.
+    pub blue: (u8, u8, u8),
 }
 
 /// The palette for a mode. Light is not a tint of dark — it is the inverse, so
@@ -109,6 +109,7 @@ pub const fn palette(mode: Mode) -> Palette {
             faint: (140, 140, 140),
             // Bright enough to carry on a near-black ground.
             accent: (176, 132, 232),
+            blue: (86, 162, 255),
         },
         Mode::Light => Palette {
             ground: (250, 250, 250),
@@ -119,6 +120,7 @@ pub const fn palette(mode: Mode) -> Palette {
             faint: (120, 120, 120),
             // Deepened so it still reads against white.
             accent: (104, 58, 168),
+            blue: (28, 88, 168),
         },
     }
 }
@@ -143,19 +145,34 @@ pub fn current() -> Palette {
     palette(mode())
 }
 
-/// Wrap `s` in a 24-bit foreground colour.
+/// The palette's own ground, as an SGR background parameter.
+///
+/// One-shot output cannot repaint the terminal the way the fullscreen app
+/// paints its ground, so every styled span carries the ground with it. Without
+/// this a light theme puts near-black ink straight onto a dark terminal — the
+/// one thing a light theme must not do — and a dark theme disappears on a light
+/// terminal. With it, the configured mode decides how Kaos looks in both
+/// frontends instead of the surrounding terminal deciding for it.
+fn ground_sgr(ground: (u8, u8, u8)) -> String {
+    format!("48;2;{};{};{}", ground.0, ground.1, ground.2)
+}
+
+/// Wrap `s` in a 24-bit foreground colour on the palette's ground.
 pub fn fg(rgb: (u8, u8, u8), s: &str) -> String {
-    format!("\x1b[38;2;{};{};{}m{}\x1b[0m", rgb.0, rgb.1, rgb.2, s)
+    let bg = ground_sgr(current().ground);
+    format!("\x1b[{bg};38;2;{};{};{}m{}\x1b[0m", rgb.0, rgb.1, rgb.2, s)
 }
 
 /// Bold + coloured.
 pub fn bold(rgb: (u8, u8, u8), s: &str) -> String {
-    format!("\x1b[1;38;2;{};{};{}m{}\x1b[0m", rgb.0, rgb.1, rgb.2, s)
+    let bg = ground_sgr(current().ground);
+    format!("\x1b[1;{bg};38;2;{};{};{}m{}\x1b[0m", rgb.0, rgb.1, rgb.2, s)
 }
 
 /// Dim coloured.
 pub fn dim(rgb: (u8, u8, u8), s: &str) -> String {
-    format!("\x1b[2;38;2;{};{};{}m{}\x1b[0m", rgb.0, rgb.1, rgb.2, s)
+    let bg = ground_sgr(current().ground);
+    format!("\x1b[2;{bg};38;2;{};{};{}m{}\x1b[0m", rgb.0, rgb.1, rgb.2, s)
 }
 
 pub fn red(s: &str) -> String {
@@ -169,7 +186,7 @@ pub fn bone(s: &str) -> String {
 }
 
 /// The Sigil of Chaos — Carroll's eight-rayed star, the sole symbol of the Pact,
-/// rendered small in red for the prompt and banners.
+/// rendered small in the purple accent for prompts and banners.
 pub fn chaosphere() -> String {
     red("\u{2734}") // an eight-pointed star ✴
 }
@@ -194,7 +211,15 @@ pub fn chaos_star_lines() -> [&'static str; 11] {
     ]
 }
 
-/// The Chaos Star rendered in bold red, ready to print in a banner.
+/// The same eight-arrowed star in compact terminal-watermark form.
+///
+/// Five cells square is large enough to preserve all eight arrowheads but
+/// small enough to sit quietly in a pane corner without becoming content.
+pub fn compact_chaos_star_lines() -> [&'static str; 5] {
+    ["↖ ↑ ↗", " ╲│╱ ", "←─•─→", " ╱│╲ ", "↙ ↓ ↘"]
+}
+
+/// The Chaos Star rendered in the bold purple accent, ready for a banner.
 pub fn chaos_star_red() -> String {
     chaos_star_lines()
         .iter()
@@ -237,8 +262,8 @@ mod tests {
 
     #[test]
     fn the_neutral_tones_are_true_greys() {
-        // The scale carries meaning through brightness alone; only `accent`
-        // is allowed to have a hue.
+        // Structure carries meaning through brightness alone; only the two
+        // semantic colour roles are allowed to have a hue.
         for m in [Mode::Dark, Mode::Light] {
             let p = palette(m);
             for (name, (r, g, b)) in [
@@ -267,26 +292,32 @@ mod tests {
     }
 
     #[test]
-    fn the_accent_is_the_only_colour_and_it_is_purple() {
+    fn the_semantic_colours_are_purple_and_blue() {
         for m in [Mode::Dark, Mode::Light] {
-            let (r, g, b) = palette(m).accent;
+            let p = palette(m);
+            let (r, g, b) = p.accent;
             assert!(!(r == g && g == b), "{m:?} accent is grey, not an accent");
             // Purple: blue strongest, red above green, green lowest.
             assert!(b > r && r > g, "{m:?} accent {r},{g},{b} is not purple");
+            let (r, g, b) = p.blue;
+            assert!(!(r == g && g == b), "{m:?} blue is grey, not an accent");
+            assert!(b > g && g > r, "{m:?} blue {r},{g},{b} is not blue");
         }
     }
 
     #[test]
-    fn the_accent_reads_against_its_ground() {
+    fn the_semantic_colours_read_against_their_ground() {
         for m in [Mode::Dark, Mode::Light] {
             let p = palette(m);
             let lum = |(r, g, b): (u8, u8, u8)| {
                 0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)
             };
-            assert!(
-                (lum(p.accent) - lum(p.ground)).abs() > 40.0,
-                "{m:?} accent does not separate from the ground"
-            );
+            for (name, colour) in [("purple", p.accent), ("blue", p.blue)] {
+                assert!(
+                    (lum(colour) - lum(p.ground)).abs() > 40.0,
+                    "{m:?} {name} does not separate from the ground"
+                );
+            }
         }
     }
 
@@ -312,5 +343,34 @@ mod tests {
             let faint_gap = (i16::from(p.faint.0) - i16::from(p.ground.0)).abs();
             assert!(faint_gap > 60, "{m:?} faint contrast is only {faint_gap}");
         }
+    }
+
+    #[test]
+    fn styled_output_carries_the_palette_ground() {
+        // One-shot output cannot repaint the terminal, so each styled span
+        // brings its own ground. Without it the configured mode would only
+        // decide the ink and the surrounding terminal would decide the rest —
+        // which is exactly how a light theme ends up unreadable on a dark
+        // terminal.
+        let ground = current().ground;
+        let expected = format!("48;2;{};{};{}", ground.0, ground.1, ground.2);
+        for painted in [
+            fg((1, 2, 3), "x"),
+            bold((1, 2, 3), "x"),
+            dim((1, 2, 3), "x"),
+        ] {
+            assert!(painted.contains(&expected), "no ground in {painted:?}");
+            assert!(painted.contains("38;2;1;2;3"), "no ink in {painted:?}");
+            assert!(painted.ends_with("\u{1b}[0m"), "unreset {painted:?}");
+        }
+    }
+
+    #[test]
+    fn compact_terminal_star_preserves_all_eight_directions() {
+        let star = compact_chaos_star_lines().join("\n");
+        for arrow in ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖'] {
+            assert!(star.contains(arrow), "compact star is missing {arrow}");
+        }
+        assert!(star.contains('•'));
     }
 }

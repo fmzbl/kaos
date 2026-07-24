@@ -113,21 +113,3 @@ the mechanism only stays if the gate says so.
 - On models strong enough to one-shot everything, none of this matters —
   the first 5-step budget absorbs the whole distribution and the spiral
   never turns. The edge, as always in this repo, lives in the mid-band.
-
-## Neural counterpart: Sisyphus
-
-[Sisyphus](SISYPHUS.md) applies the same bounded recurrence at two model scales.
-Inside a forward pass, one quote/route/group/square cell is reused over dyadic
-context scales and two refinement rounds; a `1/sqrt(visits)` residual keeps
-tied depth stable, and later rounds are trained not to worsen earlier
-predictions. Outside the model, candidate checkpoints inherit the champion,
-train under Fibonacci attempt budgets, alternate cold/hot optimizer polarity,
-and cross a frozen validation gate or roll back exactly.
-
-This is the safe reading of recursive self-improvement: real evidence enters at
-the gate, failed state is banished, and the objective cannot rewrite its own
-judge. Round two improved round one in all ten retained enwik8/text8 seeds. The
-final model beat a matched Transformer 4/5 on enwik8, but lost 0/5 on the
-untouched text8 confirmation. Recurrence therefore improves Sisyphus's own
-intermediate state reliably without establishing general superiority; the
-[paper](../sisyphus/PAPER.md) retains the complete limits.

@@ -15,6 +15,7 @@
 //! - [`visual`] — the mandala model, Rebis code generation and loading.
 
 pub mod config;
+pub mod run_model;
 pub mod runs;
 pub mod sessions;
 pub mod sigils;

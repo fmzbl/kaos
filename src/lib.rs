@@ -47,7 +47,7 @@ pub use kaos_agent::{
 pub use kaos_pact::{
     adept, charge, dream, egregore, equation, gnosis, grade, order, ray, rite, rng, sigil,
 };
-pub use kaos_workspace::{rebis_checkpoint, rebis_supervisor, rebis_workspace};
+pub use kaos_workspace::{rebis_checkpoint, rebis_inlet, rebis_supervisor, rebis_workspace};
 
 pub mod fold;
 pub mod input;

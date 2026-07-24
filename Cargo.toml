@@ -31,7 +31,7 @@ base64 = { version = "0.22", optional = true }
 arboard = { version = "3.6", default-features = false, optional = true }
 # Rebis is the model-interface language.  KAOS is a host of the language; the
 # dependency is deliberately one-way (rebis-lang has no knowledge of KAOS).
-rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+rebis-lang = { path = "../rebis" }
 # The shared, front-end-agnostic core: config, palette, sessions, mandala model.
 kaos-core = { path = "kaos-core" }
 # The offline, deterministic simulation core.

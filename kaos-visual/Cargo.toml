@@ -16,11 +16,13 @@ name = "kaos-visual"
 path = "src/main.rs"
 
 [dependencies]
-# Everything this window draws — forms, sessions, sigils, tabs, palette — comes
-# from the core. It has no dependency on the terminal app at all, which is why
-# it can stand as its own crate.
+# Shared meaning comes from the core; screen-neutral source/block behavior from
+# the workspace; credentials and model rites from the agent. No ratatui
+# frontend is linked, so this remains a standalone native application.
 kaos-core = { path = "../kaos-core" }
-rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+kaos-agent = { path = "../kaos-agent" }
+kaos-workspace = { path = "../kaos-workspace" }
+rebis-lang = { path = "../../rebis" }
 eframe = { version = "0.29", default-features = false, features = [
     "glow",
     "default_fonts",

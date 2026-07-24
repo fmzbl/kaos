@@ -141,6 +141,48 @@ pub fn run_claude_agent_once_with_result(
     run_claude_agent_inner(root, task, model, false, None, emit)
 }
 
+/// The `claude` CLI requires `--session-id`/`--resume` to be a UUID. Kaos
+/// session ids are time-ordered `{millis}-{pid}` strings, so map one to a stable
+/// v4-shaped UUID (same id in → same UUID out, so a resume finds its session). A
+/// value that is already a UUID is passed through unchanged.
+fn claude_session_uuid(raw: &str) -> String {
+    fn is_uuid(s: &str) -> bool {
+        let bytes = s.as_bytes();
+        bytes.len() == 36
+            && bytes.iter().enumerate().all(|(i, &c)| {
+                if matches!(i, 8 | 13 | 18 | 23) {
+                    c == b'-'
+                } else {
+                    c.is_ascii_hexdigit()
+                }
+            })
+    }
+    if is_uuid(raw) {
+        return raw.to_string();
+    }
+    use std::hash::{Hash, Hasher};
+    let half = |salt: u64| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        salt.hash(&mut hasher);
+        raw.hash(&mut hasher);
+        hasher.finish()
+    };
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&half(0).to_be_bytes());
+    bytes[8..].copy_from_slice(&half(1).to_be_bytes());
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+    let h = |b: u8| format!("{b:02x}");
+    format!(
+        "{}{}{}{}-{}{}-{}{}-{}{}-{}{}{}{}{}{}",
+        h(bytes[0]), h(bytes[1]), h(bytes[2]), h(bytes[3]),
+        h(bytes[4]), h(bytes[5]),
+        h(bytes[6]), h(bytes[7]),
+        h(bytes[8]), h(bytes[9]),
+        h(bytes[10]), h(bytes[11]), h(bytes[12]), h(bytes[13]), h(bytes[14]), h(bytes[15]),
+    )
+}
+
 fn run_claude_agent_inner(
     root: &std::path::Path,
     task: &str,
@@ -182,10 +224,14 @@ fn run_claude_agent_inner(
         cmd.arg("--permission-mode").arg("acceptEdits");
     }
     // Memory across turns: the caller pins one claude conversation to the session
-    // via KAOS_SESSION (a UUID). The first turn CREATES it (--session-id); later
-    // turns RESUME it (--resume KAOS_RESUME=1), so claude keeps the full history.
+    // via KAOS_SESSION. The `claude` CLI requires that id to be a UUID, but Kaos
+    // session ids are time-ordered strings, so derive a stable UUID from the id
+    // (the same input always yields the same UUID, so create and resume match).
+    // The first turn CREATES it (--session-id); later turns RESUME it
+    // (--resume KAOS_RESUME=1), so claude keeps the full history.
     if persist_session {
         if let Some(sid) = std::env::var("KAOS_SESSION").ok().filter(|s| !s.is_empty()) {
+            let sid = claude_session_uuid(&sid);
             let resume = std::env::var("KAOS_RESUME")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false);
@@ -239,7 +285,9 @@ fn run_claude_agent_inner(
                 result.map_err(|error| format!("could not send task to Claude: {error}"))
             })
     });
-    let _ = err_reader.map(|h| h.join());
+    let stderr = err_reader
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
     let status = child
         .wait()
         .map_err(|e| format!("the Work was interrupted: {e}"))?;
@@ -249,10 +297,19 @@ fn run_claude_agent_inner(
     if status.success() {
         Ok(final_result)
     } else {
-        Err(format!(
-            "claude exited with {}",
-            status.code().unwrap_or(-1)
-        ))
+        // Surface the CLI's own reason (auth, usage limits, a bad session id)
+        // rather than a bare exit code. The real message may land on stderr or,
+        // in `-p` mode, on stdout — include whichever we captured.
+        let detail = format!("{} {}", final_result.trim(), stderr.trim());
+        let detail = detail.trim();
+        if detail.is_empty() {
+            Err(format!("claude exited with {}", status.code().unwrap_or(-1)))
+        } else {
+            Err(format!(
+                "claude exited with {}: {detail}",
+                status.code().unwrap_or(-1)
+            ))
+        }
     }
 }
 
@@ -795,6 +852,27 @@ pub fn adept_system_prompt(adept_name: &str, ray_name: &str, ray_sphere: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kaos_session_ids_map_to_a_stable_valid_uuid() {
+        let raw = "1737590000123-45678"; // the `{millis}-{pid}` shape kaos mints
+        let uuid = claude_session_uuid(raw);
+        // Well-formed UUID: 8-4-4-4-12 hex, version 4, RFC 4122 variant.
+        let parts: Vec<&str> = uuid.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        assert!(uuid
+            .chars()
+            .all(|c| c == '-' || c.is_ascii_hexdigit()));
+        assert_eq!(parts[2].as_bytes()[0], b'4', "version 4");
+        assert!(matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'));
+        // Deterministic, and an already-UUID input is passed through.
+        assert_eq!(uuid, claude_session_uuid(raw));
+        let already = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(claude_session_uuid(already), already);
+    }
 
     #[test]
     fn claude_completion_permissions_follow_the_single_kaos_decision() {

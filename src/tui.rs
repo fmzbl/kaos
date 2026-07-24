@@ -35,63 +35,53 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::rebis_workspace::{
-    self, Highlight, Mode as RebisMode, NormalAction, RunRequest, RunScope, Visualization,
-    Workspace as RebisWorkspace, WorkspaceAction, WorkspaceEvent,
+    self, handle_edit_key, EditKey, EditModifiers, Highlight, Mode as RebisMode, RunRequest,
+    RunScope, Visualization, Workspace as RebisWorkspace, WorkspaceAction, WorkspaceEvent,
 };
 use crate::theme;
 
-// The terminal palette, resolved once at startup from the configured mode
-// (`/theme dark|light`). Monochrome by design: the shapes and rules carry the
-// meaning, so colour only separates figure from ground.
+// The terminal palette follows the configured mode (`/theme dark|light`).
+// Structure stays neutral grey; purple marks focus and blue marks flow.
 fn tone(rgb: (u8, u8, u8)) -> Color {
     Color::Rgb(rgb.0, rgb.1, rgb.2)
 }
 fn c_ink() -> Color {
     tone(crate::theme::current().ink)
 }
-fn c_faint() -> Color {
-    tone(crate::theme::current().faint)
-}
-static PALETTE: std::sync::LazyLock<crate::theme::Palette> =
-    std::sync::LazyLock::new(crate::theme::current);
 #[allow(non_snake_case)]
 fn C_RED() -> Color {
-    tone(PALETTE.accent)
+    tone(crate::theme::current().accent)
 }
 #[allow(non_snake_case)]
 fn C_OX() -> Color {
-    tone(PALETTE.faint)
+    tone(crate::theme::current().faint)
 }
 #[allow(non_snake_case)]
 fn C_ASH() -> Color {
-    tone(PALETTE.faint)
+    tone(crate::theme::current().faint)
 }
 #[allow(non_snake_case)]
 fn C_BONE() -> Color {
-    tone(PALETTE.ink)
+    tone(crate::theme::current().ink)
 }
 // The accents. With colour gone these separate by brightness instead of hue,
 // which is why the palette carries a `mid` tone between ink and faint.
 /// The page the whole app is drawn on.
 fn c_ground() -> Color {
-    tone(PALETTE.ground)
+    tone(crate::theme::current().ground)
 }
 #[allow(non_snake_case)]
 fn C_GOLD() -> Color {
-    tone(PALETTE.accent)
-}
-#[allow(non_snake_case)]
-fn C_TEAL() -> Color {
-    tone(PALETTE.mid)
+    tone(crate::theme::current().accent)
 }
 #[allow(non_snake_case)]
 fn C_BLUE() -> Color {
-    tone(PALETTE.faint)
+    tone(crate::theme::current().blue)
 }
 /// A finished run. Formerly green; now simply the brightest tone.
 #[allow(non_snake_case)]
 fn C_DONE() -> Color {
-    tone(PALETTE.ink)
+    tone(crate::theme::current().ink)
 }
 /// Internal marker distinguishing a literal chat intent from `/code`'s CLI
 /// grammar (`[dir] [xK] task -- gate`). It is consumed before spawning.
@@ -157,6 +147,7 @@ const REBIS_SLASH_COMMANDS: &[CommandSpec] = &[
     command("save [FILE]", "save "),
     command("vim on", "vim on"),
     command("vim off", "vim off"),
+    command("vim toggle", "vim toggle"),
     command("vim always", "vim always"),
     command("vim never", "vim never"),
     command("output", "output"),
@@ -268,6 +259,21 @@ const SPIN: [&str; 10] = [
 
 /// Strip ANSI escape sequences so streamed, coloured output can be shown as plain
 /// text in the one-line status bar.
+/// Clear an overlay's area and repaint it with the palette's ground.
+///
+/// `Clear` resets cells to the *terminal's* default background, so on its own
+/// it punches a dark hole through a light theme (and a light hole through a
+/// dark one). Every overlay therefore restores the ground it sits on, which is
+/// what keeps the configured mode — not the surrounding terminal — in charge of
+/// how the app looks.
+fn clear_to_ground(f: &mut Frame, area: Rect) {
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Block::default().style(Style::new().bg(c_ground()).fg(c_ink())),
+        area,
+    );
+}
+
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -576,16 +582,9 @@ enum QueuedWork {
     Rebis { id: u64, request: RunRequest },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RebisRunState {
-    AwaitingPermission,
-    Queued,
-    Running,
-    /// The program reached its successful result. Non-success exits remain
-    /// `Running` + paused and therefore cannot enter a terminal failure state.
-    Complete,
-    Cancelled,
-}
+/// Shared lifecycle vocabulary; this frontend adds process/timer state but
+/// does not invent another meaning for queued, running, or complete.
+type RebisRunState = kaos_core::run_model::State;
 
 /// Durable UI history for one submitted run. Queued requests begin empty,
 /// receive their text stream once active, and remain explorable after exit.
@@ -607,6 +606,9 @@ struct RebisRunEntry {
     /// Persistent guidance read by the child before every unfinished prompt.
     /// `/sigil chat` is the only writer; checkpoint replays ignore it.
     directive_path: PathBuf,
+    /// Values delivered to the child's `(& port …)` input ports. Written when
+    /// the user answers a run that has stopped awaiting input.
+    inlet_path: PathBuf,
     scope: RunScope,
     preview: String,
     state: RebisRunState,
@@ -723,6 +725,16 @@ impl TextPaneRegion {
             content_left: area.x,
         }
     }
+
+    fn content_area(&self) -> Rect {
+        let left = self.content_left.clamp(self.area.x, self.area.right());
+        Rect::new(
+            left,
+            self.area.y,
+            self.area.right().saturating_sub(left),
+            self.area.height,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -741,6 +753,16 @@ struct PendingRebisRun {
 }
 
 /// The application state.
+/// The user answering a run that stopped at a `(& port …)` input.
+struct RebisInput {
+    /// The run awaiting input.
+    run: u64,
+    /// The port the value is for.
+    port: String,
+    /// The line typed so far.
+    buffer: String,
+}
+
 pub struct App {
     /// Dedicated Rebis source/graph workspace. While present it owns the screen;
     /// background model jobs continue to stream into the retained transcript.
@@ -810,6 +832,10 @@ pub struct App {
     /// completed states; Tab expands each run's captured text stream.
     rebis_runs: Vec<RebisRunEntry>,
     rebis_run_choice: usize,
+    /// Active input mode: a run stopped at a `(& port …)` and the user is
+    /// typing the value it awaits. `None` unless the user opened input mode on
+    /// an awaiting run with Enter.
+    rebis_input: Option<RebisInput>,
     /// Scroll offset in the flattened run/output tree. This is deliberately
     /// separate from the mandala's scroll so browsing runs never moves it.
     rebis_run_top: usize,
@@ -928,6 +954,7 @@ impl App {
             queue: Vec::new(),
             rebis_runs: Vec::new(),
             rebis_run_choice: 0,
+            rebis_input: None,
             rebis_run_top: 0,
             next_rebis_run_id: 1,
             session_id: gen_uuid(),
@@ -1183,6 +1210,8 @@ impl App {
                 .join(format!("kaos-rebis-{}-{id}.checkpoint", self.session_id)),
             directive_path: std::env::temp_dir()
                 .join(format!("kaos-rebis-{}-{id}.directive", self.session_id)),
+            inlet_path: std::env::temp_dir()
+                .join(format!("kaos-rebis-{}-{id}.inlet", self.session_id)),
             scope: request.scope,
             preview: rebis_source_preview(&request.source),
             state,
@@ -1302,6 +1331,16 @@ impl App {
                     "awaiting authority · y once · a sigil · n deny"
                 }
                 RebisRunState::Queued => "queued · u/Delete removes · Tab expands",
+                RebisRunState::Running
+                    if run.paused
+                        && run
+                            .pause_reason
+                            .as_deref()
+                            .and_then(crate::rebis_inlet::awaited_port)
+                            .is_some() =>
+                {
+                    "awaiting input · Enter responds · Esc/p leaves it paused · ^C cancels"
+                }
                 RebisRunState::Running if run.paused => {
                     "paused · p resumes · Tab stream · ↑/↓ scroll · ^C cancels the run"
                 }
@@ -1432,6 +1471,94 @@ impl App {
             let _ = self.persist_rebis_run(id);
         }
         true
+    }
+
+    /// The selected run and the port it is stopped awaiting input on, if any.
+    ///
+    /// A run parks at `(& port …)` through the pause protocol with an
+    /// `awaiting input on port …` reason; that is what distinguishes it from a
+    /// transient or manual pause.
+    fn selected_awaiting_input(&self) -> Option<(u64, String)> {
+        let run = self.rebis_runs.get(self.rebis_run_choice)?;
+        if run.state != RebisRunState::Running || !run.paused {
+            return None;
+        }
+        let reason = run.pause_reason.as_deref()?;
+        crate::rebis_inlet::awaited_port(reason).map(|port| (run.id, port.to_string()))
+    }
+
+    /// Open input mode on the selected run if it is awaiting input. Returns
+    /// whether input mode was entered, so the caller can stop handling the key.
+    fn begin_rebis_input(&mut self) -> bool {
+        let Some((run, port)) = self.selected_awaiting_input() else {
+            return false;
+        };
+        if let Some(workspace) = &mut self.rebis {
+            workspace.message = format!("input for `{port}` · type, Enter delivers, Esc cancels");
+        }
+        self.rebis_input = Some(RebisInput {
+            run,
+            port,
+            buffer: String::new(),
+        });
+        true
+    }
+
+    /// Route one key into an open input line: type, delete, deliver, or cancel.
+    fn on_rebis_input_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char(c) => {
+                if let Some(input) = &mut self.rebis_input {
+                    input.buffer.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = &mut self.rebis_input {
+                    input.buffer.pop();
+                }
+            }
+            KeyCode::Esc => {
+                self.rebis_input = None;
+                if let Some(workspace) = &mut self.rebis {
+                    workspace.message = "input cancelled · the run stays paused".to_string();
+                }
+            }
+            KeyCode::Enter => self.deliver_rebis_input(),
+            _ => {}
+        }
+    }
+
+    /// Deliver the typed value to the awaiting run's port and resume it.
+    fn deliver_rebis_input(&mut self) {
+        let Some(input) = self.rebis_input.take() else {
+            return;
+        };
+        let Some(run) = self.rebis_runs.iter().find(|run| run.id == input.run) else {
+            return;
+        };
+        let inlet_path = run.inlet_path.clone();
+        if let Err(error) = crate::rebis_inlet::deliver(&inlet_path, &input.port, &input.buffer) {
+            if let Some(workspace) = &mut self.rebis {
+                workspace.message = format!("could not deliver input: {error}");
+            }
+            return;
+        }
+        if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == input.run) {
+            run.output
+                .push(format!("input       → {} · {}", input.port, input.buffer));
+        }
+        match self.resume_rebis_run_by_id(input.run) {
+            Ok(()) => {
+                if let Some(workspace) = &mut self.rebis {
+                    workspace.message = format!("delivered input to `{}` · resumed", input.port);
+                }
+            }
+            Err(error) => {
+                if let Some(workspace) = &mut self.rebis {
+                    workspace.message = error;
+                }
+            }
+        }
     }
 
     /// Remove the selected waiting or finished Rebis run without disturbing
@@ -1717,7 +1844,14 @@ impl App {
                 },
                 f,
             );
+            let show_watermark = !workspace.chaos_star_visible();
+            let watermark_area = pane_areas.last().map(TextPaneRegion::content_area);
             self.capture_text_panes(f, &pane_areas);
+            if show_watermark && self.text_selection.is_none() {
+                if let Some(area) = watermark_area {
+                    render_subtle_chaos_star(f, area);
+                }
+            }
             return;
         }
         // The input field grows as you type or paste. Embedded newlines become
@@ -1793,7 +1927,7 @@ impl App {
                 width,
                 height.min(rows[1].height),
             );
-            f.render_widget(Clear, area);
+            clear_to_ground(f, area);
             let selected = self.command_choice.min(suggestions.len() - 1);
             let visible = suggestions.len().min(7);
             let start = selected.saturating_sub(visible.saturating_sub(1));
@@ -1809,7 +1943,7 @@ impl App {
                         if index == selected {
                             Style::new()
                                 .fg(Color::Black)
-                                .bg(C_TEAL())
+                                .bg(C_BLUE())
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::new().fg(C_BONE())
@@ -1842,6 +1976,9 @@ impl App {
         };
         render_footer_with_model(f, rows[3], status, &selected_model);
         self.capture_text_panes(f, &[TextPaneRegion::full(TextPaneKind::Chat, rows[1])]);
+        if self.text_selection.is_none() {
+            render_subtle_chaos_star(f, rows[1]);
+        }
     }
 
     /// The normal (non-pending) status line: spinner while working, else hints.
@@ -1893,7 +2030,7 @@ impl App {
                     Span::styled(format!("{frame} "), red_bold()),
                     Span::styled(job.label.clone(), Style::new().fg(C_BONE())),
                     Span::styled(format!("  {secs}s"), Style::new().fg(C_OX())),
-                    Span::styled(parallel, Style::new().fg(C_TEAL())),
+                    Span::styled(parallel, Style::new().fg(C_BLUE())),
                     Span::styled(queued, Style::new().fg(C_ASH())),
                     Span::styled(
                         "  ".to_string() + &act,
@@ -1902,7 +2039,7 @@ impl App {
                 ])
             }
             _ if !self.parallel_jobs.is_empty() => Line::from(vec![
-                Span::styled("∥ ", Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD)),
+                Span::styled("∥ ", Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format!(
                         "{} parallel Rebis run{} active",
@@ -2334,7 +2471,7 @@ impl App {
         self.push_line(Line::from(vec![
             Span::styled(
                 format!("∥ #{run_id}  "),
-                Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(text, Style::new().fg(C_ASH())),
         ]));
@@ -2677,13 +2814,21 @@ impl App {
             }
             workspace.follow_source_cursor();
             match workspace.mode {
-                RebisMode::Insert => {
-                    if !text.is_empty() {
-                        workspace.editor.insert_text(text);
+                RebisMode::Command | RebisMode::KaosCommand => {
+                    workspace.command.push_str(text);
+                }
+                _ => {
+                    let effect = handle_edit_key(
+                        &mut workspace.editor,
+                        &mut workspace.mode,
+                        workspace.vim_enabled,
+                        EditKey::Paste(text.to_string()),
+                        EditModifiers::default(),
+                    );
+                    if !effect.handled {
+                        workspace.message = "enter insert mode with i before pasting".to_string();
                     }
                 }
-                RebisMode::Command | RebisMode::KaosCommand => workspace.command.push_str(text),
-                _ => workspace.message = "enter insert mode with i before pasting".to_string(),
             }
             workspace.refresh();
             return;
@@ -2805,6 +2950,12 @@ impl App {
             workspace.editor.clear_pending();
             return;
         }
+        // While answering an awaiting run, the keyboard belongs to that input
+        // line until the value is delivered or cancelled.
+        if self.rebis_input.is_some() {
+            self.on_rebis_input_key(code);
+            return;
+        }
         let rebis_run_count = self.rebis_runs.len();
         let browsing_runs = rebis_run_count > 0
             && self.rebis.as_ref().is_some_and(|workspace| {
@@ -2814,6 +2965,11 @@ impl App {
             });
         if browsing_runs {
             match code {
+                KeyCode::Enter => {
+                    if self.begin_rebis_input() {
+                        return;
+                    }
+                }
                 KeyCode::Char('j') => {
                     self.rebis_run_choice = (self.rebis_run_choice + 1).min(rebis_run_count - 1);
                     self.describe_rebis_run_choice();
@@ -2938,40 +3094,6 @@ impl App {
             return;
         }
 
-        if !workspace.vim_enabled && workspace.mode == RebisMode::Insert && !workspace.graph_focus {
-            match code {
-                KeyCode::Char('s') if ctrl => {
-                    workspace.command = "w".to_string();
-                    action = workspace.execute_command();
-                }
-                KeyCode::Char(character) if !ctrl => match character {
-                    '(' => workspace.editor.insert_pair('(', ')'),
-                    '[' => workspace.editor.insert_pair('[', ']'),
-                    '"' if workspace.editor.skip_close('"') => {}
-                    '"' => workspace.editor.insert_pair('"', '"'),
-                    ')' if workspace.editor.skip_close(')') => {}
-                    ']' if workspace.editor.skip_close(']') => {}
-                    _ => workspace.editor.insert(character),
-                },
-                KeyCode::Enter => workspace.editor.insert('\n'),
-                KeyCode::Tab => workspace.editor.insert_text("  "),
-                KeyCode::Backspace => workspace.editor.backspace(),
-                KeyCode::Delete => {
-                    workspace.editor.delete();
-                }
-                KeyCode::Left => workspace.editor.left(),
-                KeyCode::Right => workspace.editor.right(),
-                KeyCode::Up => workspace.editor.vertical(-1),
-                KeyCode::Down => workspace.editor.vertical(1),
-                KeyCode::Home => workspace.editor.line_start_motion(),
-                KeyCode::End => workspace.editor.line_end(),
-                _ => {}
-            }
-            workspace.refresh();
-            self.handle_rebis_action(action);
-            return;
-        }
-
         if workspace.window_prefix {
             workspace.window_prefix = false;
             match code {
@@ -3043,383 +3165,116 @@ impl App {
             return;
         }
 
-        // Saving is available from every editor mode.
-        if ctrl && matches!(code, KeyCode::Char('s')) {
-            workspace.command = "w".to_string();
-            action = workspace.execute_command();
-        } else {
-            match workspace.mode {
-                RebisMode::Insert => match code {
-                    KeyCode::Esc => {
-                        workspace.editor.end_insert_session();
-                        workspace.mode = RebisMode::Normal;
-                        workspace.editor.clear_pending();
-                    }
-                    KeyCode::Char('c') if ctrl => {
-                        workspace.editor.end_insert_session();
-                        workspace.mode = RebisMode::Normal;
-                    }
-                    KeyCode::Char(character) if !ctrl => match character {
-                        '(' => workspace.editor.insert_pair('(', ')'),
-                        '[' => workspace.editor.insert_pair('[', ']'),
-                        '"' if workspace.editor.skip_close('"') => {}
-                        '"' => workspace.editor.insert_pair('"', '"'),
-                        ')' if workspace.editor.skip_close(')') => {}
-                        ']' if workspace.editor.skip_close(']') => {}
-                        _ => workspace.editor.insert(character),
-                    },
-                    KeyCode::Enter => workspace.editor.insert('\n'),
-                    KeyCode::Tab => {
-                        workspace.editor.insert(' ');
-                        workspace.editor.insert(' ');
-                    }
-                    KeyCode::Backspace => workspace.editor.backspace(),
-                    KeyCode::Delete => {
-                        workspace.editor.delete();
-                    }
-                    KeyCode::Left => workspace.editor.left(),
-                    KeyCode::Right => workspace.editor.right(),
-                    KeyCode::Up => workspace.editor.vertical(-1),
-                    KeyCode::Down => workspace.editor.vertical(1),
-                    KeyCode::Home => workspace.editor.line_start_motion(),
-                    KeyCode::End => workspace.editor.line_end(),
-                    _ => {}
-                },
-                RebisMode::Normal => {
-                    let normal = if let KeyCode::Char(character) = code {
-                        workspace.editor.normal_key(character)
+        match workspace.mode {
+            RebisMode::Command => match code {
+                KeyCode::Esc => {
+                    workspace.command.clear();
+                    workspace.mode = if workspace.vim_enabled {
+                        RebisMode::Normal
                     } else {
-                        NormalAction::Unhandled
+                        RebisMode::Insert
                     };
-                    match normal {
-                        NormalAction::Pending | NormalAction::Moved | NormalAction::Edited => {}
-                        NormalAction::Yanked => {
-                            workspace.message = "selection yanked".to_string();
-                        }
-                        NormalAction::EnterInsert => {
-                            workspace.editor.begin_insert_session(true);
-                            workspace.mode = RebisMode::Insert;
-                        }
-                        NormalAction::Unhandled => match code {
-                            KeyCode::Char(':') => {
-                                workspace.mode = RebisMode::Command;
-                                workspace.command.clear();
-                                workspace.editor.clear_pending();
-                            }
-                            KeyCode::Char('i') => {
-                                workspace.editor.begin_insert_session(false);
-                                workspace.mode = RebisMode::Insert;
-                            }
-                            KeyCode::Char('v') if ctrl => {
-                                workspace.editor.begin_visual_block();
-                                workspace.mode = RebisMode::VisualBlock;
-                            }
-                            KeyCode::Char('V') | KeyCode::Char('v') if shift => {
-                                workspace.editor.begin_visual(true);
-                                workspace.mode = RebisMode::VisualLine;
-                            }
-                            KeyCode::Char('v') => {
-                                workspace.editor.begin_visual(false);
-                                workspace.mode = RebisMode::Visual;
-                            }
-                            KeyCode::Char('a') => {
-                                workspace.editor.append_after_cursor();
-                                workspace.editor.begin_insert_session(false);
-                                workspace.mode = RebisMode::Insert;
-                            }
-                            KeyCode::Char('I') => {
-                                let _ = workspace.editor.normal_key('^');
-                                workspace.editor.begin_insert_session(false);
-                                workspace.mode = RebisMode::Insert;
-                            }
-                            KeyCode::Char('A') => {
-                                workspace.editor.line_end();
-                                workspace.editor.begin_insert_session(false);
-                                workspace.mode = RebisMode::Insert;
-                            }
-                            KeyCode::Char('o') => {
-                                workspace.editor.open_below();
-                                workspace.editor.begin_insert_session(true);
-                                workspace.mode = RebisMode::Insert;
-                            }
-                            KeyCode::Char('O') => {
-                                workspace.editor.open_above();
-                                workspace.editor.begin_insert_session(true);
-                                workspace.mode = RebisMode::Insert;
-                            }
-                            KeyCode::Left => {
-                                let _ = workspace.editor.normal_key('h');
-                            }
-                            KeyCode::Right => {
-                                let _ = workspace.editor.normal_key('l');
-                            }
-                            KeyCode::Down => {
-                                let _ = workspace.editor.normal_key('j');
-                            }
-                            KeyCode::Up => {
-                                let _ = workspace.editor.normal_key('k');
-                            }
-                            KeyCode::Home => {
-                                let _ = workspace.editor.normal_key('0');
-                            }
-                            KeyCode::End => {
-                                let _ = workspace.editor.normal_key('$');
-                            }
-                            KeyCode::Char('x') | KeyCode::Delete => {
-                                workspace.editor.delete();
-                            }
-                            KeyCode::Char('p') => workspace.editor.paste_after(),
-                            KeyCode::Char('P') => workspace.editor.paste_before(),
-                            KeyCode::Char('D') => {
-                                workspace.editor.delete_to_line_end();
-                            }
-                            KeyCode::Char('C') => {
-                                let changed = workspace.editor.delete_to_line_end();
-                                workspace.editor.begin_insert_session(changed);
-                                workspace.mode = RebisMode::Insert;
-                            }
-                            KeyCode::Char('s') => {
-                                let changed = workspace.editor.delete();
-                                workspace.editor.begin_insert_session(changed);
-                                workspace.mode = RebisMode::Insert;
-                            }
-                            KeyCode::Char('u') if !ctrl => workspace.editor.undo(),
-                            KeyCode::Char('r') if ctrl => workspace.editor.redo(),
-                            KeyCode::Char('%') => {
-                                if !workspace.editor.jump_matching_parenthesis() {
-                                    workspace.message =
-                                        "no matching structural parenthesis".to_string();
-                                }
-                            }
-                            KeyCode::Esc => workspace.editor.clear_pending(),
-                            _ => workspace.editor.clear_pending(),
-                        },
+                }
+                KeyCode::Char('[') if ctrl => {
+                    workspace.command.clear();
+                    workspace.mode = if workspace.vim_enabled {
+                        RebisMode::Normal
+                    } else {
+                        RebisMode::Insert
+                    };
+                }
+                KeyCode::Enter => action = workspace.execute_command(),
+                KeyCode::Backspace => {
+                    workspace.command.pop();
+                }
+                KeyCode::Char(character) if !ctrl => workspace.command.push(character),
+                _ => {}
+            },
+            RebisMode::KaosCommand => match code {
+                KeyCode::Esc => {
+                    workspace.command.clear();
+                    workspace.mode = if workspace.vim_enabled {
+                        RebisMode::Normal
+                    } else {
+                        RebisMode::Insert
+                    };
+                }
+                KeyCode::Char('[') if ctrl => {
+                    workspace.command.clear();
+                    workspace.mode = if workspace.vim_enabled {
+                        RebisMode::Normal
+                    } else {
+                        RebisMode::Insert
+                    };
+                }
+                KeyCode::Up => {
+                    let count = rebis_completions(&workspace.command).len();
+                    if count > 0 {
+                        workspace.command_choice = workspace.command_choice.saturating_sub(1);
                     }
                 }
-                RebisMode::Visual | RebisMode::VisualLine => {
-                    let linewise = workspace.mode == RebisMode::VisualLine;
-                    match code {
-                        KeyCode::Char('V') | KeyCode::Char('v') if shift => {
-                            workspace.editor.begin_visual(true);
-                            workspace.mode = RebisMode::VisualLine;
-                        }
-                        KeyCode::Esc | KeyCode::Char('v') => {
-                            workspace.editor.end_visual();
-                            workspace.mode = RebisMode::Normal;
-                        }
-                        KeyCode::Char(character)
-                            if character.is_ascii_digit()
-                                || matches!(
-                                    character,
-                                    'h' | 'l'
-                                        | 'j'
-                                        | 'k'
-                                        | 'w'
-                                        | 'W'
-                                        | 'e'
-                                        | 'E'
-                                        | 'b'
-                                        | 'B'
-                                        | '^'
-                                        | '$'
-                                        | 'g'
-                                        | 'G'
-                                ) =>
-                        {
-                            let _ = workspace.editor.normal_key(character);
-                        }
-                        KeyCode::Left => {
-                            let _ = workspace.editor.normal_key('h');
-                        }
-                        KeyCode::Right => {
-                            let _ = workspace.editor.normal_key('l');
-                        }
-                        KeyCode::Down => {
-                            let _ = workspace.editor.normal_key('j');
-                        }
-                        KeyCode::Up => {
-                            let _ = workspace.editor.normal_key('k');
-                        }
-                        KeyCode::Home => {
-                            let _ = workspace.editor.normal_key('0');
-                        }
-                        KeyCode::End => {
-                            let _ = workspace.editor.normal_key('$');
-                        }
-                        KeyCode::Char('y') => {
-                            workspace.editor.yank_visual(linewise);
-                            workspace.mode = RebisMode::Normal;
-                            workspace.message = "selection yanked".to_string();
-                        }
-                        KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete => {
-                            workspace.editor.delete_visual(linewise);
-                            workspace.mode = RebisMode::Normal;
-                        }
-                        KeyCode::Char('c') => {
-                            workspace.editor.delete_visual(linewise);
-                            workspace.editor.begin_insert_session(true);
-                            workspace.mode = RebisMode::Insert;
-                        }
-                        KeyCode::Char('p') | KeyCode::Char('P') => {
-                            workspace.editor.paste_visual(linewise);
-                            workspace.mode = RebisMode::Normal;
-                        }
-                        KeyCode::Char(':') => {
-                            workspace.mode = RebisMode::Command;
-                            workspace.command.clear();
-                        }
-                        _ => {}
+                KeyCode::Down => {
+                    let count = rebis_completions(&workspace.command).len();
+                    if count > 0 {
+                        workspace.command_choice = (workspace.command_choice + 1).min(count - 1);
                     }
                 }
-                RebisMode::VisualBlock => match code {
-                    // Ctrl-V toggles the block selection off; a bare `v`/`V`
-                    // switches to character- or line-wise selection in place.
-                    KeyCode::Esc => {
-                        workspace.editor.end_visual();
-                        workspace.mode = RebisMode::Normal;
+                KeyCode::Tab | KeyCode::BackTab => {
+                    let choices = rebis_completions(&workspace.command);
+                    if !choices.is_empty() {
+                        workspace.command = choices
+                            [workspace.command_choice.min(choices.len() - 1)]
+                        .insert
+                        .to_string();
                     }
-                    KeyCode::Char('v') if ctrl => {
-                        workspace.editor.end_visual();
-                        workspace.mode = RebisMode::Normal;
+                }
+                KeyCode::Enter => {
+                    let choices = rebis_completions(&workspace.command);
+                    if !choices.is_empty() {
+                        let command = choices[workspace.command_choice.min(choices.len() - 1)];
+                        if missing_command_argument(&workspace.command, command) {
+                            workspace.command = command.insert.to_string();
+                            return;
+                        }
+                        if !workspace.command.starts_with(command.insert) {
+                            workspace.command = command.insert.to_string();
+                        }
                     }
-                    KeyCode::Char('V') | KeyCode::Char('v') if shift => {
-                        workspace.editor.begin_visual(true);
-                        workspace.mode = RebisMode::VisualLine;
+                    action = workspace.execute_kaos_command();
+                }
+                KeyCode::Backspace => {
+                    workspace.command.pop();
+                    workspace.command_choice = 0;
+                }
+                KeyCode::Char(character) if !ctrl => {
+                    workspace.command.push(character);
+                    workspace.command_choice = 0;
+                }
+                _ => {}
+            },
+            _ => {
+                if let Some(key) = terminal_edit_key(code) {
+                    let effect = handle_edit_key(
+                        &mut workspace.editor,
+                        &mut workspace.mode,
+                        workspace.vim_enabled,
+                        key,
+                        EditModifiers { ctrl, shift },
+                    );
+                    if effect.yanked {
+                        workspace.message = "selection yanked".to_string();
                     }
-                    KeyCode::Char('v') => {
-                        workspace.editor.begin_visual(false);
-                        workspace.mode = RebisMode::Visual;
-                    }
-                    KeyCode::Char(character)
-                        if character.is_ascii_digit()
-                            || matches!(
-                                character,
-                                'h' | 'l'
-                                    | 'j'
-                                    | 'k'
-                                    | 'w'
-                                    | 'W'
-                                    | 'e'
-                                    | 'E'
-                                    | 'b'
-                                    | 'B'
-                                    | '^'
-                                    | '$'
-                                    | 'g'
-                                    | 'G'
-                            ) =>
-                    {
-                        let _ = workspace.editor.normal_key(character);
-                    }
-                    KeyCode::Left => {
-                        let _ = workspace.editor.normal_key('h');
-                    }
-                    KeyCode::Right => {
-                        let _ = workspace.editor.normal_key('l');
-                    }
-                    KeyCode::Down => {
-                        let _ = workspace.editor.normal_key('j');
-                    }
-                    KeyCode::Up => {
-                        let _ = workspace.editor.normal_key('k');
-                    }
-                    KeyCode::Home => {
-                        let _ = workspace.editor.normal_key('0');
-                    }
-                    KeyCode::End => {
-                        let _ = workspace.editor.normal_key('$');
-                    }
-                    KeyCode::Char('y') => {
-                        workspace.editor.yank_visual_block();
-                        workspace.mode = RebisMode::Normal;
-                        workspace.message = "block yanked".to_string();
-                    }
-                    KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete => {
-                        workspace.editor.delete_visual_block();
-                        workspace.mode = RebisMode::Normal;
-                    }
-                    KeyCode::Char('c') => {
-                        workspace.editor.delete_visual_block();
-                        workspace.editor.begin_insert_session(true);
-                        workspace.mode = RebisMode::Insert;
-                    }
-                    KeyCode::Char(':') => {
-                        workspace.mode = RebisMode::Command;
+                    if effect.command {
                         workspace.command.clear();
                     }
-                    _ => {}
-                },
-                RebisMode::Command => match code {
-                    KeyCode::Esc => {
-                        workspace.command.clear();
-                        workspace.mode = if workspace.vim_enabled {
-                            RebisMode::Normal
-                        } else {
-                            RebisMode::Insert
-                        };
+                    if effect.save {
+                        workspace.command = "w".to_string();
+                        action = workspace.execute_command();
                     }
-                    KeyCode::Enter => action = workspace.execute_command(),
-                    KeyCode::Backspace => {
-                        workspace.command.pop();
+                    if effect.unmatched_parenthesis {
+                        workspace.message = "no matching structural parenthesis".to_string();
                     }
-                    KeyCode::Char(character) if !ctrl => workspace.command.push(character),
-                    _ => {}
-                },
-                RebisMode::KaosCommand => match code {
-                    KeyCode::Esc => {
-                        workspace.command.clear();
-                        workspace.mode = if workspace.vim_enabled {
-                            RebisMode::Normal
-                        } else {
-                            RebisMode::Insert
-                        };
-                    }
-                    KeyCode::Up => {
-                        let count = rebis_completions(&workspace.command).len();
-                        if count > 0 {
-                            workspace.command_choice = workspace.command_choice.saturating_sub(1);
-                        }
-                    }
-                    KeyCode::Down => {
-                        let count = rebis_completions(&workspace.command).len();
-                        if count > 0 {
-                            workspace.command_choice =
-                                (workspace.command_choice + 1).min(count - 1);
-                        }
-                    }
-                    KeyCode::Tab | KeyCode::BackTab => {
-                        let choices = rebis_completions(&workspace.command);
-                        if !choices.is_empty() {
-                            workspace.command = choices
-                                [workspace.command_choice.min(choices.len() - 1)]
-                            .insert
-                            .to_string();
-                        }
-                    }
-                    KeyCode::Enter => {
-                        let choices = rebis_completions(&workspace.command);
-                        if !choices.is_empty() {
-                            let command = choices[workspace.command_choice.min(choices.len() - 1)];
-                            if missing_command_argument(&workspace.command, command) {
-                                workspace.command = command.insert.to_string();
-                                return;
-                            }
-                            if !workspace.command.starts_with(command.insert) {
-                                workspace.command = command.insert.to_string();
-                            }
-                        }
-                        action = workspace.execute_kaos_command();
-                    }
-                    KeyCode::Backspace => {
-                        workspace.command.pop();
-                        workspace.command_choice = 0;
-                    }
-                    KeyCode::Char(character) if !ctrl => {
-                        workspace.command.push(character);
-                        workspace.command_choice = 0;
-                    }
-                    _ => {}
-                },
+                }
             }
         }
 
@@ -4572,12 +4427,10 @@ impl App {
                 let want = args.get(1).map(String::as_str).unwrap_or("");
                 match crate::theme::Mode::parse(want) {
                     Some(mode) => match crate::theme::set_mode(mode) {
-                        // Persisted for both this app and `kaos visual`; the
-                        // terminal picks it up on restart.
-                        Ok(()) => self.note(&format!(
-                            "theme {} — restart kaos to repaint the terminal",
-                            mode.name()
-                        )),
+                        // Persisted for both this app and `kaos visual`; every
+                        // colour helper reads the live setting, so the next
+                        // frame repaints this terminal too.
+                        Ok(()) => self.note(&format!("theme {}", mode.name())),
                         Err(error) => self.note(&format!("theme: {error}")),
                     },
                     None => self.note(&format!(
@@ -5067,6 +4920,14 @@ impl App {
                     .map(|run| run.directive_path.clone())
             }) {
                 cmd.env(crate::rebis_supervisor::DIRECTIVE_PATH_ENV, directive_path);
+            }
+            if let Some(inlet_path) = rebis_run_id.and_then(|id| {
+                self.rebis_runs
+                    .iter()
+                    .find(|run| run.id == id)
+                    .map(|run| run.inlet_path.clone())
+            }) {
+                cmd.env(crate::rebis_inlet::INLET_PATH_ENV, inlet_path);
             }
             if owns_process_group {
                 cmd.env(crate::pause::PROCESS_GROUP_ENV, "1");
@@ -5847,7 +5708,7 @@ fn draw_rebis_workspace(
         let mut spans = vec![
             Span::styled(
                 "o-[]-o",
-                Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  REBIS", red_bold()),
             Span::raw("   "),
@@ -5921,7 +5782,7 @@ fn draw_rebis_workspace(
             } else {
                 C_OX()
             }))
-            .title(Span::styled(visualization_title, Style::new().fg(C_TEAL())));
+            .title(Span::styled(visualization_title, Style::new().fg(C_BLUE())));
         let graph_inner = graph_block.inner(graph_area);
         selectable_panes.push(TextPaneRegion::full(TextPaneKind::RebisPanel, graph_inner));
         workspace.panel_inner = Some((
@@ -5942,7 +5803,7 @@ fn draw_rebis_workspace(
                     let style = if line.starts_with("you     ") {
                         Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD)
                     } else if line.starts_with("system  ") || line == "GOD CHANNEL" {
-                        Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD)
+                        Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD)
                     } else {
                         Style::new().fg(C_BONE())
                     };
@@ -5965,7 +5826,7 @@ fn draw_rebis_workspace(
             let input_block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(if workspace.sigil_chat_busy() {
-                    C_TEAL()
+                    C_BLUE()
                 } else {
                     C_GOLD()
                 }))
@@ -5992,11 +5853,13 @@ fn draw_rebis_workspace(
                 .into_iter()
                 .map(|line| {
                     let style = if line.starts_with("o-[]-o") {
-                        Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD)
+                        Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD)
                     } else if matches!(line.as_str(), "REGION TREE" | "DIRECTED FLOW") {
                         Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD)
-                    } else if line.contains('→') || line.contains('←') || line.contains('[') {
-                        Style::new().fg(C_TEAL())
+                    } else if line.contains('→') || line.contains('←') {
+                        Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD)
+                    } else if line.contains('[') {
+                        Style::new().fg(C_BLUE())
                     } else {
                         Style::new().fg(C_BONE())
                     };
@@ -6013,7 +5876,7 @@ fn draw_rebis_workspace(
             None
         };
         if let Some((area, start, visible)) = run_layout {
-            f.render_widget(Clear, area);
+            clear_to_ground(f, area);
             let selected = run_choice.min(rebis_runs.len() - 1);
             let lines = run_rows
                 .iter()
@@ -6083,7 +5946,7 @@ fn draw_rebis_workspace(
                             if *run == selected {
                                 Style::new()
                                     .fg(if *kind == RebisRunSectionKind::Agent {
-                                        C_TEAL()
+                                        C_BLUE()
                                     } else {
                                         C_GOLD()
                                     })
@@ -6135,7 +5998,7 @@ fn draw_rebis_workspace(
                 width,
                 height.min(rows[1].height),
             );
-            f.render_widget(Clear, area);
+            clear_to_ground(f, area);
             let selected = workspace.command_choice.min(suggestions.len() - 1);
             let start = selected.saturating_sub(visible.saturating_sub(1));
             let lines = suggestions
@@ -6150,7 +6013,7 @@ fn draw_rebis_workspace(
                         if index == selected {
                             Style::new()
                                 .fg(Color::Black)
-                                .bg(C_TEAL())
+                                .bg(C_BLUE())
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::new().fg(C_BONE())
@@ -6173,7 +6036,7 @@ fn draw_rebis_workspace(
         Line::from(vec![
             Span::styled(
                 "⚙ CONFIG  ",
-                Style::new().fg(C_TEAL()).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "plain key/value file · provider credentials remain separate",
@@ -6249,7 +6112,7 @@ fn draw_rebis_workspace(
                 if workspace.mode == RebisMode::Insert {
                     Style::new()
                         .fg(Color::Black)
-                        .bg(C_TEAL())
+                        .bg(C_BLUE())
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::new()
@@ -6409,7 +6272,7 @@ fn render_rebis_source(
 }
 
 fn render_chaos_star(f: &mut Frame, area: Rect) {
-    f.render_widget(Clear, area);
+    clear_to_ground(f, area);
     let star = theme::chaos_star_lines();
     let star_width = star
         .iter()
@@ -6436,10 +6299,46 @@ fn render_chaos_star(f: &mut Frame, area: Rect) {
     }
 }
 
+/// Paint the compact purple Chaos Star only into otherwise blank cells.
+///
+/// This makes it terminal chrome rather than transcript/source content: it
+/// never covers text, and callers paint it after taking their selectable-pane
+/// snapshot so copied text never includes the watermark.
+fn render_subtle_chaos_star(f: &mut Frame, area: Rect) {
+    let star = theme::compact_chaos_star_lines();
+    let width = star
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or_default() as u16;
+    let height = star.len() as u16;
+    if area.width < width.saturating_add(2) || area.height < height.saturating_add(2) {
+        return;
+    }
+    let left = area.right().saturating_sub(width + 1);
+    let top = area.bottom().saturating_sub(height + 1);
+    let style = Style::new().fg(C_RED()).add_modifier(Modifier::DIM);
+    let buffer = f.buffer_mut();
+    for (row, line) in star.into_iter().enumerate() {
+        for (column, glyph) in line.chars().enumerate() {
+            if glyph.is_whitespace() {
+                continue;
+            }
+            if let Some(cell) = buffer.cell_mut((left + column as u16, top + row as u16)) {
+                if cell.symbol().trim().is_empty() {
+                    let symbol = glyph.to_string();
+                    cell.set_symbol(&symbol);
+                    cell.set_style(style);
+                }
+            }
+        }
+    }
+}
+
 fn rebis_highlight_style(highlight: Highlight) -> Style {
     match highlight {
         Highlight::Atom => Style::new().fg(C_BONE()),
-        Highlight::Prompt => Style::new().fg(C_TEAL()),
+        Highlight::Prompt => Style::new().fg(C_BLUE()),
         Highlight::Forward
         | Highlight::Mediate
         | Highlight::Import
@@ -6658,6 +6557,24 @@ fn selection_copy_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bool {
         && (matches!(code, KeyCode::Char('C'))
             || (modifiers.contains(KeyModifiers::SHIFT)
                 && matches!(code, KeyCode::Char('c' | 'C'))))
+}
+
+fn terminal_edit_key(code: KeyCode) -> Option<EditKey> {
+    match code {
+        KeyCode::Char(character) => Some(EditKey::Char(character)),
+        KeyCode::Esc => Some(EditKey::Escape),
+        KeyCode::Enter => Some(EditKey::Enter),
+        KeyCode::Tab => Some(EditKey::Tab),
+        KeyCode::Backspace => Some(EditKey::Backspace),
+        KeyCode::Delete => Some(EditKey::Delete),
+        KeyCode::Left => Some(EditKey::Left),
+        KeyCode::Right => Some(EditKey::Right),
+        KeyCode::Up => Some(EditKey::Up),
+        KeyCode::Down => Some(EditKey::Down),
+        KeyCode::Home => Some(EditKey::Home),
+        KeyCode::End => Some(EditKey::End),
+        _ => None,
+    }
 }
 
 /// A minimal shell-style splitter honouring "double" and 'single' quotes.
@@ -7198,6 +7115,35 @@ mod tests {
     }
 
     #[test]
+    fn subtle_terminal_star_is_purple_dim_and_never_overwrites_content() {
+        let backend = ratatui::backend::TestBackend::new(20, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_subtle_chaos_star(frame, area);
+            })
+            .unwrap();
+        let centre = &terminal.backend().buffer()[(16, 6)];
+        assert_eq!(centre.symbol(), "•");
+        assert_eq!(centre.fg, C_RED());
+        assert!(centre.modifier.contains(Modifier::DIM));
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("X"), Rect::new(16, 6, 1, 1));
+                let area = frame.area();
+                render_subtle_chaos_star(frame, area);
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(16, 6)].symbol(),
+            "X",
+            "the watermark must yield to pane content"
+        );
+    }
+
+    #[test]
     fn current_model_is_reserved_in_chat_and_rebis_footers() {
         fn footer(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
             let area = terminal.backend().buffer().area;
@@ -7431,6 +7377,19 @@ mod tests {
             let after = stat.rsplit_once(')')?.1;
             after.trim_start().chars().next()
         }
+        fn await_proc_state(pid: u32, stopped: bool) -> Option<char> {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                let state = proc_state(pid);
+                if state.is_some() && (state == Some('T')) == stopped {
+                    return state;
+                }
+                if Instant::now() >= deadline {
+                    return state;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
 
         let mut app = App::new();
         let request = RunRequest {
@@ -7456,7 +7415,7 @@ mod tests {
         assert!(app.toggle_pause_selected_rebis_run());
         assert!(app.rebis_runs[0].paused);
         assert_eq!(
-            proc_state(pid),
+            await_proc_state(pid, true),
             Some('T'),
             "the subprocess should be stopped"
         );
@@ -7465,9 +7424,8 @@ mod tests {
         // `p` again resumes: the flag clears and the process leaves the stopped state.
         assert!(app.toggle_pause_selected_rebis_run());
         assert!(!app.rebis_runs[0].paused);
-        assert_ne!(
-            proc_state(pid),
-            Some('T'),
+        assert!(
+            await_proc_state(pid, false).is_some_and(|state| state != 'T'),
             "the subprocess should be running"
         );
 
@@ -8505,6 +8463,10 @@ mod tests {
         app.rebis.as_mut().unwrap().execute_kaos_command();
         assert!(app.rebis.as_ref().unwrap().vim_enabled);
         assert_eq!(app.rebis.as_ref().unwrap().mode, RebisMode::Normal);
+        app.rebis.as_mut().unwrap().command = "vim toggle".to_string();
+        app.rebis.as_mut().unwrap().execute_kaos_command();
+        assert!(!app.rebis.as_ref().unwrap().vim_enabled);
+        assert_eq!(app.rebis.as_ref().unwrap().mode, RebisMode::Insert);
     }
 
     #[test]

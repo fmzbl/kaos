@@ -8,4 +8,4 @@ description = "The dependency-free heart of Kaos: configuration, palette, chat s
 [dependencies]
 # The mandala model generates and loads Rebis source, so it needs the language.
 # Nothing else here has a dependency at all.
-rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+rebis-lang = { path = "../../rebis" }

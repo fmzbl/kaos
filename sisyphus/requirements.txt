@@ -1,4 +1,0 @@
-numpy>=1.26
-tinygrad==0.13.0
-ziglang
-

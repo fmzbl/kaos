@@ -1138,6 +1138,39 @@ impl RebisOracle<'_> {
     }
 }
 
+/// The input seam for `(& port body)` in a hosted run.
+///
+/// When the program reaches a port with no value yet, the child parks itself
+/// through the same cooperative pause protocol used for transient model errors,
+/// but with an `awaiting input` reason so the TUI knows to wait for the user
+/// rather than auto-resume. On `SIGCONT` it reads the value the TUI delivered
+/// and continues. Outside a cooperative TUI (no delivery file) the port simply
+/// has no value.
+struct RebisInlet {
+    path: Option<std::path::PathBuf>,
+}
+
+impl rebis_lang::Inlet for RebisInlet {
+    fn receive(&self, port: &str) -> Option<String> {
+        let path = self.path.as_deref()?;
+        // A value delivered before we blocked (or pre-seeded) is taken directly.
+        if let Some(value) = kaos::rebis_inlet::take_input(path, port) {
+            return Some(value);
+        }
+        // Otherwise stop until the host delivers a value and resumes us. A
+        // resume with nothing delivered (a spurious SIGCONT) parks again.
+        loop {
+            if !kaos::pause::current_run(&kaos::rebis_inlet::await_reason(port)) {
+                // Pause is not enabled: we cannot block, so the port is unbound.
+                return None;
+            }
+            if let Some(value) = kaos::rebis_inlet::take_input(path, port) {
+                return Some(value);
+            }
+        }
+    }
+}
+
 impl rebis_lang::Oracle for RebisOracle<'_> {
     fn fire(&self, prompt: &str) -> Option<String> {
         self.try_fire(prompt).ok().flatten()
@@ -1576,6 +1609,10 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
                 println!("event    macro {name} expanded · {remaining} remaining");
             }
             ExecutionEvent::SyntaxInverted => println!("event    syntax orientation inverted"),
+            ExecutionEvent::InputReceived { port, value } => {
+                let head = value.lines().next().unwrap_or_default();
+                println!("event    input received on {port} · {head}");
+            }
             ExecutionEvent::ModuleLoaded {
                 module,
                 definitions,
@@ -1628,7 +1665,7 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             &mut stream,
         )
     } else {
-        rebis_lang::orchestrate_with_limits(
+        rebis_lang::orchestrate_with_inlet(
             &expr,
             &mut record,
             &RebisOracle {
@@ -1643,6 +1680,9 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
                 directive_path: kaos::rebis_supervisor::path_from_env(),
             },
             &modules,
+            &RebisInlet {
+                path: kaos::rebis_inlet::path_from_env(),
+            },
             limits,
             &mut stream,
         )

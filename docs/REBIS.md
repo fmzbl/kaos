@@ -16,12 +16,6 @@ depending on the selected model's prior knowledge. That reference is also the
 concise example cookbook for higher-order macros, deep mediators,
 standard-library strategies, lazy routing, and bounded recursive refinement.
 
-Rebis also supplies the operation basis for the experimental
-[Sisyphus model](SISYPHUS.md): quote/retain, arrow/route, group/compose, and
-square/mediate become four learned causal candidates in one recursively shared
-cell. Rebis remains the executable orchestration language; Sisyphus is a neural
-model inspired by its semantics, not a replacement parser or runtime.
-
 Rebis is the default Kaos screen. Press `Ctrl-K` to open the command palette.
 The legacy `Ctrl-/` chord is still recognized too (including the `Ctrl-_` and
 unit-separator encodings that older terminals emit). The
@@ -98,7 +92,7 @@ repeats the previous query. Press `Ctrl-K` for Kaos commands such as `/search`,
 `/format`, `/run`, `/tree`, and `/mandala`. Vim `:` remains
 reserved for `:w`, `:e`, `:q`, `:q!`, and `:wq`.
 The top bar shows the complete Rebis punctuation set horizontally—symbols only:
-`( ) [ ] ~ # ' , $ ^ -> <- ; "`. Structural operators and delimiters use one shared
+`( ) [ ] ~ # ' , $ & ^ -> <- ; "`. Structural operators and delimiters use one shared
 operator color in both that legend and source text.
 Semicolons begin line comments only outside quoted prompts. Inside `"..."`, a
 semicolon is ordinary prompt text, including in multiline strings and after an
@@ -124,6 +118,14 @@ Manual pauses, automatic timeouts/allowance pauses, and unexpected child exits
 refresh the durable snapshot. A successful result clears `.run` and
 `.checkpoint`, while `.output` remains the saved returned value. A plain `/run`
 still starts fresh (or uses `/record FILE`).
+
+A run that reaches a `(& port …)` input with no value stops in an **awaiting
+input** state — a healthy pause, not a failure, like a program waiting for a
+message. In `/runs`, select the awaiting run and press `Enter` to open an input
+line; type the value and `Enter` delivers it to the port and resumes the run
+from exactly where it stopped (`Esc` leaves it paused). This is how one agent's
+output can feed another, and how a program waits for a supervisor's direction
+before continuing.
 
 `/sigil chat` is distinct from ordinary `/chat`: it does not suspend the Rebis
 workspace. It opens a durable God Agent transcript in the right panel and binds
@@ -169,6 +171,9 @@ The embedded standard library appears as the `std` folder. Expand it (Tab, or
 `/sigil open std/spread`) loads one into the editor as a copy — its inline
 comments are the documentation. The `std/` name itself stays read-only:
 `/sigil save std/...` is refused, so edits are saved under a new name.
+The visual Sigils tab reads the same catalog: `std/` modules can be drawn,
+opened as read-only source copies, searched, and attached to chat, but never
+deleted.
 
 Saved sigils are also foundational Rebis modules (hypersigils). `#` imports all
 top-level `~` definitions without executing the module:
@@ -253,7 +258,8 @@ Kaos keeps functions inside the whiteboard `o-[]-o` visual alphabet:
 o "prompt"       prompt or value terminal
 [M: code]        executable mediator
 ~[f(x)]          named macro template
-[f]              expanded macro call
+[f]              expanded macro call — drawn as a parallelogram (a box in motion)
+&[port]          input port — drawn as an inlet, a box with a leftward point
 → / ←            answer flow
 ^                syntax inverter
 ```
@@ -280,6 +286,111 @@ the projection round-trips: source to drawing and back to the same source. It
 is built on `kaos::visual`, which owns the mapping between the shapes and the
 language.
 
+### Exact visual AST rules
+
+The mandala is a one-to-one visual abstraction of Rebis. Every parsed
+expression becomes exactly one selectable visual node, including `->` and
+`<-`, which appear as their rendered arrow in 2D and as an explicit arrow
+node in 3D. Every visual node generates exactly one expression. Kaos does not
+insert invisible `nothing` operands, quoted cycle markers, groups, calls, or
+program roots.
+
+An ordinary `father of` link from `A` to `B` makes `B` the next ordered
+operand of `A`. Click the father first and the child second; the grey arrow is
+drawn father → child. Operand order is link creation order, never screen position.
+The `arrow` tool is a typed shorthand: drawing from `A` to `B` creates one
+real `Forward(A, B)` expression node. A `<-` loaded from source remains one
+explicit `Backflow` expression node.
+
+These are the only compositional gestures. Coordinates are presentation:
+proximity, overlap, apparent containment, movement, panning, marquee bounds,
+and camera projection never create source structure. Flow arrows are blue;
+`father of` edges are neutral grey.
+
+Drawing parsed source lays the syntax tree out as a left-to-right circuit:
+nesting depth is the column, so a form sits one column left of its operands,
+and a tidy row packing centres each form on the rows of the operands it drives,
+so subtrees stack without overlapping. The grid cell is golden — columns are φ×
+the row pitch. Connections route as right-angle traces between the shapes, like
+a board wired stage to stage. This layout changes coordinates only.
+
+Selecting a node turns its attached arrows and connections purple, so its
+neighbourhood reads as one connected object. Connections default to the 90°
+routing; holding **Shift** while you complete a connection draws that one as a
+straight angled line instead (a per-edge, presentation-only choice). A flow form
+can be selected from any point along its rendered line, not only its midpoint
+handle. Copying a visual selection retains exactly its nodes and internal links.
+Pasting assigns fresh node IDs and offsets the copied block without inventing
+links to unselected forms; the paste is one undoable edit.
+
+Two format controls sit above the source panel. **format** reparses what is
+written and rewrites it in canonical indented form; it acts only on source that
+parses, so a half-typed program is left alone. **format drawing** re-lays the
+mandala out with the standard circuit layout — deriving each node's column from
+its own structural depth — so a hand-dragged graph returns to the grid. It
+changes coordinates only, never structure or generated source, and is one
+undoable edit.
+
+A drawing is executable and can open as source only when it is one exact AST:
+
+1. It has one result/root. Multiple disconnected roots require an explicit
+   `program` or compose node.
+2. Every form has exactly the arity declared by Rebis.
+3. Every non-root node has one parent. A shared visual child is rejected because
+   emitting it twice would break the one-node/one-expression rule.
+4. The graph is finite and acyclic, and a `program` node occurs only at the
+   top level.
+5. Source-bearing names and payloads produce syntax accepted by the Rebis
+   parser.
+
+The side panel reports `exact · 1:1` only when all five invariants hold.
+Otherwise it shows the structural or parser error and preserves the drawing so
+the links or payload can be corrected.
+
+Right-drag draws a marquee in world space and replaces the current selection.
+It selects every touched node; crossing a rendered flow line selects that
+arrow's actual `Forward` or `Backflow` node. Hold `Ctrl` while dragging to
+add to the set, or `Ctrl`-click a form/arrow handle to toggle it. Delete removes
+the complete set as one undoable edit. **Run selection** builds the induced
+subgraph containing exactly the selected nodes and internal links, then runs it
+as a block only if that subgraph is itself an exact Rebis AST.
+
+The faint purple eight-rayed chaos star in the lower-right canvas is chrome
+only. It is not a node, cannot be selected, never appears in generated Rebis,
+and has no runtime effect.
+
+### Structural 3D projection
+
+Choose `3D · STRUCTURE` from the header's `VIEW` dropdown. It is a deterministic
+projection of the same `Mandala`; it is not another graph and cannot diverge
+from the `2D · EDIT` drawing.
+
+1. Position is derived from the syntax, not from the 2D drawing: the 3D reading
+   is a **cone tree**, not the flat mandala extruded. Each nesting layer is its
+   own plane, and every form fans its operands onto a ring around itself in the
+   next plane. A child's angular share of that ring is proportional to the
+   subtree it carries, and each layer draws its cone a golden step tighter, so a
+   subtree nests inside its parent's cone and the figure occupies real volume.
+2. Results—nodes with no incoming `father of` relation—start at depth 0. A lone
+   program sits on the axis; several independent roots share a ring.
+3. Each ordered operand is one structural layer deeper, and the layer supplies
+   Z. An invalid shared form remains one diagnostic node at its deepest reached
+   layer; exact source generation rejects it.
+4. An invalid closed recursive component has no ordinary result, so its
+   earliest-created node is a stable synthetic depth-0 inspection entry.
+5. Reaching an ancestor marks the actual father/child link as a recursive back-edge.
+   Participating nodes receive a stable helical offset based on creation order;
+   renderers draw those back-edges as lifted Bézier arcs.
+6. Every form remains visible. In particular, `->` and `<-` are explicit
+   arrow-glyph nodes in 3D even though 2D renders them as the arrow between their
+   two operands.
+
+Dragging orbits (yaw and pitch), the arrow keys move through the space (panning
+the whole projection), the wheel changes perspective zoom, click selects, and
+reset restores the default camera. These are viewport operations: they do not
+mutate nodes or links, change exact source, or create undo history. The 2D
+projection remains the editing surface.
+
 The mandala is scrollable. Enter `/graph`, then use `hjkl`, arrow keys, Page Up,
 Page Down, `Home`, or `g`. `Esc` returns to source focus. `/panel hide` removes
 the panel, `/panel show` restores it, and `/panel` toggles it.
@@ -302,15 +413,28 @@ keyboard scrolling.
 Groups, branches, macro templates, calls, and arrow stages occupy real rows;
 the program is not compressed into a single circuit line.
 
-Source editing includes normal, insert, character-visual (`v`), and line-visual
-(`V`) modes. Visual selections support motions plus `y`, `d`, `x`, and `c`; `p`
-pastes the most recent visual yank.
+Source editing includes normal, insert, character-visual (`v`), line-visual
+(`V`), and rectangular block-visual (`Ctrl-V`) modes. Visual selections support
+motions plus `y`, `d`, `x`, and `c`; `p`/`P` replace the selection from the
+unnamed register in one undo step. Block yanks and puts retain their columns and
+pad short rows when necessary.
+
+The terminal workspace and the visual Source tab call the same typed editor
+state machine. Counts, motions, operators, Unicode cursor offsets, paired
+insertion, grouped insert undo, registers, and selection ranges cannot drift
+between the two frontends. Visual mode additionally provides pointer caret
+placement, drag selection, syntax-coloured text, OS clipboard copy, and its own
+Vim command line. `:w`, `:w FILE`, `:e FILE`, `:q`, `:q!`, and `:wq` have the
+same dirty-buffer protections as the terminal. `Ctrl-[` is accepted as Escape
+in both.
 
 Direct editing is the default: typing inserts text immediately and the usual
 arrow, Home, End, Backspace, and Delete keys work without Vim modes. Bare `/`
 inserts source text; `Ctrl-K` opens the Kaos command palette. Enable Vim for the
-current workspace with `/vim on` and disable it with `/vim off`. To persist the
-preference, use `/vim always` or `/vim never`. It updates the `vim_mode` entry
+current workspace with `/vim on`, flip it with `/vim toggle`, and disable it
+with `/vim off`. To persist the preference, use `/vim always` or `/vim never`.
+The visual Source tab exposes the same session control as a clear
+**Vim mode · ON/OFF** toggle. Persistence updates the `vim_mode` entry
 in the complete startup config at
 `~/.config/kaos/config` (or under `$XDG_CONFIG_HOME`):
 

@@ -72,6 +72,88 @@ pub const REBIS_SYMBOLS: &[&str] = &[
     "(", ")", "[", "]", "~", "#", "'", ",", "$", "^", "->", "<-", ";", "\"",
 ];
 
+/// Find the complete structural form whose delimiter is at the character
+/// cursor (or immediately before it). Both frontends use this for "run block".
+#[must_use]
+pub fn matching_form(source: &str, cursor: usize) -> Option<(usize, usize)> {
+    let chars: Vec<char> = source.chars().collect();
+    let at = [Some(cursor), cursor.checked_sub(1)]
+        .into_iter()
+        .flatten()
+        .find(|index| matches!(chars.get(*index), Some('(' | ')' | '[' | ']')))?;
+    match chars[at] {
+        '(' => {
+            let mut depth = 0usize;
+            for (index, character) in chars.iter().enumerate().skip(at) {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some((at, index));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        ')' => {
+            let mut depth = 0usize;
+            for index in (0..=at).rev() {
+                match chars[index] {
+                    ')' => depth += 1,
+                    '(' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some((index, at));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        '[' => {
+            for (index, character) in chars.iter().enumerate().skip(at + 1) {
+                if *character == ']' {
+                    return Some((at, index));
+                }
+            }
+            None
+        }
+        ']' => {
+            for index in (0..at).rev() {
+                if chars[index] == '[' {
+                    return Some((index, at));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Parse one selected form and prepend the buffer's top-level definitions and
+/// imports, preserving the lexical scope a terminal or visual block run sees.
+pub fn scoped_block_source(source: &str, block_source: &str) -> Result<String, String> {
+    let block = rebis_lang::parse(block_source).map_err(|error| error.to_string())?;
+    let mut items = Vec::new();
+    if let Ok(Expr::Compose(top) | Expr::Program(top)) = rebis_lang::parse(source) {
+        for item in top {
+            if matches!(item, Expr::Function { .. } | Expr::Import { .. }) {
+                items.push(item);
+            }
+        }
+    }
+    if items.is_empty() {
+        Ok(rebis_lang::pretty_format(&block))
+    } else {
+        items.push(block);
+        Ok(rebis_lang::pretty_format(&Expr::Compose(items)))
+    }
+}
+
 /// Visual projection shown beside the source editor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Visualization {
@@ -272,6 +354,42 @@ pub enum NormalAction {
     EnterInsert,
 }
 
+/// Frontend-neutral key vocabulary for the shared direct/Vim editor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EditKey {
+    Char(char),
+    Paste(String),
+    Escape,
+    Enter,
+    Tab,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+/// Modifier state carried with an [`EditKey`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EditModifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+}
+
+/// Observable result of one shared editor key.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EditEffect {
+    pub handled: bool,
+    pub changed: bool,
+    pub yanked: bool,
+    pub command: bool,
+    pub save: bool,
+    pub unmatched_parenthesis: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VimOperator {
     Delete,
@@ -379,6 +497,20 @@ impl Editor {
     #[must_use]
     pub const fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// Place the cursor at a character boundary. Frontends use this for pointer
+    /// hit-testing; all keyboard motions still go through the shared core.
+    pub fn set_cursor(&mut self, cursor: usize) {
+        self.cursor = cursor.min(self.char_len());
+        self.preferred_column = None;
+        self.pending_normal.clear();
+    }
+
+    /// Current unnamed Vim register.
+    #[must_use]
+    pub fn yank(&self) -> &str {
+        &self.yank
     }
 
     /// Whether the buffer differs from its last load/save.
@@ -1233,6 +1365,65 @@ impl Editor {
         }
     }
 
+    /// Character ranges selected by the current visual mode.
+    ///
+    /// Character- and line-wise selections return one range. Block mode
+    /// returns one range per selected line, which lets every renderer paint and
+    /// copy the same rectangle without knowing editor internals.
+    #[must_use]
+    pub fn selection_ranges(&self, mode: Mode) -> Vec<(usize, usize)> {
+        match mode {
+            Mode::Visual => self
+                .visual_range(false)
+                .map(|(from, to)| (from, (to + 1).min(self.char_len())))
+                .into_iter()
+                .collect(),
+            Mode::VisualLine => self
+                .visual_range(true)
+                .map(|(from, to)| (from, (to + 1).min(self.char_len())))
+                .into_iter()
+                .collect(),
+            Mode::VisualBlock => {
+                let Some((top, bottom, left, right)) = self.visual_block_range() else {
+                    return Vec::new();
+                };
+                (top..=bottom)
+                    .filter_map(|row| {
+                        let start = self.line_start(row);
+                        let width = self.line_len(row);
+                        let from = start + left.min(width);
+                        let to = start + right.saturating_add(1).min(width);
+                        (to > from).then_some((from, to))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Selected text in reading order. Rectangular selections retain one
+    /// fragment per line.
+    #[must_use]
+    pub fn selected_text(&self, mode: Mode) -> Option<String> {
+        let ranges = self.selection_ranges(mode);
+        if ranges.is_empty() {
+            return None;
+        }
+        Some(
+            ranges
+                .into_iter()
+                .map(|(from, to)| {
+                    self.source
+                        .chars()
+                        .skip(from)
+                        .take(to.saturating_sub(from))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
     fn row_col_at(&self, cursor: usize) -> (usize, usize) {
         let mut row = 0;
         let mut column = 0;
@@ -1448,16 +1639,64 @@ impl Editor {
         self.end_visual();
     }
 
+    /// Replace a rectangular visual selection with the unnamed register.
+    ///
+    /// A block register is re-laid row by row; a character/line register is
+    /// inserted once at the rectangle's top-left. The removed rectangle
+    /// becomes the new block register and the entire put is one undo step.
+    pub fn paste_visual_block(&mut self) {
+        if self.yank.is_empty() {
+            return;
+        }
+        let Some((top, bottom, left, right)) = self.visual_block_range() else {
+            return;
+        };
+        let replacement = self.yank.clone();
+        let replacement_linewise = self.yank_linewise;
+        let replacement_blockwise = self.yank_blockwise;
+        let replaced = self.block_text(top, bottom, left, right);
+        self.remember();
+        for row in (top..=bottom).rev() {
+            let len = self.line_len(row);
+            if left >= len {
+                continue;
+            }
+            let start = self.line_start(row);
+            let from = self.byte_at(start + left);
+            let to = self.byte_at(start + (right + 1).min(len));
+            self.source.replace_range(from..to, "");
+        }
+        self.cursor = self.line_start(top) + left.min(self.line_len(top));
+        self.end_visual();
+        self.yank = replacement;
+        self.yank_linewise = replacement_linewise;
+        self.yank_blockwise = replacement_blockwise;
+        if replacement_blockwise {
+            self.paste_block_contents(false);
+        } else {
+            let byte = self.byte_at(self.cursor);
+            self.source.insert_str(byte, &self.yank);
+            self.cursor += self.yank.chars().count().saturating_sub(1);
+        }
+        self.yank = replaced;
+        self.yank_linewise = false;
+        self.yank_blockwise = true;
+    }
+
     /// Paste a block-wise register: insert row `i` of the block at the cursor
     /// column on the `i`-th line at/after the cursor, padding short lines with
     /// spaces so the column stays aligned, and appending new lines when the
     /// block runs past the end of the buffer. `after` shifts the insertion one
     /// column right, matching `p` versus `P`.
     fn paste_block(&mut self, after: bool) {
+        self.remember();
+        self.paste_block_contents(after);
+    }
+
+    fn paste_block_contents(&mut self, after: bool) {
         let fragments: Vec<String> = self.yank.split('\n').map(str::to_string).collect();
         let (row, column) = self.row_col();
         let target = column + usize::from(after && self.line_len(row) > 0);
-        self.remember();
         for (offset, fragment) in fragments.iter().enumerate() {
             let line = row + offset;
             if line >= self.line_count() {
@@ -1488,63 +1727,357 @@ impl Editor {
     /// Matching structural parentheses or mediator brackets at the cursor.
     #[must_use]
     pub fn matching_parentheses(&self) -> Option<(usize, usize)> {
-        let chars: Vec<char> = self.source.chars().collect();
-        let at = [Some(self.cursor), self.cursor.checked_sub(1)]
-            .into_iter()
-            .flatten()
-            .find(|index| matches!(chars.get(*index), Some('(' | ')' | '[' | ']')))?;
-        match chars[at] {
-            '(' => {
-                let mut depth = 0usize;
-                for (index, character) in chars.iter().enumerate().skip(at) {
-                    match character {
-                        '(' => depth += 1,
-                        ')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                return Some((at, index));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                None
-            }
-            ')' => {
-                let mut depth = 0usize;
-                for index in (0..=at).rev() {
-                    match chars[index] {
-                        ')' => depth += 1,
-                        '(' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                return Some((index, at));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                None
-            }
-            '[' => {
-                for (index, character) in chars.iter().enumerate().skip(at + 1) {
-                    if *character == ']' {
-                        return Some((at, index));
-                    }
-                }
-                None
-            }
-            ']' => {
-                for index in (0..at).rev() {
-                    if chars[index] == '[' {
-                        return Some((index, at));
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
+        matching_form(&self.source, self.cursor)
     }
+}
+
+/// Apply one key to the shared source editor.
+///
+/// Both terminal and visual frontends call this exact state machine. When Vim
+/// is disabled it supplies direct editing with pairs and ordinary navigation;
+/// when enabled it owns insert, normal, visual, visual-line, visual-block,
+/// registers, operators, counts, motions, and undo/redo.
+pub fn handle_edit_key(
+    editor: &mut Editor,
+    mode: &mut Mode,
+    vim_enabled: bool,
+    key: EditKey,
+    modifiers: EditModifiers,
+) -> EditEffect {
+    let before = editor.source.clone();
+    let mut effect = EditEffect {
+        handled: true,
+        ..EditEffect::default()
+    };
+
+    if modifiers.ctrl && matches!(key, EditKey::Char('s' | 'S')) {
+        effect.save = true;
+        return effect;
+    }
+
+    if !vim_enabled {
+        *mode = Mode::Insert;
+        match key {
+            EditKey::Char(character) if !modifiers.ctrl => insert_character(editor, character),
+            EditKey::Paste(text) => editor.insert_text(&text),
+            EditKey::Enter => editor.insert('\n'),
+            EditKey::Tab => editor.insert_text("  "),
+            EditKey::Backspace => editor.backspace(),
+            EditKey::Delete => {
+                editor.delete();
+            }
+            EditKey::Left => editor.left(),
+            EditKey::Right => editor.right(),
+            EditKey::Up => editor.vertical(-1),
+            EditKey::Down => editor.vertical(1),
+            EditKey::Home => editor.line_start_motion(),
+            EditKey::End => editor.line_end(),
+            EditKey::Char(_) | EditKey::Escape => effect.handled = false,
+        }
+        effect.changed = before != editor.source;
+        return effect;
+    }
+
+    // Ctrl-[ is Vim's portable Escape chord.
+    let key = if modifiers.ctrl && matches!(key, EditKey::Char('[')) {
+        EditKey::Escape
+    } else {
+        key
+    };
+
+    match *mode {
+        Mode::Insert => match key {
+            EditKey::Escape => {
+                editor.end_insert_session();
+                *mode = Mode::Normal;
+                editor.clear_pending();
+            }
+            EditKey::Char('c' | 'C') if modifiers.ctrl => {
+                editor.end_insert_session();
+                *mode = Mode::Normal;
+                editor.clear_pending();
+            }
+            EditKey::Char(character) if !modifiers.ctrl => insert_character(editor, character),
+            EditKey::Paste(text) => editor.insert_text(&text),
+            EditKey::Enter => editor.insert('\n'),
+            EditKey::Tab => editor.insert_text("  "),
+            EditKey::Backspace => editor.backspace(),
+            EditKey::Delete => {
+                editor.delete();
+            }
+            EditKey::Left => editor.left(),
+            EditKey::Right => editor.right(),
+            EditKey::Up => editor.vertical(-1),
+            EditKey::Down => editor.vertical(1),
+            EditKey::Home => editor.line_start_motion(),
+            EditKey::End => editor.line_end(),
+            EditKey::Char(_) => effect.handled = false,
+        },
+        Mode::Normal => {
+            let normal = if let EditKey::Char(character) = key {
+                editor.normal_key(character)
+            } else {
+                NormalAction::Unhandled
+            };
+            match normal {
+                NormalAction::Pending | NormalAction::Moved | NormalAction::Edited => {}
+                NormalAction::Yanked => effect.yanked = true,
+                NormalAction::EnterInsert => {
+                    editor.begin_insert_session(true);
+                    *mode = Mode::Insert;
+                }
+                NormalAction::Unhandled => match key {
+                    EditKey::Char(':') => {
+                        *mode = Mode::Command;
+                        editor.clear_pending();
+                        effect.command = true;
+                    }
+                    EditKey::Char('i') => {
+                        editor.begin_insert_session(false);
+                        *mode = Mode::Insert;
+                    }
+                    EditKey::Char('v') if modifiers.ctrl => {
+                        editor.begin_visual_block();
+                        *mode = Mode::VisualBlock;
+                    }
+                    EditKey::Char('V' | 'v') if modifiers.shift => {
+                        editor.begin_visual(true);
+                        *mode = Mode::VisualLine;
+                    }
+                    EditKey::Char('v') => {
+                        editor.begin_visual(false);
+                        *mode = Mode::Visual;
+                    }
+                    EditKey::Char('a') => {
+                        editor.append_after_cursor();
+                        editor.begin_insert_session(false);
+                        *mode = Mode::Insert;
+                    }
+                    EditKey::Char('I') => {
+                        let _ = editor.normal_key('^');
+                        editor.begin_insert_session(false);
+                        *mode = Mode::Insert;
+                    }
+                    EditKey::Char('A') => {
+                        editor.line_end();
+                        editor.begin_insert_session(false);
+                        *mode = Mode::Insert;
+                    }
+                    EditKey::Char('o') => {
+                        editor.open_below();
+                        editor.begin_insert_session(true);
+                        *mode = Mode::Insert;
+                    }
+                    EditKey::Char('O') => {
+                        editor.open_above();
+                        editor.begin_insert_session(true);
+                        *mode = Mode::Insert;
+                    }
+                    EditKey::Left => {
+                        let _ = editor.normal_key('h');
+                    }
+                    EditKey::Right => {
+                        let _ = editor.normal_key('l');
+                    }
+                    EditKey::Down => {
+                        let _ = editor.normal_key('j');
+                    }
+                    EditKey::Up => {
+                        let _ = editor.normal_key('k');
+                    }
+                    EditKey::Home => {
+                        let _ = editor.normal_key('0');
+                    }
+                    EditKey::End => {
+                        let _ = editor.normal_key('$');
+                    }
+                    EditKey::Char('x') | EditKey::Delete => {
+                        editor.delete();
+                    }
+                    EditKey::Char('p') => editor.paste_after(),
+                    EditKey::Char('P') => editor.paste_before(),
+                    EditKey::Char('D') => {
+                        editor.delete_to_line_end();
+                    }
+                    EditKey::Char('C') => {
+                        let changed = editor.delete_to_line_end();
+                        editor.begin_insert_session(changed);
+                        *mode = Mode::Insert;
+                    }
+                    EditKey::Char('s') => {
+                        let changed = editor.delete();
+                        editor.begin_insert_session(changed);
+                        *mode = Mode::Insert;
+                    }
+                    EditKey::Char('u') if !modifiers.ctrl => editor.undo(),
+                    EditKey::Char('r' | 'R') if modifiers.ctrl => editor.redo(),
+                    EditKey::Char('%') => {
+                        effect.unmatched_parenthesis = !editor.jump_matching_parenthesis();
+                    }
+                    EditKey::Escape => editor.clear_pending(),
+                    EditKey::Paste(_)
+                    | EditKey::Enter
+                    | EditKey::Tab
+                    | EditKey::Backspace
+                    | EditKey::Char(_) => {
+                        editor.clear_pending();
+                        effect.handled = false;
+                    }
+                },
+            }
+        }
+        Mode::Visual | Mode::VisualLine => {
+            let linewise = *mode == Mode::VisualLine;
+            match key {
+                EditKey::Char('V' | 'v') if modifiers.shift => {
+                    editor.begin_visual(true);
+                    *mode = Mode::VisualLine;
+                }
+                EditKey::Escape | EditKey::Char('v') => {
+                    editor.end_visual();
+                    *mode = Mode::Normal;
+                }
+                EditKey::Char(character) if visual_motion(character) => {
+                    let _ = editor.normal_key(character);
+                }
+                EditKey::Left => {
+                    let _ = editor.normal_key('h');
+                }
+                EditKey::Right => {
+                    let _ = editor.normal_key('l');
+                }
+                EditKey::Down => {
+                    let _ = editor.normal_key('j');
+                }
+                EditKey::Up => {
+                    let _ = editor.normal_key('k');
+                }
+                EditKey::Home => {
+                    let _ = editor.normal_key('0');
+                }
+                EditKey::End => {
+                    let _ = editor.normal_key('$');
+                }
+                EditKey::Char('y') => {
+                    editor.yank_visual(linewise);
+                    *mode = Mode::Normal;
+                    effect.yanked = true;
+                }
+                EditKey::Char('d' | 'x') | EditKey::Delete => {
+                    editor.delete_visual(linewise);
+                    *mode = Mode::Normal;
+                }
+                EditKey::Char('c') => {
+                    editor.delete_visual(linewise);
+                    editor.begin_insert_session(true);
+                    *mode = Mode::Insert;
+                }
+                EditKey::Char('p' | 'P') => {
+                    editor.paste_visual(linewise);
+                    *mode = Mode::Normal;
+                }
+                EditKey::Char(':') => {
+                    *mode = Mode::Command;
+                    effect.command = true;
+                }
+                EditKey::Paste(_)
+                | EditKey::Enter
+                | EditKey::Tab
+                | EditKey::Backspace
+                | EditKey::Char(_) => effect.handled = false,
+            }
+        }
+        Mode::VisualBlock => match key {
+            EditKey::Escape => {
+                editor.end_visual();
+                *mode = Mode::Normal;
+            }
+            EditKey::Char('v') if modifiers.ctrl => {
+                editor.end_visual();
+                *mode = Mode::Normal;
+            }
+            EditKey::Char('V' | 'v') if modifiers.shift => {
+                editor.begin_visual(true);
+                *mode = Mode::VisualLine;
+            }
+            EditKey::Char('v') => {
+                editor.begin_visual(false);
+                *mode = Mode::Visual;
+            }
+            EditKey::Char(character) if visual_motion(character) => {
+                let _ = editor.normal_key(character);
+            }
+            EditKey::Left => {
+                let _ = editor.normal_key('h');
+            }
+            EditKey::Right => {
+                let _ = editor.normal_key('l');
+            }
+            EditKey::Down => {
+                let _ = editor.normal_key('j');
+            }
+            EditKey::Up => {
+                let _ = editor.normal_key('k');
+            }
+            EditKey::Home => {
+                let _ = editor.normal_key('0');
+            }
+            EditKey::End => {
+                let _ = editor.normal_key('$');
+            }
+            EditKey::Char('y') => {
+                editor.yank_visual_block();
+                *mode = Mode::Normal;
+                effect.yanked = true;
+            }
+            EditKey::Char('d' | 'x') | EditKey::Delete => {
+                editor.delete_visual_block();
+                *mode = Mode::Normal;
+            }
+            EditKey::Char('c') => {
+                editor.delete_visual_block();
+                editor.begin_insert_session(true);
+                *mode = Mode::Insert;
+            }
+            EditKey::Char('p' | 'P') => {
+                editor.paste_visual_block();
+                *mode = Mode::Normal;
+            }
+            EditKey::Char(':') => {
+                *mode = Mode::Command;
+                effect.command = true;
+            }
+            EditKey::Paste(_)
+            | EditKey::Enter
+            | EditKey::Tab
+            | EditKey::Backspace
+            | EditKey::Char(_) => effect.handled = false,
+        },
+        Mode::Command | Mode::KaosCommand => effect.handled = false,
+    }
+
+    effect.changed = before != editor.source;
+    effect
+}
+
+fn insert_character(editor: &mut Editor, character: char) {
+    match character {
+        '(' => editor.insert_pair('(', ')'),
+        '[' => editor.insert_pair('[', ']'),
+        '"' if editor.skip_close('"') => {}
+        '"' => editor.insert_pair('"', '"'),
+        ')' if editor.skip_close(')') => {}
+        ']' if editor.skip_close(']') => {}
+        _ => editor.insert(character),
+    }
+}
+
+fn visual_motion(character: char) -> bool {
+    character.is_ascii_digit()
+        || matches!(
+            character,
+            'h' | 'l' | 'j' | 'k' | 'w' | 'W' | 'e' | 'E' | 'b' | 'B' | '^' | '$' | 'g' | 'G'
+        )
 }
 
 fn is_word(character: char) -> bool {
@@ -1883,7 +2416,8 @@ fn highlight_for(
         | TokenKind::Tilde
         | TokenKind::Quote
         | TokenKind::Unquote
-        | TokenKind::Dollar => Highlight::Mediate,
+        | TokenKind::Dollar
+        | TokenKind::Amp => Highlight::Mediate,
         TokenKind::Invert => Highlight::Invert,
         TokenKind::Forward => Highlight::Forward,
         TokenKind::Backflow => Highlight::Backflow,
@@ -1939,24 +2473,9 @@ pub struct RunRequest {
     pub scope: RunScope,
 }
 
-/// What the user asked the host to evaluate. The runtime receives a complete
-/// program in both cases; this distinction lets the workspace describe queued
-/// and active work without inspecting or reparsing the captured source.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RunScope {
-    Program,
-    Block,
-}
-
-impl RunScope {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Program => "program",
-            Self::Block => "block",
-        }
-    }
-}
+/// What the user asked the host to evaluate. Shared with every frontend so a
+/// visual run card and terminal run tree use one typed scope.
+pub use kaos_core::run_model::Scope as RunScope;
 
 /// Result of a completed `:` command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2498,9 +3017,8 @@ impl Workspace {
             "chat" => return WorkspaceAction::Suspend,
             "runs" => return WorkspaceAction::BrowseRuns,
             "model" | "new" | "clear" | "quit" | "mouse" | "chaos" | "chaos on"
-            | "chaos off" | "config" | "config restore" => {
-                return WorkspaceAction::Kaos(command)
-            }
+            | "chaos off" | "config" | "config restore" | "theme" | "theme dark"
+            | "theme light" => return WorkspaceAction::Kaos(command),
             "format" | "fmt" => {
                 if self.compiled.is_none() {
                     self.message = "cannot format until the program compiles".to_string();
@@ -2528,27 +3046,33 @@ impl Workspace {
                 let _ = self.save(None);
             }
             "vim" | "vim on" => {
-                self.vim_enabled = true;
-                self.mode = Mode::Normal;
-                self.message = "Vim mode enabled for this workspace · /vim always persists".to_string();
+                self.set_vim_enabled(true);
+                self.message =
+                    "Vim mode enabled for this workspace · /vim always persists".to_string();
             }
             "vim off" => {
-                self.vim_enabled = false;
-                self.mode = Mode::Insert;
+                self.set_vim_enabled(false);
                 self.message = "direct editing enabled · /vim always persists Vim mode".to_string();
+            }
+            "vim toggle" => {
+                self.set_vim_enabled(!self.vim_enabled);
+                self.message = if self.vim_enabled {
+                    "Vim mode enabled for this workspace · /vim always persists"
+                } else {
+                    "direct editing enabled · /vim never persists"
+                }
+                .to_string();
             }
             "vim always" => match save_vim_setting(true) {
                 Ok(()) => {
-                    self.vim_enabled = true;
-                    self.mode = Mode::Normal;
+                    self.set_vim_enabled(true);
                     self.message = "Vim mode enabled and saved in ~/.config/kaos/config".to_string();
                 }
                 Err(error) => self.message = error,
             },
             "vim never" => match save_vim_setting(false) {
                 Ok(()) => {
-                    self.vim_enabled = false;
-                    self.mode = Mode::Insert;
+                    self.set_vim_enabled(false);
                     self.message = "direct editing saved in ~/.config/kaos/config".to_string();
                 }
                 Err(error) => self.message = error,
@@ -2730,7 +3254,7 @@ impl Workspace {
             }
             "help" | "" => {
                 self.message =
-                    "/chat /config [restore] /model [MODEL] /chaos [on|off] /new /clear /quit /run [block|parallel] /runs /save [FILE] /vim on|off|always|never /search [TEXT] /output [copy|write FILE] /theme dark|light /mandala /visual [open] /tree /sigils [QUERY] /sigil save|open NAME /sigil chat /panel hide|show /graph /source /format[!] /mouse [on|off] /record FILE"
+                    "/chat /config [restore] /model [MODEL] /chaos [on|off] /new /clear /quit /run [block|parallel] /runs /save [FILE] /vim toggle|on|off|always|never /search [TEXT] /output [copy|write FILE] /theme dark|light /mandala /visual [open] /tree /sigils [QUERY] /sigil save|open NAME /sigil chat /panel hide|show /graph /source /format[!] /mouse [on|off] /record FILE"
                         .to_string()
             }
             _ => self.message = format!("unknown Kaos command /{command}"),
@@ -2769,6 +3293,16 @@ impl Workspace {
         } else {
             Mode::Insert
         }
+    }
+
+    fn set_vim_enabled(&mut self, enabled: bool) {
+        if self.vim_enabled && self.mode == Mode::Insert {
+            self.editor.end_insert_session();
+        }
+        self.editor.end_visual();
+        self.editor.clear_pending();
+        self.vim_enabled = enabled;
+        self.mode = self.editing_mode();
     }
 
     fn save(&mut self, requested: Option<&str>) -> Result<(), ()> {
@@ -3021,14 +3555,13 @@ impl Workspace {
         parallel: bool,
         input: Option<String>,
     ) -> WorkspaceAction {
-        let block = match rebis_lang::parse(block_src) {
-            Ok(expr) => expr,
+        let program = match scoped_block_source(self.editor.source(), block_src) {
+            Ok(program) => program,
             Err(error) => {
                 self.message = format!("run block: {error}");
                 return WorkspaceAction::None;
             }
         };
-        let program = self.block_with_definitions(block);
         let request = RunRequest {
             source: program,
             input: input.unwrap_or_else(|| self.record_text.clone().unwrap_or_default()),
@@ -3038,27 +3571,6 @@ impl Workspace {
             WorkspaceAction::RunParallel(request)
         } else {
             WorkspaceAction::Run(request)
-        }
-    }
-
-    /// Wrap a block together with the buffer's top-level `~` definitions and
-    /// `#` imports, so a selected sub-expression sees the same scope it does
-    /// in the whole program. When the buffer holds none (or fails to compile),
-    /// the block runs on its own.
-    fn block_with_definitions(&self, block: Expr) -> String {
-        let mut items = Vec::new();
-        if let Some(Expr::Compose(top) | Expr::Program(top)) = &self.compiled {
-            for item in top {
-                if matches!(item, Expr::Function { .. } | Expr::Import { .. }) {
-                    items.push(item.clone());
-                }
-            }
-        }
-        if items.is_empty() {
-            rebis_lang::pretty_format(&block)
-        } else {
-            items.push(block);
-            rebis_lang::pretty_format(&Expr::Compose(items))
         }
     }
 
@@ -4341,6 +4853,103 @@ mod tests {
     }
 
     #[test]
+    fn visual_block_put_replaces_the_rectangle_in_one_undo_step() {
+        let mut editor = Editor::new("abcd\nefgh\nijkl");
+        editor.set_yank("X\nY\nZ");
+        editor.yank_blockwise = true;
+        editor.set_cursor(1);
+        editor.begin_visual_block();
+        editor.set_cursor(12);
+        editor.paste_visual_block();
+        assert_eq!(editor.source(), "aXd\neYh\niZl");
+        assert_eq!(editor.yank(), "bc\nfg\njk");
+
+        editor.undo();
+        assert_eq!(editor.source(), "abcd\nefgh\nijkl");
+    }
+
+    #[test]
+    fn selected_text_includes_the_visual_cursor_cell() {
+        let mut editor = Editor::new("alpha beta");
+        editor.set_cursor(0);
+        editor.begin_visual(false);
+        editor.set_cursor(4);
+        assert_eq!(editor.selected_text(Mode::Visual).as_deref(), Some("alpha"));
+        assert_eq!(editor.selection_ranges(Mode::Visual), vec![(0, 5)]);
+    }
+
+    #[test]
+    fn shared_key_state_machine_keeps_frontends_identical() {
+        let sequence = [
+            (EditKey::Char('i'), EditModifiers::default()),
+            (
+                EditKey::Paste("alpha beta".to_string()),
+                EditModifiers::default(),
+            ),
+            (EditKey::Escape, EditModifiers::default()),
+            (EditKey::Char('0'), EditModifiers::default()),
+            (EditKey::Char('d'), EditModifiers::default()),
+            (EditKey::Char('w'), EditModifiers::default()),
+            (EditKey::Char('u'), EditModifiers::default()),
+            (
+                EditKey::Char('r'),
+                EditModifiers {
+                    ctrl: true,
+                    shift: false,
+                },
+            ),
+        ];
+        let mut terminal = Editor::new("");
+        let mut visual = Editor::new("");
+        let mut terminal_mode = Mode::Normal;
+        let mut visual_mode = Mode::Normal;
+        for (key, modifiers) in sequence {
+            handle_edit_key(
+                &mut terminal,
+                &mut terminal_mode,
+                true,
+                key.clone(),
+                modifiers,
+            );
+            handle_edit_key(&mut visual, &mut visual_mode, true, key, modifiers);
+        }
+        assert_eq!(terminal.source(), visual.source());
+        assert_eq!(terminal.cursor(), visual.cursor());
+        assert_eq!(terminal_mode, visual_mode);
+        assert_eq!(terminal.yank(), visual.yank());
+    }
+
+    #[test]
+    fn shared_direct_mode_pairs_and_ctrl_bracket_escape_work() {
+        let mut direct = Editor::new("");
+        let mut direct_mode = Mode::Insert;
+        handle_edit_key(
+            &mut direct,
+            &mut direct_mode,
+            false,
+            EditKey::Char('('),
+            EditModifiers::default(),
+        );
+        assert_eq!(direct.source(), "()");
+        assert_eq!(direct.cursor(), 1);
+
+        let mut vim = Editor::new("");
+        let mut vim_mode = Mode::Insert;
+        vim.begin_insert_session(false);
+        handle_edit_key(
+            &mut vim,
+            &mut vim_mode,
+            true,
+            EditKey::Char('['),
+            EditModifiers {
+                ctrl: true,
+                shift: false,
+            },
+        );
+        assert_eq!(vim_mode, Mode::Normal);
+    }
+
+    #[test]
     fn vim_visual_put_replaces_the_selection_in_one_undo_step() {
         let mut editor = Editor::new("one TWO three");
         editor.set_yank("replacement");
@@ -4487,6 +5096,22 @@ mod tests {
             assert_eq!(
                 workspace.execute_kaos_command(),
                 WorkspaceAction::Kaos(command.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn theme_commands_pass_through_to_the_host_dispatcher() {
+        // `/theme dark|light` (and bare `/theme`) must reach the outer Kaos
+        // dispatcher that persists the mode, not fall through to the
+        // unknown-command branch — otherwise the workspace ignores them.
+        for command in ["theme", "theme dark", "theme light"] {
+            let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+            workspace.command = command.to_string();
+            assert_eq!(
+                workspace.execute_kaos_command(),
+                WorkspaceAction::Kaos(command.to_string()),
+                "/{command} should be handled by the host",
             );
         }
     }

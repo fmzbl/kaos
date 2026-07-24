@@ -11,20 +11,6 @@ House rule, as always: **a mechanism ships only when a deterministic checker
 shows it pays against a cheap control.** Carroll: *"Objective results are the
 proof of magic, all else is mysticism"* (Liber KKK).
 
-### Implemented model-scale illumination: Sisyphus
-
-Operation 7 now has a bounded model-scale implementation in
-[`sisyphus/improve.py`](../sisyphus/improve.py). It cannot
-patch its objective or judge. A candidate descends from an immutable champion,
-trains on real corpus bytes under Fibonacci budgets, and is promoted only when
-a frozen validation gate clears a declared margin. Rejection preserves the
-champion SHA-256 exactly and every attempt is ledgered. Promotion and rollback
-smoke tests both pass. The separate five-seed enwik8 architecture study passes
-its local frozen quality rule, but the subsequent no-pilot text8 confirmation
-favors the Transformer 5/5. Sisyphus therefore has no demonstrated general
-short-context quality edge; see [the paper](../sisyphus/PAPER.md) and
-[confirmation](../sisyphus/CONFIRMATION.md).
-
 ## Where the evidence converges
 
 Every high-confidence literature result that fits this harness (local model,

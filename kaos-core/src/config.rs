@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 /// variables (`KAOS_SESSION`, `KAOS_RESUME`, `KAOS_FOLD`) and provider secrets
 /// intentionally live elsewhere.
 pub const CONFIG_KEYS: &[&str] = &[
+    "theme",
     "vim_mode",
     "KAOS_MODEL",
     "KAOS_TIMEOUT_S",
@@ -60,6 +61,7 @@ pub const DEFAULT_CONFIG: &str = r#"# Kaos configuration
 # ~/.config/kaos/credentials and are managed with `kaos auth`.
 
 # Rebis editor
+theme = dark
 vim_mode = false
 
 # Mind and provider
@@ -188,6 +190,22 @@ fn truthy(value: &str) -> bool {
 /// Read a string setting from the config file.
 pub fn value(key: &str) -> Option<String> {
     read_value(key)
+}
+
+/// Read the complete persistent configuration as editable key/value data.
+///
+/// The visual settings surface uses this rather than parsing the file a
+/// second time, so comments remain the file editor's concern while both
+/// frontends agree on the effective set of configurable keys.
+pub fn values() -> io::Result<BTreeMap<String, String>> {
+    let path = path();
+    ensure_config(&path)?;
+    read_path(&path)
+}
+
+/// The documented default for one setting.
+pub fn default_value(key: &str) -> Option<String> {
+    parse(DEFAULT_CONFIG).remove(key)
 }
 
 fn read_value(key: &str) -> Option<String> {
@@ -322,6 +340,7 @@ mod tests {
             values.get("KAOS_CHAT_TIMEOUT_S").map(String::as_str),
             Some("600")
         );
+        assert_eq!(values.get("theme").map(String::as_str), Some("dark"));
     }
 
     #[test]

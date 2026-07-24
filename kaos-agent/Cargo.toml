@@ -8,7 +8,7 @@ description = "The Kaos agent runtime: providers, backends, the conductor, and t
 [dependencies]
 kaos-core = { path = "../kaos-core" }
 kaos-pact = { path = "../kaos-pact" }
-rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+rebis-lang = { path = "../../rebis" }
 # HTTP providers (OpenAI + Anthropic). Off ⇒ only the local `claude` CLI and
 # `ollama`, which shell out and need no HTTP crate.
 ureq = { version = "2", features = ["json", "tls"], optional = true }

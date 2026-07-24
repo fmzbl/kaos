@@ -13,36 +13,10 @@ The fullscreen application combines:
 - chat and direct coding-agent workflows in the same session;
 - Claude CLI, Ollama, OpenAI, Anthropic, and OpenRouter models.
 
-Kaos has three first-class layers: the Rust workspace and agent runtime, the
-Rebis orchestration language, and the root-level Sisyphus neural architecture.
+Kaos has two first-class layers: the Rust workspace and agent runtime, and the
+Rebis orchestration language.
 Runs execute in the directory where Kaos was started, so relative file reads,
 edits, commands, imports, and output paths share one working context.
-
-## Sisyphus architecture
-
-The root [Sisyphus component](sisyphus/README.md) is an experimental causal
-language model that reimagines Thoth around Rebis's
-quote/route/group/square semantics and Kaos's evidence-gated recursion. In a
-frozen five-seed 29.8k-parameter `enwik8` micro-study it beat a matched modern
-Transformer 4/5 seeds (3.7491 vs 3.8013 mean held-out bits/byte; paired 95% CI
-`[-0.0971, -0.0061]`). Its second recursive pass improved the first in all five
-seeds.
-
-That short-context quality result did not transfer. With every setting frozen,
-an untouched five-seed `text8` confirmation favored the Transformer 5/5 (3.1493
-vs 3.0679 bpb; paired 95% CI `[+0.0439, +0.1248]`). Sisyphus therefore has no
-demonstrated general language-quality edge; enwik8 is a retained
-dataset-specific positive, not the headline averaged across a kept null.
-
-The edge is bounded: at context 128 the Transformer still trains 5.09× faster.
-Sisyphus's `O(n log n)` mixer crosses over in isolated CPU inference among the
-measured lengths at context 2,048; at 4,096 it is 5.04× faster with 83.3% lower
-peak RSS. The [architecture](sisyphus/ARCHITECTURE.md),
-[paper](sisyphus/PAPER.md), [protocol](sisyphus/PROTOCOL.md),
-[confirmation](sisyphus/CONFIRMATION.md), and
-[Kaos integration note](docs/SISYPHUS.md) state the complete result and
-limitations. Sisyphus is part of the root project, but its present research
-checkpoint is not the default Kaos provider.
 
 ## Install and start
 
@@ -75,14 +49,6 @@ kaos visual program.rebis
 
 Both read the same `~/.kaos` — sigils, sessions, and the `/theme` setting are
 shared — but neither requires the other to be present.
-
-The Sisyphus training and benchmark stack is an optional Python component:
-
-```bash
-python -m venv .venv-sisyphus
-.venv-sisyphus/bin/pip install -r sisyphus/requirements.txt
-PYTHONPATH=. DEV=CPU .venv-sisyphus/bin/python -m sisyphus --help
-```
 
 Without arguments, `kaos` opens the Rebis workspace. A new workspace shows a
 transient Chaos Star in the left source pane. The first key, paste, click, or
@@ -130,6 +96,7 @@ Rebis programs are made from a small set of structural forms:
 | `symbol` | Name a macro, parameter, module, or deterministic judge. |
 | `(A B C)` | Execute a group in source order. |
 | `($ A B C)` | Compose one string from the inert text of the operands, then fire it. |
+| `(& port body)` | Receive external input as `port`, then run `body`; a host may block until it arrives. |
 | `(-> A B C)` | Route each accepted answer into the next stage as `INPUT:`. |
 | `(<- A B)` | Backflow: equivalent to `(-> B A)`. |
 | `(^ E)` | Purely invert syntax orientation by recursively exchanging `->` and `<-`. |
@@ -183,11 +150,17 @@ Enter to complete it. Vim commands remain under `:`:
 :wq                   save and quit
 ```
 
-Enable the embedded Vim mode with `/vim on`, or persist it with `/vim always`.
-It includes normal, insert, visual, and visual-line modes; counts; common
-motions; `d`, `c`, and `y` operators; text objects; undo/redo; linewise yanks;
-and operations such as `cw`, `cc`, `d$`, and `yG`. `/vim off` and `/vim never`
-return to direct editing.
+Toggle the embedded Vim mode with `/vim toggle`, enable it with `/vim on`, or
+persist it with `/vim always`.
+It includes normal, insert, character-, line-, and block-visual modes; counts;
+common motions; `d`, `c`, and `y` operators; text objects; undo/redo; linewise
+and rectangular registers; and operations such as `cw`, `cc`, `d$`, and `yG`.
+`/vim off` and `/vim never` return to direct editing. The visual app's Source
+tab runs this same typed editor core: keyboard motions, counts, operators,
+selections, grouped insert undo, `Ctrl-R`, `Ctrl-[`, visual put, clipboard
+copy, and `:w`, `:e`, `:q`, `:q!`, and `:wq` therefore behave identically.
+Pointer click and drag add caret placement and character-visual selection
+without creating a second editing model.
 
 Useful workspace commands:
 
@@ -375,8 +348,10 @@ std/committee    chaired panels and quorum workflows
 
 Import one module with `(# std/spread)` or all of them with `(# std)`. Expand
 the `std` folder in the sigil explorer and open any module to read its inline
-documentation. The `std/` namespace is read-only; save edited copies under a
-personal name.
+documentation. This catalog is shared by the terminal and visual Sigils tabs;
+visual mode can draw, inspect, or chat about embedded modules. The `std/`
+namespace is read-only, has no delete action, and saves edited copies only
+under a personal name.
 
 ## Non-interactive Rebis CLI
 
@@ -435,20 +410,36 @@ not yet parse is left alone rather than discarded.
 While a run is in flight each node wears a rotating dashed purple ring, driven
 by the run's own thread rather than a timer standing in for one.
 
-A run panel sits under every tab: type evidence into the record, then run the
-drawing or the source. This is the deterministic concept calculus — no model,
-no provider, no child process — so it works with nothing else installed. A
-model-backed run belongs to the terminal app's agent stack.
+The singleton **Runs** tab owns the same canonical `kaos rebis run` lifecycle
+as the terminal: immutable source/record snapshots, dry/direct/chaos modes,
+authority gates, serial FIFO or isolated parallel lanes, retained streaming
+output, timers, pause/resume/retry, cancellation, rerun, copy, and file output.
+Dry mode is the safe visual default; live modes are explicit. Changing the
+session working directory also changes where later jobs resolve files, imports,
+tools, and output paths.
 
-Tabs hold a drawing, Rebis source, a conversation, or the sigil library. A
-source tab checks as you type with the same parser the workspace uses, saves to
-the same library, and `draw` lays it out as a mandala; a drawing's `edit as
-text` goes the other way. Opening a sigil
-parses it and lays it out as a mandala, so a saved program becomes a drawing
-without a round trip through text. A chat tab browses and resumes
-the same durable sessions `/resume` reads in the terminal app — the same store
-and the same format, so a conversation started in either interface continues in
-the other.
+Tabs hold drawings, Rebis source, conversations, the sigil library, Runs,
+Actions, and Settings. A source tab checks and formats with the Rebis parser,
+saves files and sigils, searches, shows tree/terminal-mandala projections, loads
+records, and draws source onto a canvas. It can run the program, a text
+selection, or the form at the caret, serially or in parallel; block runs carry
+the source's top-level imports and definitions just as terminal `/run block`
+does. Drawing source lays the syntax tree out as a left-to-right circuit:
+nesting depth is the column, a tidy row packing stacks subtrees, and
+connections route as right-angle traces between the shapes (calls are drawn as
+a parallelogram, a `(& port …)` input as an inlet). Selecting a node turns its
+attached connections purple; holding **Shift** while completing a connection
+draws that one as a straight angled line instead of the default 90° routing. A
+drawing's `edit as text` goes the other way. The sigil browser supports
+draw/edit/chat actions for personal and embedded `std/` entries, with delete
+limited to personal sigils.
+
+Chat browses and resumes the same durable sessions `/resume` reads in the
+terminal app. The **Actions** tab exposes the remaining terminal capabilities
+as typed UI: code, cast, conclave, scry, roster, egregore, models, credential
+status/store/forget, help, attachments, tool authority, and serial/parallel task
+history. These use one streamed process supervisor, so cancellation and output
+retention do not vary from button to button.
 
 The editor is tabbed: `Ctrl-T` opens a drawing, `Ctrl-Tab` and `Ctrl-←` cycle,
 `Ctrl-W` closes. Each tab keeps its own canvas, viewport and selection, so
@@ -456,38 +447,83 @@ switching back returns you where you were. The tab rules live in
 `kaos-core`'s `tabs` module, generic over what a tab holds, so the terminal app
 can adopt the same behaviour without a second implementation.
 
-The whiteboard exposes every Rebis form. Prompts, symbols, and combining forms
-use the `o-[]-o` outlines; source sigils are drawn as their own shapes:
+The header's **View** dropdown chooses **2D · Edit** or **3D · Structure**. 2D
+remains the editable source of truth. 3D is an orbitable, zoomable structural
+reading you can also move through with the arrow keys. It is a cone tree
+derived from the syntax rather than the flat drawing extruded: each nesting
+layer is its own plane, and every form fans its operands onto a golden ring
+around itself in the next one, so structure occupies real volume. Invalid shared
+forms stay single so the structural error remains visible instead of being
+copied into several expressions. Recursive
+back-edges rise above the graph as purple curves and recursive components gain
+a small helical separation, so recursion reads as a loop instead of a crossing
+line. Flow forms become explicit arrow-glyph nodes in 3D. Camera movement and
+mode switching never change Rebis or enter undo history; use 2D to edit.
+
+The whiteboard exposes every Rebis form. Prompts, symbols, compose, and
+combining forms use distinct outlines; source sigils are drawn as their own
+shapes:
 
 | draw | means | generates |
 |---|---|---|
 | `o` | prompt terminal | `"label"` |
 | `◇` | symbol | `name` |
-| `[]` | group, square, call, or program | the matching structural form |
+| oval `( )` | ordered composition | `(A B …)` |
+| `[]` | square, call, or program | the matching structural form |
 | `→` | answer flow | `(-> A B)` (reverse drawing loads `<-`) |
 | `$`, `~`, `#`, `'`, `,` | the corresponding source sigil | its Rebis form |
 | `^` | syntax inverter shape | `(^ E)` |
 
-An arrow means "this answer flows into that shape". The one shape with no
-outgoing arrow is the program's result, and the source is generated by walking
-back from it. Drawing a `←` is the same as drawing a `→` the other way, so there
-is nothing extra to learn. The generated source updates live beside the canvas;
-loops, disconnected shapes, and empty mediators are reported there instead of
-producing invalid code.
+An arrow means "this answer flows into that shape". Drawing a `←` is the same
+as drawing a `→` the other way, so there is nothing extra to learn. The
+generated source updates live beside the canvas. Exact Rebis trees round-trip
+without approximation. The mandala is deliberately one-to-one: every visual
+object is one Rebis expression and every structural link is one AST edge.
+Incomplete forms, several roots, shared children, cycles, invalid names, and
+wrong arities remain visible as errors; Kaos never repairs them with invisible
+expressions. The source panel says `exact · 1:1` only when the drawing is a
+valid Rebis AST. Its `open in editor` action opens that exact snapshot.
+`Ctrl-Z` and `Ctrl-Shift-Z` undo and redo semantic drawing edits per tab; camera
+movement is deliberately excluded.
 
-A circle takes at most one incoming arrow. Rebis's `->` is binary and folds
-left, so `(-> a b "label")` means "a flows to b flows to label" — a chain, not
-"a and b both feed label". Joining several answers is exactly what the square
-is for, so a circle with two inputs is reported rather than written out as a
-chain that does not match the drawing.
+Composition comes only from the two link tools. Blue `arrow` creates an
+explicit Rebis flow form; grey `father of` makes the second clicked shape the
+next ordered child of the first. Its grey arrow therefore reads father → child.
+Position is presentation only: moving, overlapping, or drawing one shape inside
+another never links them or changes the program. The same blue/grey distinction
+is retained in 2D and 3D.
+
+Rebis's `->` is binary and folds left, so `(-> a b "label")` means "a flows to b
+flows to label". A square provides the direct representation of mediated
+branches, with its mediator and branches attached as ordered children. The
+complete structural contract is in
+[Exact visual AST rules](docs/REBIS.md#exact-visual-ast-rules).
+The derived depth and recursion rules are in
+[Structural 3D projection](docs/REBIS.md#structural-3d-projection).
+
+Right-drag draws a purple marquee and selects every touched form, including a
+flow arrow when the marquee crosses its rendered line. `Ctrl`-click toggles
+individual forms in that block; a blue arrow can be toggled by clicking
+anywhere along its rendered line. Delete removes the whole selected block in
+one undoable edit. `Ctrl-C` copies the selection's exact induced subgraph and
+`Ctrl-V` pastes it with fresh IDs, retained internal links, a visible cascading
+offset, and one undo checkpoint. Valid copied blocks also enter the system
+clipboard as Rebis source. **Run selection** executes the exact induced
+subgraph as a block. An incomplete selection is reported rather than inferred.
+The source panel's **format** button rewrites the written source in canonical
+indented form (only when it parses, so a half-typed program is never mangled),
+and **format drawing** re-lays the graph out as a circuit, snapping a
+hand-dragged mandala back onto the grid in one undoable edit.
 
 Loading is the exact inverse of generating: every parsed form—including macros,
 imports, quotes, `$`, and `^`—has a canvas node and returns to Rebis source
 without approximation.
 
-The editor is a thin shell over `kaos::visual`, which holds the model and the
-code generation and is plain testable Rust — the notation's rules live there,
-not in the UI.
+The editor paints `kaos-core::visual`, whose exact graph model, marquee
+geometry, glyph geometry, and structural 3D layout are plain testable Rust.
+Run vocabulary lives in `kaos-core`; source-block selection lives in the
+screen-neutral workspace; one visual process supervisor serves runs and
+actions. The UI therefore does not grow alternate meanings for the same state.
 
 `visual` is not a default feature, only to keep the ordinary build small. The
 window is native egui on OpenGL, so it needs no system webkit — see
@@ -496,10 +532,11 @@ window is native egui on OpenGL, so it needs no system webkit — see
 
 ## Theme
 
-Kaos is a neutral grey scale plus a single purple accent, in two modes. The
-shapes, sigils and rules carry the meaning through brightness; the accent is
-spent only on what the eye should find first — headings, the selection, the
-active tool, a running node — so it never competes with itself. Both the
+Kaos is a neutral grey scale with purple and blue semantic accents, in two
+modes. Purple marks focus, recursion, running state, and the chaos star. Blue
+marks flow, navigation, live data, and source ranges: it colors arrows in the
+terminal and the 2D/3D mandala, terminal navigation and parallel state, and
+visual source ranges; structural `father of` links remain grey. Both the
 terminal app and `kaos visual` read the same palette.
 
 ```text
@@ -513,8 +550,7 @@ terminal's background, so a light theme is genuinely light in both interfaces.
 
 The choice is persisted in the Kaos config and read by **both** interfaces, so
 the terminal app and [`kaos visual`](#visual-mandala-editor) always agree.
-`kaos visual` picks it up the next time it opens; the terminal repaints on
-restart.
+Both repaint immediately after the setting changes.
 
 ## Models and authentication
 
@@ -556,6 +592,12 @@ Use `/config` from chat or Rebis to edit it. `:w` saves and `:q` returns to the
 previous surface. `/config restore` replaces all non-secret settings with their
 documented defaults and leaves provider credentials untouched. Restart Kaos to
 apply manual config edits.
+
+The visual **Settings** tab exposes every declared non-secret Kaos key, grouped
+as Appearance, Mind, Agent, Conclave, Rebis, and Diagnostics, with search,
+save/reload/restore, descriptions, and the actual config path. Persistent
+settings are separated from session-only state such as the current working
+directory. Theme changes save and repaint immediately.
 
 Important Rebis settings:
 
@@ -615,10 +657,6 @@ cargo build --release
 cargo test
 cargo clippy --all-targets -- -D warnings
 
-# Optional Sisyphus architecture checks.
-PYTHONPATH=. DEV=CPU .venv-sisyphus/bin/python \
-  -m unittest discover -s sisyphus -t . -v
-
 # Plain line interface and shell-out providers only.
 cargo build --no-default-features
 
@@ -650,7 +688,7 @@ kaos-agent/              the agent runtime — providers, backends, the
                          and no window)
 kaos-pact/               the Pact — sigils, rays, grades, the equation
                          (offline and deterministic; no model, socket or screen)
-kaos-visual/             the egui editor — draws the core, knows no terminal
+kaos-visual/             native egui surfaces, shared job supervisor and drawers
 kaos/                    the application
 ```
 
@@ -670,7 +708,6 @@ src/visual_ui.rs         the `kaos visual` egui canvas (feature `visual`)
 src/config.rs            persistent non-secret configuration
 src/provider.rs          model/provider selection
 src/conductor.rs         tool-using coding-agent loop
-sisyphus/                neural architecture, training, evidence, and paper
 ```
 
 ## License

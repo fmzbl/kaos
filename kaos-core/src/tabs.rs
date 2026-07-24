@@ -125,6 +125,10 @@ impl<T> Tabs<T> {
         self.items.iter()
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Tab<T>> {
+        self.items.iter_mut()
+    }
+
     pub fn len(&self) -> usize {
         self.items.len()
     }
