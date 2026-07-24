@@ -780,8 +780,11 @@ impl Editor {
                 let screen = ctx.screen_rect();
                 ui.painter()
                     .rect_filled(screen, 0.0, Color32::from_black_alpha(140));
-                // Swallow clicks on the backdrop so they don't reach the canvas.
-                ui.allocate_rect(screen, Sense::click());
+                // Clicking the dimmed backdrop (anywhere outside the window)
+                // dismisses the modal, like tapping away from a dialog.
+                if ui.allocate_rect(screen, Sense::click()).clicked() {
+                    cancel = true;
+                }
             });
         egui::Window::new("RUN")
             .collapsible(false)
