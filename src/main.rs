@@ -1414,26 +1414,23 @@ fn visual_cmd(arg: &str) {
     #[cfg(feature = "visual")]
     {
         // A second front door onto the standalone editor — `kaos-visual` runs
-        // the identical code without this app installed at all.
-        match kaos::visual_ui::open(arg) {
-            Ok(mandala) => kaos::visual_ui::run(mandala),
-            Err(error) => {
-                eprintln!("visual: {error}");
-                std::process::exit(2);
-            }
-        }
+        // the identical code without this app installed at all. A program that
+        // does not parse opens as source rather than being refused.
+        kaos::visual_ui::run(kaos::visual_ui::open(arg));
     }
     #[cfg(not(feature = "visual"))]
     {
         // Without the window, still report whether the program is drawable.
+        // Undrawable is NOT a dead end — the editor opens such a program as
+        // source to be repaired — so say so and go on to how to get the editor,
+        // rather than exiting on the reader here.
         let arg = arg.trim();
         if !arg.is_empty() {
             let source = std::fs::read_to_string(arg).unwrap_or_else(|_| arg.to_string());
             match kaos::visual::Mandala::from_rebis(&source) {
                 Ok(m) => println!("visual: drawable — {} shapes", m.nodes().len()),
                 Err(e) => {
-                    eprintln!("visual: {e}");
-                    std::process::exit(2);
+                    println!("visual: not drawable yet — {e} · the editor opens it as source")
                 }
             }
         }

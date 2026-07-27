@@ -803,17 +803,49 @@ struct MandalaClipboard {
 /// treated as inline Rebis source, and nothing at all is an empty canvas.
 /// Kept here rather than in a caller so every way of starting the editor
 /// agrees about what its argument means.
-pub fn open(arg: &str) -> Result<Mandala, String> {
+pub fn open(arg: &str) -> Opened {
     let arg = arg.trim();
     if arg.is_empty() {
-        return Ok(Mandala::new());
+        return Opened::Drawing(Mandala::new());
     }
-    let source = std::fs::read_to_string(arg).unwrap_or_else(|_| arg.to_string());
-    Mandala::from_rebis(&source).map_err(|e| e.to_string())
+    let (source, path) = match std::fs::read_to_string(arg) {
+        Ok(text) => (text, Some(arg.to_string())),
+        Err(_) => (arg.to_string(), None),
+    };
+    match Mandala::from_rebis(&source) {
+        Ok(mandala) => Opened::Drawing(mandala),
+        // A program that does not parse still opens — as text, where it can be
+        // repaired. Refusing at the door sends the reader back to whatever they
+        // were using before, which is exactly the moment the editor is wanted.
+        Err(error) => Opened::Source {
+            text: source,
+            path,
+            error: error.to_string(),
+        },
+    }
+}
+
+/// What [`open`] made of its argument.
+///
+/// A drawing and a broken program are both openable; only the drawing has a
+/// graph. Keeping the two apart here means the window decides which surface to
+/// show, rather than the caller deciding whether to open at all.
+pub enum Opened {
+    /// Source that parses: it has a mandala.
+    Drawing(Mandala),
+    /// Source that does not. It opens in the Source tab with its diagnostic —
+    /// there is no drawing, because a broken program has no graph.
+    Source {
+        text: String,
+        /// The file it came from, when the argument named one, so saving the
+        /// repair goes back where it belongs.
+        path: Option<String>,
+        error: String,
+    },
 }
 
 /// Open the editor window on `start`. Blocks until the window closes.
-pub fn run(start: Mandala) {
+pub fn run(start: Opened) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
@@ -824,7 +856,7 @@ pub fn run(start: Mandala) {
         "kaos visual",
         options,
         Box::new(|cc| {
-            let editor = Editor::new(start);
+            let editor = Editor::opened(start);
             install_symbol_fallback(&cc.egui_ctx);
             install_theme(&cc.egui_ctx, editor.ink);
             Ok(Box::new(editor))
@@ -867,17 +899,56 @@ struct Editor {
 }
 
 impl Editor {
+    #[cfg(test)]
     fn new(mandala: Mandala) -> Self {
+        Self::opened(Opened::Drawing(mandala))
+    }
+
+    /// Build the editor on whatever [`open`] resolved.
+    ///
+    /// A drawing lands on the canvas. A program that does not parse lands in the
+    /// Source tab beside an empty canvas, carrying its diagnostic: the editor is
+    /// where it gets fixed, so refusing to open it would be refusing the reader
+    /// the one tool that helps.
+    fn opened(start: Opened) -> Self {
         let mut tabs = Tabs::new();
-        tabs.open(
-            "mandala",
-            Pane::Mandala(Doc {
-                mandala,
-                ..Doc::default()
-            }),
-        );
+        let mut notice = None;
+        match start {
+            Opened::Drawing(mandala) => {
+                tabs.open(
+                    "mandala",
+                    Pane::Mandala(Doc {
+                        mandala,
+                        ..Doc::default()
+                    }),
+                );
+            }
+            Opened::Source { text, path, error } => {
+                // The empty canvas comes first so the drawing surface still
+                // exists — the repaired program has somewhere to be drawn.
+                tabs.open("mandala", Pane::Mandala(Doc::default()));
+                let name = path
+                    .as_deref()
+                    .and_then(|path| {
+                        std::path::Path::new(path)
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_else(|| "source".to_string());
+                tabs.open(
+                    name,
+                    Pane::Source(SourcePane {
+                        file_path: path.unwrap_or_default(),
+                        notice: Some(format!("does not parse yet · {error}")),
+                        ..SourcePane::with_text(text)
+                    }),
+                );
+                notice = Some(format!("opened as source · {error}"));
+            }
+        }
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         Self {
+            notice,
             ink: Ink::load(),
             cwd_edit: cwd.display().to_string(),
             cwd,
@@ -888,7 +959,6 @@ impl Editor {
             pending_run: None,
             run_notice: None,
             clipboard: None,
-            notice: None,
             runs: runs::Desk::default(),
             actions: actions::Desk::default(),
         }
@@ -6390,6 +6460,80 @@ mod tests {
         );
         editor.run_notice = Some(id);
         (editor, id)
+    }
+
+    #[test]
+    fn a_program_that_does_not_parse_still_opens_as_source() {
+        // Refusing at the door sent the reader back to whatever they were using
+        // before — at exactly the moment the editor is the tool that helps.
+        let broken = "(-> \"unclosed";
+        let opened = open(broken);
+        let Opened::Source { text, path, error } = opened else {
+            panic!("a broken program must open as source, not be refused");
+        };
+        assert_eq!(text, broken, "the source is carried through verbatim");
+        assert_eq!(path, None, "inline source came from no file");
+        assert!(!error.is_empty(), "and it says what is wrong");
+
+        // It lands in a Source tab, with the diagnostic on it, beside a canvas
+        // the repaired program can be drawn on.
+        let editor = Editor::opened(open(broken));
+        let titles: Vec<&str> = editor.tabs.iter().map(|tab| tab.title.as_str()).collect();
+        assert_eq!(titles, vec!["mandala", "source"]);
+        let Some(Pane::Source(pane)) = editor.tabs.active() else {
+            panic!("the source tab is the one to look at: {titles:?}");
+        };
+        assert_eq!(pane.editor.source(), broken);
+        assert!(
+            pane.notice.as_deref().is_some_and(|n| n.contains("parse")),
+            "the pane says why there is no drawing: {:?}",
+            pane.notice
+        );
+        assert!(editor.notice.is_some(), "and so does the window");
+    }
+
+    #[test]
+    fn a_broken_file_remembers_where_to_save_the_repair() {
+        let path =
+            std::env::temp_dir().join(format!("kaos-visual-broken-{}.rebis", std::process::id()));
+        std::fs::write(&path, "(-> \"unclosed").expect("write");
+
+        let editor = Editor::opened(open(&path.display().to_string()));
+        let Some(Pane::Source(pane)) = editor.tabs.active() else {
+            panic!("a broken file opens in the source tab");
+        };
+        assert_eq!(
+            pane.file_path,
+            path.display().to_string(),
+            "the repair saves back to the file it came from"
+        );
+        // The tab is named for the file, not for the fact that it is broken.
+        assert_eq!(
+            editor.tabs.active_id().and_then(|id| editor
+                .tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .map(|tab| tab.title.clone())),
+            path.file_name().map(|n| n.to_string_lossy().into_owned())
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_program_that_parses_still_opens_as_a_drawing() {
+        // The repair is the point: once it parses it is a drawing again.
+        let Opened::Drawing(mandala) = open("(-> \"a\" \"b\")") else {
+            panic!("a valid program is a drawing");
+        };
+        assert_eq!(mandala.nodes().len(), 3);
+
+        let editor = Editor::opened(open("(-> \"a\" \"b\")"));
+        assert_eq!(editor.tabs.len(), 1, "no source tab is needed");
+        assert!(matches!(editor.tabs.active(), Some(Pane::Mandala(_))));
+        assert!(editor.notice.is_none(), "nothing to report");
+
+        // And an empty argument is an empty canvas, as before.
+        assert!(matches!(open("  "), Opened::Drawing(_)));
     }
 
     #[test]

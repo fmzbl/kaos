@@ -3976,19 +3976,22 @@ impl Workspace {
     /// Open `source` in the mandala editor.
     ///
     /// The editor is a windowed application and this workspace owns the
-    /// terminal, so it runs as a detached child rather than inline. The source
-    /// is parsed here first, so an undrawable program reports on the status
-    /// line instead of opening a window that immediately exits.
+    /// terminal, so it runs as a detached child rather than inline. A program
+    /// that does not parse opens too — as source, in the editor that can repair
+    /// it — and the status line carries the diagnostic so the missing drawing is
+    /// explained rather than mysterious.
     fn open_visual_with(&mut self, source: &str) {
         let source = source.trim();
         if source.is_empty() {
             self.message = "visual · nothing to draw".to_string();
             return;
         }
-        if let Err(error) = kaos_core::visual::Mandala::from_rebis(source) {
-            self.message = format!("visual · {error}");
-            return;
-        }
+        // A program that does not parse is NOT refused here: the editor opens it
+        // as source, which is where it gets repaired. Only say what is wrong, so
+        // the reader knows why no drawing appeared.
+        let diagnostic = kaos_core::visual::Mandala::from_rebis(source)
+            .err()
+            .map(|error| error.to_string());
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kaos"));
         match std::process::Command::new(exe)
             .arg("visual")
@@ -4001,7 +4004,12 @@ impl Workspace {
             .stderr(std::process::Stdio::null())
             .spawn()
         {
-            Ok(_) => self.message = "visual · editor opened".to_string(),
+            Ok(_) => {
+                self.message = match diagnostic {
+                    Some(error) => format!("visual · opened as source · {error}"),
+                    None => "visual · editor opened".to_string(),
+                }
+            }
             Err(error) => self.message = format!("visual · could not open: {error}"),
         }
     }

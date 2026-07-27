@@ -12,13 +12,9 @@ fn main() {
         return;
     }
     let arg = args.join(" ");
-    match kaos_visual::open(&arg) {
-        Ok(mandala) => kaos_visual::run(mandala),
-        Err(error) => {
-            eprintln!("kaos-visual: {error}");
-            std::process::exit(2);
-        }
-    }
+    // A program that does not parse is not a reason to refuse: it opens as
+    // source, in the editor that can repair it.
+    kaos_visual::run(kaos_visual::open(&arg));
 }
 
 const USAGE: &str = "\

@@ -439,9 +439,14 @@ kaos visual '(["synthesize"] "Inspect code" "Trace failure")'
 ```
 
 From inside the Rebis workspace, `/visual` opens the current buffer the same
-way. It parses first, so an undrawable buffer reports on the status line
-instead of opening an empty window, and the editor runs in its own window while
-the terminal app keeps going.
+way, in its own window while the terminal app keeps going.
+
+A program that does not parse opens too. There is no drawing to show — a broken
+program has no graph — so it opens in the Source tab instead, carrying the
+parser's diagnostic, beside an empty canvas for the repaired program. When the
+argument named a file, the tab keeps that path so the repair saves back where it
+came from. Refusing to open would withhold the editor at exactly the moment it
+is the tool that helps.
 
 The right panel edits the source live: type there and the drawing redraws as
 soon as what you have typed parses; change the drawing and the source
