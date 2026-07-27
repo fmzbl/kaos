@@ -380,8 +380,7 @@ directory becomes a read-only sigil and a module automatically; adding a file
 does not require a Kaos change. The current collection includes
 `archetypes/*` composition protocols, the `git/workflow` repository-workflow
 module, `forge/repair` (the coding repair loop wired onto `std/spiral`), and
-`science/method` (claims that have to survive something), and `madness/descent`
-(`i-am-crazy` — deliberate destabilization with a sober return).
+`science/method` (claims that have to survive something).
 
 ## Non-interactive Rebis CLI
 
