@@ -14,8 +14,9 @@
 //!     transcript += reply + observation           // it sees the result, continues
 //! ```
 //!
-//! Tools: `read_file`, `write_file`, `edit_file`, `bash`, `finish` — with `bash` the
-//! agent can grep, list, run the tests, anything. The model is behind the [`Chat`]
+//! Tools: `read_file`, `write_file`, `edit_file`, `bash`, `timer`, `finish` — with
+//! `bash` the agent can grep, list, run the tests, anything, and with `timer` it can
+//! start something slow and be brought back to it. The model is behind the [`Chat`]
 //! seam so the same loop runs on claude, a local ollama model, or a scripted stub
 //! (deterministic, for tests): an adept performing the Great Work, tool by tool.
 
@@ -23,7 +24,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::agent::{self, Workspace};
 
@@ -47,9 +48,158 @@ pub enum Tool {
     Bash {
         cmd: String,
     },
+    /// Come back to something later. The agent names a delay and what to be
+    /// handed back then; the loop waits rather than polling for it.
+    ///
+    /// `after` is the delay as the agent wrote it (`5m`, `30s`), kept as text
+    /// like every other argument so an unreadable one can be reported back
+    /// instead of guessed at.
+    Timer {
+        after: String,
+        note: String,
+    },
     Finish {
         message: String,
     },
+}
+
+/// Longest single timer an agent may set. A run is a bounded piece of work, and
+/// a wait longer than this is a scheduling decision belonging to the person
+/// driving Kaos, not to the agent inside one run.
+pub const MAX_TIMER: Duration = Duration::from_secs(60 * 60);
+/// How many timers one run may hold at once.
+pub const MAX_TIMERS: usize = 8;
+
+/// Read a delay the way an agent writes one: `30s`, `5m`, `2h`, or a bare
+/// number of seconds.
+///
+/// An unreadable delay is an error the agent is told about. Silently treating it
+/// as zero would turn "wait five minutes" into a busy loop.
+pub fn parse_delay(text: &str) -> Result<Duration, String> {
+    let text = text.trim().to_ascii_lowercase();
+    if text.is_empty() {
+        return Err("a timer needs a delay, like 30s, 5m, or 2h".to_string());
+    }
+    let (digits, unit) = match text.strip_suffix(['s', 'm', 'h']) {
+        Some(digits) => (digits, &text[text.len() - 1..]),
+        None => (text.as_str(), "s"),
+    };
+    let amount: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("{text:?} is not a delay — use 30s, 5m, or 2h"))?;
+    let seconds = match unit {
+        "m" => amount.saturating_mul(60),
+        "h" => amount.saturating_mul(60 * 60),
+        _ => amount,
+    };
+    Ok(Duration::from_secs(seconds))
+}
+
+/// A delay written back the way it was asked for.
+fn describe_delay(after: Duration) -> String {
+    let seconds = after.as_secs();
+    match (seconds / 3600, (seconds % 3600) / 60, seconds % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, 0) => format!("{m}m"),
+        (0, m, s) => format!("{m}m{s}s"),
+        (h, 0, 0) => format!("{h}h"),
+        (h, m, _) => format!("{h}h{m}m"),
+    }
+}
+
+/// Bring due timers into the transcript before the next turn, waiting first when
+/// the agent has nothing else in hand.
+///
+/// Returns the turn to append — the acted marker and the observation — or `None`
+/// when no timer came due. Shared by both loops so a timer means the same thing
+/// in the `<act>` dialect and the native one.
+fn settle_timers(timers: &mut Timers, may_wait: bool) -> Option<(String, String)> {
+    if may_wait {
+        if let Some(delay) = timers.wait_for() {
+            // The whole point of a timer: the run goes quiet instead of asking
+            // the model, over and over, whether the time has passed yet.
+            std::thread::sleep(delay);
+        }
+    }
+    let due = timers.due_now();
+    if due.is_empty() {
+        return None;
+    }
+    let observation = due
+        .iter()
+        .map(|note| format!("timer due \u{2014} {note}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(("(timer)".to_string(), observation))
+}
+
+/// The timers one agent run is holding: when each comes due, and what to hand
+/// back at that moment.
+///
+/// A Kaos agent facility, not a Rebis one — a Rebis program never names a timer.
+/// It exists so an agent that has started something slow (a build, a long
+/// command left in the background) can stop and be brought back to it, instead
+/// of spending a model call every turn to say "still waiting".
+///
+/// Timers live for one run. Nothing is written to disk and nothing outlives the
+/// run, because what they watch — a subprocess, a working tree — does not
+/// outlive it either.
+#[derive(Default, Debug)]
+pub struct Timers {
+    /// Due instant and the note to return, kept in due order.
+    pending: Vec<(Instant, String)>,
+}
+
+impl Timers {
+    /// Record a timer. Returns the observation the agent reads.
+    pub fn set(&mut self, after: Duration, note: &str) -> String {
+        if self.pending.len() >= MAX_TIMERS {
+            return format!(
+                "REFUSED: {MAX_TIMERS} timers are already set. \
+                 Let one come due before setting another."
+            );
+        }
+        let capped = after.min(MAX_TIMER);
+        let due = Instant::now() + capped;
+        let index = self.pending.partition_point(|(at, _)| *at <= due);
+        self.pending.insert(index, (due, note.to_string()));
+        let shown = describe_delay(capped);
+        if capped < after {
+            format!(
+                "timer set for {shown} (shortened from {}, the longest one run may wait) \u{2014} you will be given: {note}",
+                describe_delay(after)
+            )
+        } else {
+            format!("timer set for {shown} \u{2014} you will be given: {note}")
+        }
+    }
+
+    /// How long the loop should wait before the next turn, when the agent has
+    /// nothing else in hand.
+    ///
+    /// `None` means do not wait: either nothing is pending, or something is
+    /// already due and belongs to the agent now.
+    #[must_use]
+    pub fn wait_for(&self) -> Option<Duration> {
+        let (due, _) = self.pending.first()?;
+        due.checked_duration_since(Instant::now())
+    }
+
+    /// Take every timer that has come due, earliest first.
+    pub fn due_now(&mut self) -> Vec<String> {
+        let now = Instant::now();
+        let ready = self.pending.partition_point(|(at, _)| *at <= now);
+        self.pending
+            .drain(..ready)
+            .map(|(_, note)| note)
+            .collect::<Vec<_>>()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
 }
 
 impl Tool {
@@ -64,6 +214,7 @@ impl Tool {
                 format!("edit_file {path} (find {:?})", trunc(find, 40))
             }
             Tool::Bash { cmd } => format!("bash: {}", trunc(cmd, 60)),
+            Tool::Timer { after, note } => format!("timer {after} ({})", trunc(note, 40)),
             Tool::Finish { .. } => "finish".to_string(),
         }
     }
@@ -135,6 +286,10 @@ pub fn parse_action(text: &str) -> Option<Tool> {
         }),
         "bash" | "run" | "shell" => Some(Tool::Bash {
             cmd: get(&["cmd", "command"]),
+        }),
+        "timer" | "wait" | "later" | "remind" => Some(Tool::Timer {
+            after: get(&["for", "after", "in", "delay"]),
+            note: get(&["note", "message", "msg", "why", "reason"]),
         }),
         "finish" | "done" | "stop" => Some(Tool::Finish {
             message: get(&["message", "msg", "summary"]),
@@ -250,17 +405,17 @@ pub const MAX_ACTS_PER_TURN: usize = 5;
 /// Human-readable Rebis reference compiled into Kaos. Keeping the examples in
 /// `docs/` makes the chat's knowledge auditable and prevents its authoring rules
 /// from drifting away from the documentation users see.
-const REBIS_AUTHORING_CONTEXT: &str = include_str!("../../docs/REBIS_CHAT_CONTEXT.md");
+const REBIS_AUTHORING_CONTEXT: &str = kaos_core::chat::REBIS_AUTHORING_GUIDE;
 
-/// Whether a task should carry the Rebis reference: true for `/chat`/`/code`
-/// (the TUI sets `KAOS_REBIS_CONTEXT` for its coding mind) and for any task that
-/// names the language. The native `claude` agent path gates its
-/// `--append-system-prompt` on this too, so the chat mind and the `<act>` loop
-/// learn Rebis under the same rule.
-pub fn wants_rebis_authoring_context(task: &str) -> bool {
-    kaos_core::config::enabled("KAOS_REBIS_CONTEXT") || task_requests_rebis_authoring_context(task)
+/// Every Kaos agent conversation carries the Rebis reference. A user can move
+/// from ordinary project chat to authoring or run inspection in the next turn,
+/// so routing the guide from keyword guesses made the context nondeterministic.
+/// The environment flag remains accepted by callers for compatibility.
+pub fn wants_rebis_authoring_context(_task: &str) -> bool {
+    true
 }
 
+#[cfg(test)]
 fn task_requests_rebis_authoring_context(task: &str) -> bool {
     let task = task.to_ascii_lowercase();
     task.contains("rebis")
@@ -354,9 +509,12 @@ pub fn native_system_prompt() -> String {
      wrong place — reproduce the behaviour first (a small python -c or the failing \
      test via bash), trace the cause yourself, and only then edit. Change files ONLY \
      with edit_file/write_file (never sed/tee via bash) so every change is shown as \
-     a diff; never edit anything under a tests/ directory. You may request several \
-     tool calls in one reply — they run in order, and if one fails the rest of that \
-     chain is skipped. After editing, verify with bash, then call finish."
+     a diff. When you start something slow and want to look at it later, set a timer \
+     rather than checking on it at once; a reply asking for nothing but a timer makes \
+     the run wait quietly until it is due. Never edit anything under a tests/ \
+     directory. You may request several tool calls in one reply — they run in order, \
+     and if one fails the rest of that chain is skipped. After editing, verify with \
+     bash, then call finish."
         .to_string()
 }
 
@@ -371,6 +529,11 @@ pub fn system_prompt() -> String {
      - write_file: args path, contents\n\
      - edit_file: args path, find, replace (replaces the first exact occurrence)\n\
      - bash: args cmd (run any shell command in the project root — ls, grep, run tests)\n\
+     - timer: args for, note (come back to something later: `for` is a delay like \
+     30s, 5m, 2h and `note` is what to hand you back then — use it after starting \
+     something slow, such as a command left running in the background, instead of \
+     checking on it immediately. Ask for nothing but a timer and the run waits \
+     quietly until it comes due)\n\
      - finish: args message (call when the task is done AND you have verified it)\n\n\
      Multiple <act> blocks run IN ORDER; if one fails, the rest of your chain is \
      skipped and you see everything that ran. Chain confident sequences \u{2014} \
@@ -381,7 +544,9 @@ pub fn system_prompt() -> String {
      failing test), trace the cause yourself, and only then edit. To CHANGE a \
      file, use edit_file or write_file (never sed/tee via bash) so every change \
      is shown as a diff. After editing, run the tests with bash to verify, then \
-     finish. Directly before your first <act> block, narrate in ONE short line \
+     finish. When you start something slow and mean to look at it later, set a \
+     timer instead of checking on it straight away. \
+     Directly before your first <act> block, narrate in ONE short line \
      what you are about to do and why \u{2014} the reader follows your work live. \
      Nothing else outside the blocks."
         .to_string()
@@ -521,9 +686,18 @@ impl Conductor {
         let mut last_reads: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
         let mut model_turn = 0usize;
+        let mut timers = Timers::default();
+        // The previous turn asked for nothing but timers, so no work is in hand
+        // and the loop may wait for one rather than pay for a turn that could
+        // only say "still waiting".
+        let mut only_waiting = false;
 
         let mut step_limit = self.max_steps;
         loop {
+            if let Some(turn) = settle_timers(&mut timers, only_waiting) {
+                turns.push(turn);
+                only_waiting = false;
+            }
             if steps.len() >= step_limit {
                 let reason = format!(
                     "agent step limit ({}) reached without a failure",
@@ -583,6 +757,7 @@ impl Conductor {
             // acting past a failure would build on rubble.
             let mut turn_log: Vec<(String, String)> = Vec::new();
             let mut finished: Option<String> = None;
+            only_waiting = tools.iter().all(|tool| matches!(tool, Tool::Timer { .. }));
             for tool in tools {
                 if steps.len() >= self.max_steps {
                     break;
@@ -618,6 +793,7 @@ impl Conductor {
                         last_reads.remove(path);
                         self.execute(&tool)
                     }
+                    Tool::Timer { after, note } => Self::set_timer(&mut timers, after, note),
                     _ => self.execute(&tool),
                 };
 
@@ -719,9 +895,17 @@ impl Conductor {
         let mut last_reads: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
         let mut model_turn = 0usize;
+        let mut timers = Timers::default();
+        // Same law as the act loop: a reply that asked only for timers leaves no
+        // work in hand, so the loop may wait for one instead of taking a turn.
+        let mut only_waiting = false;
 
         let mut step_limit = self.max_steps;
         loop {
+            if let Some((_, observation)) = settle_timers(&mut timers, only_waiting) {
+                history.push(Msg::user(observation));
+                only_waiting = false;
+            }
             if steps.len() >= step_limit {
                 let reason = format!(
                     "agent step limit ({}) reached without a failure",
@@ -782,6 +966,10 @@ impl Conductor {
             let mut observations: Vec<Msg> = Vec::new();
             let mut finished: Option<String> = None;
             let mut halted = false;
+            only_waiting = reply
+                .calls
+                .iter()
+                .all(|(_, tool)| matches!(tool, Tool::Timer { .. }));
             for (id, tool) in reply.calls.iter().take(MAX_ACTS_PER_TURN) {
                 if halted || steps.len() >= self.max_steps {
                     // Chain halted: unexecuted calls still need tool-role
@@ -822,6 +1010,7 @@ impl Conductor {
                         last_reads.remove(path.as_str());
                         self.execute(tool)
                     }
+                    Tool::Timer { after, note } => Self::set_timer(&mut timers, after, note),
                     _ => self.execute(tool),
                 };
                 let step = Step {
@@ -1047,7 +1236,25 @@ impl Conductor {
                 }
             }
             Tool::Bash { cmd } => self.run_bash(cmd),
+            // A timer is the one action the workspace cannot carry out: it is a
+            // decision about when the NEXT turn happens, so the loop holds it.
+            // Reaching here means a caller executed a tool outside a loop.
+            Tool::Timer { after, .. } => {
+                format!("error: a timer ({after}) can only be set inside an agent run")
+            }
             Tool::Finish { message } => message.clone(),
+        }
+    }
+
+    /// Register a timer the agent asked for, or report why it could not be.
+    ///
+    /// Separate from [`Self::execute`] because a timer changes when the loop
+    /// takes its next turn rather than touching the workspace, so the loop —
+    /// not the conductor — is what owns it.
+    fn set_timer(timers: &mut Timers, after: &str, note: &str) -> String {
+        match parse_delay(after) {
+            Ok(delay) => timers.set(delay, note),
+            Err(error) => format!("error: {error}"),
         }
     }
 
@@ -1957,6 +2164,155 @@ mod tests {
         assert_eq!(line_delta("a\nb", "a\nb\nc"), (1, 0)); // added one
         assert_eq!(line_delta("a\nb\nc", "a\nc"), (0, 1)); // removed one
         assert_eq!(line_delta("return a - b", "return a + b"), (1, 1)); // changed line
+    }
+
+    #[test]
+    fn a_delay_is_read_the_way_an_agent_writes_one() {
+        assert_eq!(parse_delay("30s"), Ok(Duration::from_secs(30)));
+        assert_eq!(parse_delay("5m"), Ok(Duration::from_secs(300)));
+        assert_eq!(parse_delay("2h"), Ok(Duration::from_secs(7200)));
+        // A bare number is seconds, and surrounding space or case is nothing.
+        assert_eq!(parse_delay(" 90 "), Ok(Duration::from_secs(90)));
+        assert_eq!(parse_delay("5M"), Ok(Duration::from_secs(300)));
+
+        // An unreadable delay is an error, never a silent zero — zero would
+        // turn "wait five minutes" into a busy loop.
+        for bad in ["", "soon", "5 minutes", "-3s", "1.5m"] {
+            assert!(parse_delay(bad).is_err(), "{bad:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn timers_come_due_in_order_and_the_loop_waits_for_the_nearest() {
+        let mut timers = Timers::default();
+        assert!(timers.is_empty());
+        assert_eq!(timers.wait_for(), None, "nothing pending, nothing to wait");
+
+        // Set out of order; they come back in due order.
+        timers.set(Duration::from_millis(60), "second");
+        timers.set(Duration::from_millis(10), "first");
+        assert!(timers.due_now().is_empty(), "neither is due yet");
+        let wait = timers.wait_for().expect("the nearest one is pending");
+        assert!(
+            wait <= Duration::from_millis(10),
+            "the loop waits for the NEAREST timer, not the furthest: {wait:?}"
+        );
+
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(timers.due_now(), vec!["first".to_string()]);
+        assert!(!timers.is_empty(), "the later one is still held");
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(timers.due_now(), vec!["second".to_string()]);
+        assert!(timers.is_empty());
+        assert_eq!(timers.wait_for(), None);
+    }
+
+    #[test]
+    fn a_timer_is_capped_and_the_agent_is_told_so() {
+        let mut timers = Timers::default();
+        let said = timers.set(MAX_TIMER + Duration::from_secs(600), "much later");
+        assert!(
+            said.contains("shortened from"),
+            "the cap must be reported, not applied silently: {said}"
+        );
+        assert!(said.contains("1h"), "capped to the maximum: {said}");
+
+        // And a run cannot hold unboundedly many.
+        let mut many = Timers::default();
+        for i in 0..MAX_TIMERS {
+            assert!(!many
+                .set(Duration::from_secs(60), &format!("note {i}"))
+                .starts_with("REFUSED"));
+        }
+        assert!(many
+            .set(Duration::from_secs(60), "one too many")
+            .starts_with("REFUSED"));
+    }
+
+    #[test]
+    fn the_timer_act_parses_with_its_delay_kept_as_written() {
+        let tool = parse_action(
+            "<act tool=\"timer\">\n\
+             <arg name=\"for\">5m</arg>\n\
+             <arg name=\"note\">check the build log</arg>\n\
+             </act>",
+        );
+        assert_eq!(
+            tool,
+            Some(Tool::Timer {
+                after: "5m".to_string(),
+                note: "check the build log".to_string(),
+            })
+        );
+
+        // A delay the parser cannot read still becomes a Timer, so the agent is
+        // answered with what was wrong instead of having its action vanish.
+        let vague = parse_action(
+            "<act tool=\"wait\"><arg name=\"for\">soon</arg><arg name=\"note\">n</arg></act>",
+        );
+        let Some(Tool::Timer { after, .. }) = vague else {
+            panic!("an unreadable delay must still parse as a timer");
+        };
+        assert_eq!(after, "soon");
+        let mut timers = Timers::default();
+        assert!(Conductor::set_timer(&mut timers, &after, "n").starts_with("error:"));
+        assert!(timers.is_empty(), "a bad delay sets no timer");
+    }
+
+    #[test]
+    fn a_run_waits_for_its_timer_and_is_handed_the_note_when_it_comes_due() {
+        // The whole point of the tool: the agent asks for nothing but a timer,
+        // so the run goes quiet instead of spending turns to ask whether the
+        // time has passed. The second turn must see the note.
+        let dir = tmpdir(&[]);
+        let chat = ScriptedChat::new(vec![
+            "<act tool=\"timer\"><arg name=\"for\">1s</arg>\
+             <arg name=\"note\">check the build log</arg></act>",
+            "<act tool=\"finish\"><arg name=\"message\">build was clean</arg></act>",
+        ]);
+        let started = Instant::now();
+        let session = Conductor::new(&dir).run("watch a slow build", &chat, |_| {});
+        let waited = started.elapsed();
+
+        assert!(session.finished, "the run completed");
+        assert_eq!(session.final_message, "build was clean");
+        assert!(
+            waited >= Duration::from_secs(1),
+            "the run must actually wait out the timer, not fall through: {waited:?}"
+        );
+        // The timer is a step in the trace, so both frontends show why the run
+        // went quiet rather than looking stalled.
+        assert!(
+            session.steps.iter().any(|step| matches!(
+                &step.tool,
+                Tool::Timer { after, .. } if after == "1s"
+            )),
+            "the timer is part of the visible trace"
+        );
+    }
+
+    #[test]
+    fn a_timer_alongside_other_work_does_not_stop_the_run() {
+        // Only a reply that asks for NOTHING but timers means the agent has
+        // nothing in hand. A timer set beside real work must not pause the run.
+        let dir = tmpdir(&[("f.txt", "hello\n")]);
+        let chat = ScriptedChat::new(vec![
+            "<act tool=\"timer\"><arg name=\"for\">2h</arg><arg name=\"note\">later</arg></act>\
+             <act tool=\"read_file\"><arg name=\"path\">f.txt</arg></act>",
+            "<act tool=\"finish\"><arg name=\"message\">read it</arg></act>",
+        ]);
+        let started = Instant::now();
+        let session = Conductor::new(&dir).run("read a file", &chat, |_| {});
+
+        assert!(session.finished);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a two-hour timer beside real work must not stall the run"
+        );
+        assert!(session
+            .steps
+            .iter()
+            .any(|step| matches!(&step.tool, Tool::ReadFile { .. })));
     }
 
     #[test]

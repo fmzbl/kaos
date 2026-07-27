@@ -81,7 +81,8 @@ pub fn converse(
     chat: &dyn Chat,
     max_steps: usize,
 ) -> Conversation {
-    let system = system_prompt(role, &tools.catalogue());
+    let context = kaos_core::chat::DEFAULT_CONTEXT;
+    let system = system_prompt(role, &tools.catalogue(), context);
     let mut steps: Vec<Turn> = Vec::new();
     // (acted, observation) per turn, rendered through the twin ladders each pass.
     let mut turns: Vec<(String, String)> = Vec::new();
@@ -108,7 +109,7 @@ pub fn converse(
             // the mind is not speaking the protocol — end rather than spend.
             nudges += 1;
             if nudges >= 3 {
-                return force_answer(role, question, &turns, chat, steps);
+                return force_answer(role, question, &turns, chat, steps, context);
             }
             turns.push((
                 "(your previous reply held no <act> block and was banished)".to_string(),
@@ -146,7 +147,7 @@ pub fn converse(
     }
 
     // Budget spent without a finish: make it answer now, from what it gathered.
-    force_answer(role, question, &turns, chat, steps)
+    force_answer(role, question, &turns, chat, steps, context)
 }
 
 /// One last tool-less turn: answer the question directly from the gathered
@@ -158,13 +159,14 @@ fn force_answer(
     turns: &[(String, String)],
     chat: &dyn Chat,
     steps: Vec<Turn>,
+    context: kaos_core::chat::ChatContext,
 ) -> Conversation {
-    let system = format!(
+    let system = context.augment_system(&format!(
         "{role}\n\nAnswer the user's question now, in plain prose. Use the notes below for \
          what they established, and your own knowledge for what the notes cannot know — \
          never claim the notes contain something they do not. Do not call tools. Be direct \
          and concrete."
-    );
+    ));
     let transcript = render_transcript(question, turns);
     match chat.respond(&system, &transcript) {
         Ok(answer) => Conversation {
@@ -181,8 +183,8 @@ fn force_answer(
 }
 
 /// The system prompt: the host's role, the `<act>` liturgy, and the catalogue.
-fn system_prompt(role: &str, catalogue: &str) -> String {
-    format!(
+fn system_prompt(role: &str, catalogue: &str, context: kaos_core::chat::ChatContext) -> String {
+    context.augment_system(&format!(
         "{role}\n\n\
          You work by calling tools to gather facts, then giving a final answer. Each turn, \
          reply with EXACTLY ONE action and nothing else, in this format:\n\
@@ -195,7 +197,7 @@ fn system_prompt(role: &str, catalogue: &str) -> String {
          returned. For what the tools cannot know, use your own knowledge plainly — a tool \
          returning nothing is not evidence about the world, only about the tools. When you \
          finish, write the answer for a person, in plain prose — not JSON."
-    )
+    ))
 }
 
 /// Render the transcript through the twin ladders of [`charge`](kaos_pact::charge):

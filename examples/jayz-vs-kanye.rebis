@@ -20,13 +20,13 @@
 
 ; The stop judge: `yes` only once both cases are made and a verdict is reached.
 (~ settled (thread)
-  (yes-no
+  (std-binary
     (-> thread
         "Has this debate aired both artists' strongest cases AND landed on a
-         fair closing verdict? Answer yes or no.")))
+         fair closing verdict? Return exactly 1 for yes and 0 for no.")))
 
 ; Kick it off, then let the agents loop until it settles.
-(loop
+(std-loop
   "Open the debate: who has the greater legacy in hip-hop, Jay-Z or Kanye
    West? Give the opening argument for ONE side only."
   exchange

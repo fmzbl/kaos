@@ -402,7 +402,8 @@ pub enum ModelBackend {
         model: String,
         timeout_s: u64,
     },
-    /// The `claude` CLI; `model` is an optional `--model` tag (`sonnet`, `opus`,
+    /// The `claude` CLI; `model` is an optional `--model` tag (`sonnet`, `opus`
+    /// meaning Opus 5,
     /// a full id) — `None` keeps the CLI's default.
     Claude {
         model: Option<String>,

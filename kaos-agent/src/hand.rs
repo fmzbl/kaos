@@ -3,7 +3,7 @@
 //! The k2.7 verdict (docs/EDGE.md) was structural: models RL-trained for
 //! native tool-calling pay a heavy tax when driven through a text-parsed
 //! protocol. The Open Hand removes the tax without surrendering the doctrine:
-//! the SAME five tools, the SAME executor (with its lint veto and workspace
+//! the SAME tools, the SAME executor (with its lint veto and workspace
 //! isolation), the SAME Twin Ladders of charge over the history — but spoken
 //! as structured `tool_calls`, the dialect the mind was trained in.
 //!
@@ -60,7 +60,7 @@ impl Msg {
     }
 }
 
-/// The five tools as JSON Schema, in the OpenAI `tools` shape both OpenRouter
+/// Every tool as JSON Schema, in the OpenAI `tools` shape both OpenRouter
 /// and ollama accept. One definition serves every backend — parity by
 /// construction.
 pub fn tool_schemas() -> serde_json::Value {
@@ -104,6 +104,16 @@ pub fn tool_schemas() -> serde_json::Value {
             &["cmd"]
         ),
         f(
+            "timer",
+            "Come back to something later instead of checking for it now. `for` is a \
+             delay (30s, 5m, 2h) and `note` is what you want handed back then — use it \
+             after starting something slow, such as a command left running in the \
+             background. If a timer is all you ask for in a reply, the run waits \
+             quietly until it comes due.",
+            serde_json::json!({ "for": {"type": "string"}, "note": {"type": "string"} }),
+            &["for", "note"]
+        ),
+        f(
             "finish",
             "Call when the task is done AND verified; `message` summarizes what changed.",
             serde_json::json!({ "message": {"type": "string"} }),
@@ -128,6 +138,10 @@ pub fn parse_call(name: &str, args: &serde_json::Value) -> Option<Tool> {
             replace: s("replace")?,
         }),
         "bash" => Some(Tool::Bash { cmd: s("cmd")? }),
+        "timer" => Some(Tool::Timer {
+            after: s("for").or_else(|| s("after")).unwrap_or_default(),
+            note: s("note").or_else(|| s("message")).unwrap_or_default(),
+        }),
         "finish" => Some(Tool::Finish {
             message: s("message").unwrap_or_default(),
         }),
@@ -189,6 +203,7 @@ fn tool_call_json(id: &str, t: &Tool) -> serde_json::Value {
             serde_json::json!({ "path": path, "find": find, "replace": replace }),
         ),
         Tool::Bash { cmd } => ("bash", serde_json::json!({ "cmd": cmd })),
+        Tool::Timer { after, note } => ("timer", serde_json::json!({ "for": after, "note": note })),
         Tool::Finish { message } => ("finish", serde_json::json!({ "message": message })),
     };
     serde_json::json!({
@@ -243,7 +258,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schemas_cover_the_five_tools() {
+    fn schemas_cover_every_tool() {
         let v = tool_schemas();
         let names: Vec<&str> = v
             .as_array()
@@ -253,8 +268,40 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["read_file", "write_file", "edit_file", "bash", "finish"]
+            vec![
+                "read_file",
+                "write_file",
+                "edit_file",
+                "bash",
+                "timer",
+                "finish"
+            ]
         );
+    }
+
+    #[test]
+    fn a_timer_crosses_the_native_dialect_intact() {
+        // Parity by construction: whatever the act dialect can express, the
+        // native one must too, or the same agent behaves differently by backend.
+        let call = parse_call(
+            "timer",
+            &serde_json::json!({ "for": "5m", "note": "check the build log" }),
+        );
+        assert_eq!(
+            call,
+            Some(Tool::Timer {
+                after: "5m".into(),
+                note: "check the build log".into(),
+            })
+        );
+
+        // And back out onto the wire for history replay, under the same keys.
+        let json = tool_call_json("call_1", &call.unwrap());
+        assert_eq!(json["function"]["name"], "timer");
+        let args: serde_json::Value =
+            serde_json::from_str(json["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["for"], "5m");
+        assert_eq!(args["note"], "check the build log");
     }
 
     #[test]

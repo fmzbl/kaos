@@ -32,6 +32,12 @@ use std::time::Duration;
 /// `anthropic:` namespace; `claude:fable` instead uses the Claude CLI.
 pub const FABLE_5_MODEL: &str = "claude-fable-5";
 
+/// The one Opus. Every spelling — `opus`, `opus5`, `claude:opus`,
+/// `anthropic:opus` — resolves here, on both the CLI and the API route, and it
+/// is the recommended `KAOS_FABLE_FALLBACK_MODEL`. The CLI's own moving
+/// `--model opus` alias is not reachable by design.
+pub const OPUS_5_MODEL: &str = "claude-opus-5";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Simulated,
@@ -85,7 +91,9 @@ impl Spec {
     }
 
     /// Parse a user/env token into a Spec. Accepts:
-    ///   `sim` | `claude` (CLI) | `claude:fable` | `claude-api[:model]` | `anthropic[:model]` |
+    ///   `sim` | `claude` (CLI) | `claude:fable` | `claude:opus` |
+    ///   `claude-api[:model]` |
+    ///   `anthropic[:model]` (`:fable` and `:opus` name the current ids) |
     ///   `openai[:model]` | `gpt-4o` (bare gpt* ⇒ openai) |
     ///   `openrouter[:vendor/model]` | `ollama[:model]` |
     ///   a bare model name ⇒ ollama with that model.
@@ -99,6 +107,7 @@ impl Spec {
         let anthropic = || {
             let model = match rest.map(str::to_ascii_lowercase).as_deref() {
                 Some("fable") | Some("fable5") | Some("fable-5") => FABLE_5_MODEL,
+                Some("opus") | Some("opus5") | Some("opus-5") => OPUS_5_MODEL,
                 _ => rest.unwrap_or(Kind::ClaudeApi.default_model()),
             };
             Spec::new(Kind::ClaudeApi, model)
@@ -111,10 +120,19 @@ impl Spec {
                 Some("fable") | Some("fable5") | Some("fable-5") => {
                     Spec::new(Kind::ClaudeCli, "fable")
                 }
+                // There is one Opus: `opus`, `opus5` and `opus-5` all mean
+                // Opus 5. The CLI's moving `--model opus` alias is deliberately
+                // no longer reachable — a name that silently changes model
+                // under a pinned config is not worth the spelling it saves.
+                // `claude_tag` is where the short form becomes the exact id.
+                Some("opus") | Some("opus5") | Some("opus-5") => {
+                    Spec::new(Kind::ClaudeCli, "opus5")
+                }
                 _ => Spec::new(Kind::ClaudeCli, rest.unwrap_or("claude")),
             },
             "claude-cli" | "cli" => Spec::new(Kind::ClaudeCli, rest.unwrap_or("claude")),
             "fable" | "fable5" | "fable-5" if rest.is_none() => Spec::new(Kind::ClaudeCli, "fable"),
+            "opus" | "opus5" | "opus-5" if rest.is_none() => Spec::new(Kind::ClaudeCli, "opus5"),
             "claude-api" | "anthropic" => anthropic(),
             "openai" | "chatgpt" | "gpt" => with(Kind::OpenAi),
             "openrouter" | "router" => with(Kind::OpenRouter),
@@ -172,11 +190,18 @@ impl Spec {
     /// The CLI --model tag: None for the CLI's own default, Some for a pinned
     /// inner model (`sonnet`, `opus`, `haiku`, or a full id).
     pub fn claude_tag(&self) -> Option<&str> {
-        if self.kind == Kind::ClaudeCli && self.model != "claude" {
-            Some(&self.model)
-        } else {
-            None
+        if self.kind != Kind::ClaudeCli || self.model == "claude" {
+            return None;
         }
+        // The one place a `--model` value is produced, and therefore the one
+        // place a short spelling is translated. Every Opus spelling resolves to
+        // the pinned id: the CLI would accept its own moving `opus` alias, but
+        // passing it through would let the model change under a config that
+        // names a version.
+        Some(match self.model.as_str() {
+            "opus" | "opus5" | "opus-5" => OPUS_5_MODEL,
+            other => other,
+        })
     }
 
     /// Can this mind actually run live? Reports the missing credential if not.
@@ -661,7 +686,7 @@ fn parse_claude_response(v: &serde_json::Value) -> Result<String, String> {
             .unwrap_or("the request was declined by a safety classifier");
         return Err(format!(
             "anthropic: {} refused the request{category}: {explanation}; set \
-             KAOS_FABLE_FALLBACK_MODEL=claude-opus-4-8 to opt into fallback",
+             KAOS_FABLE_FALLBACK_MODEL={OPUS_5_MODEL} to opt into fallback",
             v["model"].as_str().unwrap_or(FABLE_5_MODEL)
         ));
     }
@@ -803,14 +828,32 @@ mod tests {
     fn bare_tokens_route_to_the_right_provider() {
         assert_eq!(Spec::parse("gpt-4o").kind, Kind::OpenAi);
         assert_eq!(Spec::parse("o3-mini").kind, Kind::OpenAi);
-        assert_eq!(Spec::parse("claude-opus-4-8").kind, Kind::ClaudeApi);
+        assert_eq!(Spec::parse("claude-opus-5").kind, Kind::ClaudeApi);
         assert_eq!(Spec::parse("qwen2.5:3b").kind, Kind::Ollama);
         assert_eq!(Spec::parse("claude").kind, Kind::ClaudeCli); // the CLI, not the API
         assert_eq!(Spec::parse("fable5").kind, Kind::ClaudeCli);
         assert_eq!(Spec::parse("fable5").model, "fable");
-        let inner = Spec::parse("claude:opus");
-        assert_eq!(inner.kind, Kind::ClaudeCli);
-        assert_eq!(inner.claude_tag(), Some("opus"));
+        // There is one Opus. Every spelling lands on the pinned id, including
+        // the bare `opus` that used to be the CLI's moving alias.
+        for alias in [
+            "claude:opus",
+            "claude:opus5",
+            "claude:opus-5",
+            "opus",
+            "opus5",
+            "opus-5",
+        ] {
+            let spec = Spec::parse(alias);
+            assert_eq!(spec.kind, Kind::ClaudeCli, "alias {alias}");
+            assert_eq!(spec.canonical(), "claude:opus5", "alias {alias}");
+            assert_eq!(
+                spec.claude_tag(),
+                Some(OPUS_5_MODEL),
+                "{alias} must reach the CLI as the exact id it understands"
+            );
+        }
+        // The API route is unaffected: `anthropic:opus5` is still the HTTP path.
+        assert_eq!(Spec::parse("anthropic:opus5").kind, Kind::ClaudeApi);
         let fable = Spec::parse("claude:fable");
         assert_eq!(fable.kind, Kind::ClaudeCli);
         assert_eq!(fable.claude_tag(), Some("fable"));
@@ -831,6 +874,17 @@ mod tests {
         let api_fable = Spec::parse("anthropic:fable5");
         assert_eq!(api_fable.kind, Kind::ClaudeApi);
         assert_eq!(api_fable.model, FABLE_5_MODEL);
+        for alias in ["anthropic:opus", "anthropic:opus5", "claude-api:opus-5"] {
+            let spec = Spec::parse(alias);
+            assert_eq!(spec.kind, Kind::ClaudeApi, "alias {alias}");
+            assert_eq!(spec.model, OPUS_5_MODEL, "alias {alias}");
+        }
+        // `claude:opus` routes through the CLI, and its short spelling now
+        // pins Opus 5 rather than naming the CLI's moving alias.
+        let cli_opus = Spec::parse("claude:opus");
+        assert_eq!(cli_opus.kind, Kind::ClaudeCli);
+        assert_eq!(cli_opus.model, "opus5");
+        assert_eq!(cli_opus.claude_tag(), Some(OPUS_5_MODEL));
         assert_eq!(Spec::parse("chatgpt").kind, Kind::OpenAi);
         assert_eq!(Spec::parse("openai").model, "gpt-4o");
         assert_eq!(Spec::parse("openrouter").kind, Kind::OpenRouter);
@@ -874,10 +928,10 @@ mod tests {
     #[test]
     fn claude_response_ignores_fallback_boundaries_and_joins_text() {
         let response = serde_json::json!({
-            "model": "claude-opus-4-8",
+            "model": OPUS_5_MODEL,
             "stop_reason": "end_turn",
             "content": [
-                {"type": "fallback", "from": {"model": FABLE_5_MODEL}, "to": {"model": "claude-opus-4-8"}},
+                {"type": "fallback", "from": {"model": FABLE_5_MODEL}, "to": {"model": OPUS_5_MODEL}},
                 {"type": "text", "text": " completed "}
             ]
         });

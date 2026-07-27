@@ -1,0 +1,60 @@
+; Host in the loop: the program does the work, and YOU decide when it is done.
+;
+; `(& port body)` is the only way a value reaches a program from outside it, and
+; `std/seam` gives that pattern its names. Here it is the loop's stop rule. Each
+; round the run pauses in an AWAITING INPUT state — a healthy pause, not a
+; failure, like a program waiting for a message — and you send `1` to accept the
+; draft or `0` to send it round again.
+;
+; The verdict costs no model call. A port used where a value flows just hands
+; over what the host delivered. That is the whole reason to gate on a port
+; instead of on a judge prompt: a model asked "is this good enough?" is reading
+; the very answer it is judging and can be talked round by it. You cannot.
+;
+; WHERE THE VERDICT GOES. In the terminal: `/run`, then `/runs`, select the
+; awaiting run and press Enter — that opens an input line, and Enter delivers the
+; value to the port and resumes the run where it stopped. That is the only way in.
+; `/record FILE` does NOT feed a port: a record is evidence for scoring, and it
+; reaches the run as its record, not as an input.
+;
+; In the visual editor: run it, then open Runs. A waiting run shows the port it
+; is stopped on with a box beside it; type the value and press Enter or click
+; send. Its RECORD / INPUT box is the record, the same as above — not a port.
+;
+; One constraint there: a DRY run is evaluated without an input seam at all, so
+; ports only work in the direct or chaos modes. A dry run reports the port
+; unavailable instead of waiting for you.
+;
+; With nothing wired at all the port is unbound, the gate sees neither 0 nor 1,
+; and the run stops on an InvalidCondition after a single call — it cannot spin.
+; A loop gated by a port is only as alive as its host.
+;
+; THE COST, MEASURED. Three rounds is three verdicts from you and nine model
+; calls — not three. `std-loop` splices its value into both the stop test and the
+; continuation (std/loops documents this), so every round re-runs the whole chain
+; that produced the draft. The language has no variables, so the loop cannot hold
+; the draft between the test and the branch. Budget for that before putting
+; expensive work inside a loop.
+;
+; If you do not need to SEE each draft before deciding, gate on the port before
+; the work instead — `(& seam (% seam done (again …)))` — and three rounds costs
+; three calls. You are then choosing how many rounds to run, not judging what
+; each one produced.
+
+(# std/loops)
+(# std/seam)
+
+; One round of work.
+(~ tighten (draft)
+  (-> draft
+      "Tighten this by one pass: same meaning, fewer words, nothing lost."))
+
+; The stop rule is you. `std-received` runs the work and then takes your
+; delivered value as its answer, so you see the draft before you reply.
+(~ accepted (draft)
+  (std-received draft))
+
+(std-loop
+  "Write one plain paragraph explaining what an input port is for."
+  tighten
+  accepted)

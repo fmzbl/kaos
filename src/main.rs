@@ -208,7 +208,15 @@ fn main() {
         args[1..].join(" ")
     };
     match cmd {
-        "repl" | "chat" => repl(),
+        "repl" => repl(),
+        "chat" => {
+            if rest.trim().is_empty() {
+                repl();
+            } else {
+                code_task(&session, &rest, true);
+            }
+        }
+        "request" => request_cmd(&session, &rest),
         "cast" | "summon" => cast(&mut session, &rest),
         "attach" | "file" => attach_cmd(&mut session, &rest),
         "auth" | "login" => auth_cmd(&rest),
@@ -1520,6 +1528,18 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             "--dry" => dry = true,
             "--allow-tools" => allow_tools = true,
             "--chaos" => chaos = true,
+            // An unknown flag is a mistake, not a program. Falling through
+            // silently made `--model x prog.rebis` parse as Rebis SOURCE and
+            // report success having run nothing — the failure looked exactly
+            // like a program that legitimately produced no output.
+            unknown if unknown.starts_with("--") => {
+                eprintln!(
+                    "rebis: unknown flag `{unknown}`\n\
+                     usage: kaos rebis run [--dry] [--allow-tools] [--chaos] <program-or-file>\n\
+                     the model is chosen with KAOS_MODEL, e.g. KAOS_MODEL=claude:opus5"
+                );
+                std::process::exit(2);
+            }
             _ => break,
         }
         source_arg = rest;
@@ -1582,6 +1602,13 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             } => {
                 let head = prompt.lines().next().unwrap_or_default();
                 println!("event    prompt started · abstraction {abstraction} · {head}");
+                // Keep the complete routed prompt in the stream. The first
+                // line remains the compact event heading used by the terminal;
+                // continuation lines let visual mode recover the exact bytes
+                // (including input/context) instead of hashing only a preview.
+                for line in prompt.lines().skip(1) {
+                    println!("prompt   {line}");
+                }
             }
             ExecutionEvent::PromptFinished(firing) => {
                 for line in firing.answer.as_deref().unwrap_or("nothing").lines() {
@@ -1599,8 +1626,8 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
                 println!("event    mediator started · {branches} branch(es)");
             }
             ExecutionEvent::BranchSelected { decision } => println!(
-                "event    conditional selected {} branch",
-                if *decision { "yes" } else { "no" }
+                "event    binary gate selected {} branch",
+                if *decision { "1" } else { "0" }
             ),
             ExecutionEvent::MediatorResolved { result, holonomy } => println!(
                 "event    mediator resolved deterministically · result {result} · holonomy {holonomy}%"
@@ -1731,6 +1758,140 @@ fn code_cmd(session: &Session, arg: &str) {
     )
 }
 
+/// `kaos request chat <task>` is the explicit shell spelling for one streamed
+/// conversation turn. `kaos chat <task>` is the shorter alias; bare `kaos chat`
+/// remains the interactive REPL for backwards compatibility. Rebis requests
+/// are accepted here as an alias too, so shell scripts can use one request
+/// namespace for both surfaces.
+fn request_cmd(session: &Session, arg: &str) {
+    let mut parts = arg.trim().splitn(2, char::is_whitespace);
+    let kind = parts.next().unwrap_or_default();
+    let rest = parts.next().unwrap_or_default().trim();
+    match kind {
+        "chat" if !rest.is_empty() => code_task(session, rest, true),
+        "chat" => {
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() {
+                eprintln!("usage: kaos request chat <task>");
+                return;
+            }
+            let mut task = String::new();
+            if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut task) {
+                eprintln!("could not read chat request from stdin: {error}");
+                return;
+            }
+            if task.trim().is_empty() {
+                eprintln!("usage: kaos request chat <task> (or pipe the task on stdin)");
+            } else {
+                code_task(session, &task, true);
+            }
+        }
+        "rebis" if !rest.is_empty() => rebis_cmd(session, rest),
+        "rebis" => eprintln!(
+            "usage: kaos request rebis run [--dry] [--allow-tools] [--chaos] <program-or-file>"
+        ),
+        _ => eprintln!(
+            "usage: kaos request chat <task> | rebis run [--dry] [--allow-tools] [--chaos] <program-or-file>"
+        ),
+    }
+}
+
+/// Render one literal chat task. Shell callers receive a flushed live trace and
+/// then the cleaned assistant answer; interactive terminal and visual chat set
+/// `KAOS_CHAT_OUTPUT` so this boundary stays final-answer-only for their child
+/// transport.
+fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
+    // The TUI and visual editor set this private flag because they collect the
+    // child output into a durable assistant turn. A direct shell request leaves
+    // it unset and receives the live trace below.
+    let stream = !matches!(
+        std::env::var("KAOS_CHAT_OUTPUT").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    );
+    let result = if spec.kind == Kind::ClaudeCli {
+        if stream {
+            let mut emit = |line: &str| {
+                for rendered in kaos::backend::claude_event_lines(line) {
+                    println!("chat    {rendered}");
+                }
+                let _ = io::stdout().flush();
+            };
+            kaos::backend::run_claude_chat_with_result_stream(
+                root,
+                task,
+                spec.claude_tag(),
+                &mut emit,
+            )
+        } else {
+            kaos::backend::run_claude_chat_with_result(root, task, spec.claude_tag())
+        }
+    } else {
+        let model_label = spec.label();
+        let timeout_s = chat_timeout_s();
+        let mut on_model_call = |turn: usize| {
+            if stream {
+                println!(
+                    "chat    model turn {turn} · {} · limit {timeout_s}s",
+                    model_label
+                );
+                let _ = io::stdout().flush();
+            }
+        };
+        let mut on_model_reply = |turn: usize, response: &str| {
+            if stream {
+                println!("chat    model turn {turn} · response");
+                for line in response.lines() {
+                    println!("chat      {line}");
+                }
+                let _ = io::stdout().flush();
+            }
+        };
+        let mut step = 0usize;
+        let mut on_step = |event: &kaos::conductor::Step| {
+            if stream {
+                step += 1;
+                render_step(step, event);
+                let _ = io::stdout().flush();
+            }
+        };
+        let session = run_session_with_timeout(
+            root,
+            task,
+            spec,
+            kaos::backend::Sampling::default(),
+            max_steps(),
+            timeout_s,
+            None,
+            SessionObservers {
+                on_model_call: &mut on_model_call,
+                on_model_reply: &mut on_model_reply,
+                on_step: &mut on_step,
+            },
+        );
+        match (session.error, session.final_message) {
+            (Some(error), _) => Err(error),
+            (None, answer) if !answer.trim().is_empty() => Ok(answer),
+            (None, _) => Err("the chat mind returned no answer".to_string()),
+        }
+    };
+    match result {
+        Ok(answer) => {
+            let answer = kaos_core::chat::clean_chat_reply(&answer);
+            if !answer.is_empty() {
+                if stream {
+                    println!("chat    final answer");
+                }
+                println!("{answer}");
+            }
+            let _ = io::stdout().flush();
+        }
+        Err(error) => {
+            println!("chat error: {}", kaos_core::chat::clean_chat_reply(&error));
+            let _ = io::stdout().flush();
+        }
+    }
+}
+
 /// `raw_task` marks `arg` as one literal chat intent for the current directory,
 /// bypassing the `/code` grammar (`[dir] [xK] task -- gate`) so text containing
 /// ` -- `, an `x3` token, or a directory-looking word is never rewritten or
@@ -1830,6 +1991,11 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
     }
 
     let root_path = std::path::PathBuf::from(&root);
+    if raw_chat_task {
+        chat_task(&root_path, &task, &spec);
+        return;
+    }
+
     println!();
     println!("  {}  {}", bold(RED(), "CONDUCT"), bone(&task));
     println!(
@@ -2456,7 +2622,7 @@ fn code_conclave(
 const GREEN: (u8, u8, u8) = (90, 200, 110);
 const REMOVE: (u8, u8, u8) = (210, 70, 70);
 const AMBER: (u8, u8, u8) = (220, 150, 60);
-const VIOLET: (u8, u8, u8) = (150, 130, 200);
+const AZURE: (u8, u8, u8) = (74, 124, 240);
 
 fn render_step(n: usize, step: &Step) {
     let idx = dim(ASH(), &format!("{n:>2}"));
@@ -2472,7 +2638,7 @@ fn render_step(n: usize, step: &Step) {
         {
             println!(
                 "     {}",
-                dim(VIOLET, &format!("\u{263d} {}", trunc_line(line.trim(), 92)))
+                dim(AZURE, &format!("\u{263d} {}", trunc_line(line.trim(), 92)))
             );
         }
     }
@@ -2481,7 +2647,7 @@ fn render_step(n: usize, step: &Step) {
             println!(
                 "  {} {} {}",
                 idx,
-                fg(VIOLET, "\u{25cb} read"),
+                fg(AZURE, "\u{25cb} read"),
                 dim(ASH(), path)
             );
         }
@@ -2526,6 +2692,21 @@ fn render_step(n: usize, step: &Step) {
                 "     {} {}",
                 fg(colour, "\u{2192}"),
                 dim(ASH(), &one_line(&line, 88))
+            );
+        }
+        Tool::Timer { after, note } => {
+            // The run is about to go quiet, so the reason is the whole line:
+            // otherwise the silence that follows looks like a stall.
+            println!(
+                "  {} {} {}",
+                idx,
+                fg(AMBER, "\u{23f0} timer"),
+                bone(&one_line(after, 12))
+            );
+            println!(
+                "     {} {}",
+                dim(ASH(), "\u{2192}"),
+                dim(ASH(), &one_line(note, 88))
             );
         }
         Tool::Finish { message } => {
@@ -2584,6 +2765,7 @@ fn render_step_detail(n: usize, step: &Step) {
         Tool::EditFile { path, .. } => format!("edit {path}"),
         Tool::WriteFile { path, .. } => format!("write {path}"),
         Tool::Bash { cmd } => format!("$ {}", one_line(cmd, 48)),
+        Tool::Timer { after, .. } => format!("timer {after}"),
         Tool::Finish { .. } => "finish".to_string(),
     };
     kaos::fold::open(&dim(
@@ -2591,7 +2773,7 @@ fn render_step_detail(n: usize, step: &Step) {
         &format!("    \u{22ef} step {n} in full \u{2014} {title}"),
     ));
     if !step.thought.is_empty() {
-        println!("  {}", fg(VIOLET, "\u{263d} complete model text:"));
+        println!("  {}", fg(AZURE, "\u{263d} complete model text:"));
         for l in step.thought.lines() {
             println!("    {}", dim(ASH(), l));
         }
@@ -2629,6 +2811,10 @@ fn render_step_detail(n: usize, step: &Step) {
             for l in step.observation.lines() {
                 println!("    {}", dim(ASH(), l));
             }
+        }
+        Tool::Timer { note, .. } => {
+            println!("  {}", ash(&format!("waiting for: {note}")));
+            println!("    {}", dim(ASH(), step.observation.trim()));
         }
         Tool::Finish { message } => {
             println!("  {}", ash(&format!("declared done: {message}")));
@@ -2883,6 +3069,10 @@ fn models_cmd(session: &Session, arg: &str) {
             "claude:opus",
             "Opus \u{2014} deepest; the Magus, spend it where it counts",
         ),
+        (
+            "claude:opus5",
+            "Opus 5 \u{2014} the same, pinned to the version rather than the alias",
+        ),
         ("claude:haiku", "Haiku \u{2014} cheapest and quickest"),
         (
             "claude:fable",
@@ -2910,7 +3100,7 @@ fn models_cmd(session: &Session, arg: &str) {
     );
     for tok in [
         "anthropic:claude-sonnet-4-5",
-        "anthropic:claude-opus-4-8",
+        "anthropic:claude-opus-5",
         "anthropic:claude-haiku-4-5",
     ] {
         println!(
@@ -3087,7 +3277,7 @@ fn openrouter_catalog(_mark: &dyn Fn(&str) -> String) {
 /// /model — bind the mind the rites summon. `/model` alone reveals the current
 /// binding, the reachable providers, and local ollama models. Set with a provider
 /// name (with optional model) or a bare model tag:
-///   sim · claude[:sonnet|opus|haiku|fable] · openai[:gpt-4o] · anthropic[:model] · ollama[:model] · gpt-4o …
+///   sim · claude[:sonnet|opus|opus5|haiku|fable] · openai[:gpt-4o] · anthropic[:model] · ollama[:model] · gpt-4o …
 fn model_cmd(session: &mut Session, arg: &str) {
     let arg = arg.trim();
     if arg.is_empty() {
@@ -3116,7 +3306,7 @@ fn model_cmd(session: &mut Session, arg: &str) {
                 println!("  {} {}", ash("local"), dim(ASH(), &models.join("  ")));
             }
         }
-        println!("  {}", dim(ASH(), "bind: /model claude[:sonnet|opus|haiku|fable] | openai[:gpt-4o] | anthropic[:model] | openrouter[:vendor/model] | ollama:qwen2.5:3b | sim"));
+        println!("  {}", dim(ASH(), "bind: /model claude[:sonnet|opus|opus5|haiku|fable] | openai[:gpt-4o] | anthropic[:model] | openrouter[:vendor/model] | ollama:qwen2.5:3b | sim"));
         return;
     }
     // A provider + optional model given as two words ("openai gpt-4o") folds into
@@ -3340,7 +3530,7 @@ fn print_help() {
         ),
         (
             "/model [provider[:model]]",
-            "bind the mind — claude[:sonnet|opus] · openai · anthropic · ollama · sim",
+            "bind the mind — claude[:sonnet|opus|opus5] · openai · anthropic · ollama · sim",
         ),
         (
             "/models",

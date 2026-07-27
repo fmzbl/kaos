@@ -30,11 +30,31 @@ pub(crate) struct Run {
     paused_at: Option<Instant>,
     paused_total: Duration,
     temp_source: Option<PathBuf>,
+    /// Where this run's child looks for a value delivered to an `&` port. One
+    /// file per run, named in the child's environment; see
+    /// [`kaos_workspace::rebis_inlet`] for the one-delivery-per-file protocol.
+    inlet_path: Option<PathBuf>,
+    /// What the reader is typing for the port this run is stopped on. Held per
+    /// run so switching between two waiting runs cannot deliver one's answer to
+    /// the other.
+    pub(crate) input_draft: String,
 }
 
 impl Run {
     pub(crate) const fn parallel(&self) -> bool {
         self.lane.parallel()
+    }
+
+    /// The `&` port this run is stopped waiting on, if it is waiting on one.
+    ///
+    /// A run pauses for several reasons — a transient provider error, a manual
+    /// pause — and only this one can be answered, so the port name is what
+    /// distinguishes "waiting for you" from "waiting for something else".
+    pub(crate) fn awaiting_port(&self) -> Option<&str> {
+        if !self.paused {
+            return None;
+        }
+        kaos_workspace::rebis_inlet::awaited_port(self.pause_reason.as_deref()?)
     }
 
     pub(crate) fn preview(&self) -> String {
@@ -69,6 +89,37 @@ impl Run {
             total % 60,
             duration.subsec_millis() / 100
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture(
+        id: u64,
+        source: impl Into<String>,
+        input: impl Into<String>,
+        output: Vec<String>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            id,
+            source: source.into(),
+            input: input.into(),
+            scope: Scope::Program,
+            lane: Lane::Serial,
+            mode: Mode::Dry,
+            state: State::Complete,
+            output,
+            expanded: false,
+            queued_at: now,
+            started_at: Some(now),
+            elapsed: Some(Duration::from_secs(1)),
+            paused: false,
+            pause_reason: None,
+            paused_at: None,
+            paused_total: Duration::ZERO,
+            temp_source: None,
+            inlet_path: None,
+            input_draft: String::new(),
+        }
     }
 }
 
@@ -117,7 +168,10 @@ impl Drop for Desk {
             job.kill();
         }
         for run in &self.runs {
-            if let Some(path) = &run.temp_source {
+            for path in [run.temp_source.as_ref(), run.inlet_path.as_ref()]
+                .into_iter()
+                .flatten()
+            {
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -160,6 +214,8 @@ impl Desk {
             paused_at: None,
             paused_total: Duration::ZERO,
             temp_source: None,
+            inlet_path: None,
+            input_draft: String::new(),
         });
         self.selected = Some(id);
         if needs_permission {
@@ -268,14 +324,33 @@ impl Desk {
             }
         }
         args.push(path.display().to_string());
+        // The child stops at an `&` port and waits to be handed a value. That
+        // needs three things in its environment: permission to stop at all, the
+        // file to look in, and — since it owns a process group — the knowledge
+        // that stopping means stopping its descendants too, so a model call in
+        // flight halts with it.
+        let inlet_path =
+            std::env::temp_dir().join(format!("kaos-visual-inlet-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_file(&inlet_path);
         let launch = Launch {
             program: kaos_executable(),
             args,
             cwd: cwd.to_path_buf(),
-            env: vec![(
-                "KAOS_MODEL".to_string(),
-                kaos_core::config::value("KAOS_MODEL").unwrap_or_else(|| "sim".to_string()),
-            )],
+            env: vec![
+                (
+                    "KAOS_MODEL".to_string(),
+                    kaos_core::config::value("KAOS_MODEL").unwrap_or_else(|| "sim".to_string()),
+                ),
+                (kaos_agent::pause::ENABLE_ENV.to_string(), "1".to_string()),
+                (
+                    kaos_agent::pause::PROCESS_GROUP_ENV.to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    kaos_workspace::rebis_inlet::INLET_PATH_ENV.to_string(),
+                    inlet_path.display().to_string(),
+                ),
+            ],
             stdin: Some(input),
             process_group: true,
         };
@@ -285,6 +360,7 @@ impl Desk {
                 self.jobs.push(job);
                 let run = &mut self.runs[index];
                 run.temp_source = Some(path);
+                run.inlet_path = Some(inlet_path);
                 run.state = State::Running;
                 run.started_at.get_or_insert_with(Instant::now);
                 run.elapsed = None;
@@ -324,7 +400,26 @@ impl Desk {
                 match event {
                     Event::Line(line) => {
                         if let Some(run) = self.runs.iter_mut().find(|run| run.id == job.id) {
-                            run.output.push(line);
+                            // The child announces a stop on a private marker
+                            // line, then suspends itself. Consume the marker —
+                            // it is protocol, not output — and record the stop,
+                            // so the pane can tell a run waiting for the reader
+                            // from one that is simply working.
+                            match kaos_agent::pause::marker_reason(&line) {
+                                Some(reason) => {
+                                    pause_clock(run, reason);
+                                    let readable = match kaos_workspace::rebis_inlet::awaited_port(
+                                        reason,
+                                    ) {
+                                        Some(port) => format!(
+                                            "awaiting    ⌷ input on port {port} · type a value and send"
+                                        ),
+                                        None => format!("paused      ⏸ {reason}"),
+                                    };
+                                    run.output.push(readable);
+                                }
+                                None => run.output.push(line),
+                            }
                             changed = true;
                         }
                     }
@@ -357,6 +452,12 @@ impl Desk {
                         "paused      process exited {code} · Resume retries from the captured source"
                     ));
                 }
+                if let Some(path) = run.inlet_path.take() {
+                    let _ = std::fs::remove_file(path);
+                }
+                if let Some(path) = run.inlet_path.take() {
+                    let _ = std::fs::remove_file(path);
+                }
                 if let Some(path) = run.temp_source.take() {
                     let _ = std::fs::remove_file(path);
                 }
@@ -366,6 +467,43 @@ impl Desk {
             self.start_ready_in(cwd);
         }
         changed
+    }
+
+    /// Hand `value` to the `&` port run `id` is stopped on, and let it continue.
+    ///
+    /// Delivery is a file the child re-reads when it wakes, so the value must be
+    /// in place BEFORE the resume signal — a child resumed with nothing waiting
+    /// parks itself again, and the reader would see nothing happen. Returns
+    /// whether the run was actually waiting and the value was delivered.
+    pub(crate) fn deliver_input(&mut self, id: u64, value: &str) -> bool {
+        let Some(index) = self.runs.iter().position(|run| run.id == id) else {
+            return false;
+        };
+        let Some(port) = self.runs[index].awaiting_port().map(str::to_string) else {
+            self.notice = Some(format!("run #{id} is not waiting for input"));
+            return false;
+        };
+        let Some(path) = self.runs[index].inlet_path.clone() else {
+            self.notice = Some(format!("run #{id} has no input seam"));
+            return false;
+        };
+        if let Err(error) = kaos_workspace::rebis_inlet::deliver(&path, &port, value) {
+            self.notice = Some(format!("could not deliver input to run #{id}: {error}"));
+            return false;
+        }
+        // Only now wake it.
+        if let Some(job) = self.jobs.iter().find(|job| job.id == id) {
+            if !job.signal("-CONT") {
+                self.notice = Some(format!("delivered, but could not resume run #{id}"));
+                return false;
+            }
+        }
+        let run = &mut self.runs[index];
+        resume_clock(run);
+        run.input_draft.clear();
+        run.output
+            .push(format!("received    ⌷ {port} ← {}", one_line(value)));
+        true
     }
 
     pub(crate) fn toggle_pause_selected(&mut self, cwd: &Path) {
@@ -454,6 +592,9 @@ impl Desk {
             self.notice = Some("cancel a running run before removing it".to_string());
             return;
         }
+        if let Some(path) = self.runs[index].inlet_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
         if let Some(path) = self.runs[index].temp_source.take() {
             let _ = std::fs::remove_file(path);
         }
@@ -472,6 +613,10 @@ impl Desk {
     pub(crate) fn selected_run_mut(&mut self) -> Option<&mut Run> {
         let id = self.selected?;
         self.runs.iter_mut().find(|run| run.id == id)
+    }
+
+    pub(crate) fn has_live_process(&self, id: u64) -> bool {
+        self.jobs.iter().any(|job| job.id == id)
     }
 
     pub(crate) fn has_active(&self) -> bool {
@@ -525,6 +670,17 @@ fn finish_clock(run: &mut Run) {
     run.paused_at = None;
 }
 
+/// A delivered value collapsed to one readable line for the run's trace. The
+/// value itself already reached the child; this is only the record of it.
+fn one_line(value: &str) -> String {
+    let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 60 {
+        format!("{}…", flat.chars().take(60).collect::<String>())
+    } else {
+        flat
+    }
+}
+
 fn pause_clock(run: &mut Run, reason: &str) {
     if run.paused {
         return;
@@ -569,6 +725,183 @@ pub(crate) fn kaos_executable() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run stopped on a port, as the child's own pause protocol would leave it.
+    fn desk_awaiting_input(port: &str) -> (Desk, u64, PathBuf) {
+        let mut desk = Desk::default();
+        let id = desk.submit("\"work\"".to_string(), None, Path::new("."));
+        let inlet = std::env::temp_dir().join(format!(
+            "kaos-visual-inlet-test-{}-{id}-{port}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&inlet);
+        let run = desk.runs.iter_mut().find(|run| run.id == id).expect("run");
+        run.state = State::Running;
+        run.inlet_path = Some(inlet.clone());
+        pause_clock(run, &kaos_workspace::rebis_inlet::await_reason(port));
+        (desk, id, inlet)
+    }
+
+    /// The whole seam across a real process boundary, without a model.
+    ///
+    /// A live `kaos rebis run` refuses the simulated mind, so the child here is a
+    /// stand-in that speaks the same protocol the real one does: announce the
+    /// stop on the marker line, suspend itself, and on waking read the delivery
+    /// file. What is under test is this side of it — the environment handed over,
+    /// the marker parsed, the value written before the resume, and the signal
+    /// that lands.
+    #[test]
+    fn a_real_child_stops_on_a_port_and_continues_with_the_value_delivered() {
+        let inlet =
+            std::env::temp_dir().join(format!("kaos-visual-inlet-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_file(&inlet);
+        let reason = kaos_workspace::rebis_inlet::await_reason("topic");
+        let script = format!(
+            "printf '{}{reason}\\n'; kill -STOP $$; cat \"$KAOS_REBIS_INLET\"",
+            kaos_agent::pause::PAUSED_MARKER
+        );
+        let job = Job::spawn(
+            1,
+            Launch {
+                program: PathBuf::from("sh"),
+                args: vec!["-c".to_string(), script],
+                cwd: std::env::current_dir().expect("cwd"),
+                env: vec![(
+                    kaos_workspace::rebis_inlet::INLET_PATH_ENV.to_string(),
+                    inlet.display().to_string(),
+                )],
+                stdin: None,
+                process_group: true,
+            },
+        )
+        .expect("spawn");
+
+        // Wait for the stop to be announced.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        let mut port = None;
+        while Instant::now() < deadline && port.is_none() {
+            for event in job.drain() {
+                if let Event::Line(line) = event {
+                    if let Some(reason) = kaos_agent::pause::marker_reason(&line) {
+                        port =
+                            kaos_workspace::rebis_inlet::awaited_port(reason).map(str::to_string);
+                    }
+                    seen.push(line);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            port.as_deref(),
+            Some("topic"),
+            "the child announced its wait: {seen:?}"
+        );
+
+        // The value goes in first; only then is the child woken.
+        kaos_workspace::rebis_inlet::deliver(&inlet, "topic", "delivered value").expect("deliver");
+        assert!(job.signal("-CONT"), "the child must accept the resume");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut echoed = false;
+        while Instant::now() < deadline && !echoed {
+            for event in job.drain() {
+                if let Event::Line(line) = event {
+                    echoed |= line.contains("delivered value");
+                    seen.push(line);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            echoed,
+            "the woken child read the value from its inlet: {seen:?}"
+        );
+        let _ = std::fs::remove_file(&inlet);
+    }
+
+    #[test]
+    fn the_pause_marker_becomes_a_waiting_run_and_never_reaches_the_output() {
+        // The marker is the child's private protocol. Left in the stream it
+        // would be shown to the reader as line noise AND the run would look busy
+        // rather than waiting, so the input box would never appear.
+        let mut desk = Desk::default();
+        let id = desk.submit("\"work\"".to_string(), None, Path::new("."));
+        let reason = kaos_workspace::rebis_inlet::await_reason("topic");
+        let line = format!("{}{reason}", kaos_agent::pause::PAUSED_MARKER);
+
+        let run = desk.runs.iter_mut().find(|run| run.id == id).expect("run");
+        match kaos_agent::pause::marker_reason(&line) {
+            Some(reason) => pause_clock(run, reason),
+            None => panic!("the marker must be recognised"),
+        }
+
+        let run = &desk.runs[0];
+        assert_eq!(run.awaiting_port(), Some("topic"));
+        assert!(
+            !run.output
+                .iter()
+                .any(|line| line.contains(kaos_agent::pause::PAUSED_MARKER)),
+            "the marker is consumed, not shown: {:?}",
+            run.output
+        );
+    }
+
+    #[test]
+    fn a_pause_that_is_not_an_await_offers_no_input_box() {
+        // Runs also pause for transient provider errors and by hand. Those are
+        // waiting for something other than a person and cannot be answered.
+        let mut desk = Desk::default();
+        let id = desk.submit("\"work\"".to_string(), None, Path::new("."));
+        let run = desk.runs.iter_mut().find(|run| run.id == id).expect("run");
+        pause_clock(run, "rate limited · retrying");
+        assert_eq!(desk.runs[0].awaiting_port(), None);
+    }
+
+    #[test]
+    fn delivering_input_writes_the_value_for_the_port_and_clears_the_wait() {
+        // The value must be in the file BEFORE the child is resumed, or it wakes,
+        // finds nothing, and parks again.
+        let (mut desk, id, inlet) = desk_awaiting_input("topic");
+        assert!(desk.deliver_input(id, "the Rebis input port"));
+
+        // Written in the protocol's shape: the port names itself on line one.
+        let written = std::fs::read_to_string(&inlet).expect("delivery file");
+        assert_eq!(written, "topic\nthe Rebis input port");
+        // And it is what the child would take for that port, and only that port.
+        assert_eq!(
+            kaos_workspace::rebis_inlet::take_input(&inlet, "other"),
+            None,
+            "another port must not consume this delivery"
+        );
+        assert_eq!(
+            kaos_workspace::rebis_inlet::take_input(&inlet, "topic").as_deref(),
+            Some("the Rebis input port")
+        );
+
+        let run = &desk.runs[0];
+        assert!(!run.paused, "the run is no longer waiting");
+        assert_eq!(run.awaiting_port(), None);
+        assert!(
+            run.input_draft.is_empty(),
+            "the box is emptied after sending"
+        );
+        assert!(
+            run.output.iter().any(|line| line.contains("topic ←")),
+            "the delivery is recorded on the run: {:?}",
+            run.output
+        );
+        let _ = std::fs::remove_file(&inlet);
+    }
+
+    #[test]
+    fn a_run_that_is_not_waiting_refuses_a_delivery() {
+        let mut desk = Desk::default();
+        let id = desk.submit("\"work\"".to_string(), None, Path::new("."));
+        assert!(!desk.deliver_input(id, "unasked for"));
+        assert!(desk.notice.is_some(), "the refusal says why");
+        assert!(!desk.deliver_input(id + 999, "no such run"));
+    }
 
     #[test]
     fn serial_runs_queue_while_parallel_runs_are_independent() {

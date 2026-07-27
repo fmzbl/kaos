@@ -2,9 +2,13 @@
 
 Kaos hosts Rebis through the currently selected model. Quoted strings are raw
 prompts, bare atoms are Lisp-like symbols, `~` defines structural macros, arrows route
-answers, and `[M]` contains executable mediator code. `($ ...)` interpolates a
-string from the text of its operands (nothing inside it fires); variables are
-macro parameters, and a text constant is simply a macro whose body is a prompt.
+answers, `[M]` contains executable mediator code, and `(% C A B)` is the lazy
+binary gate that evaluates only `A` or `B` from an exact `1`/`0` decision.
+`($ ...)` interpolates a string from
+the text of its operands (nothing inside it fires); standard control macros use
+that form to tell a decision prompt to reply with exactly one `0` or `1`
+token. Variables are macro parameters, and a text constant is simply a macro
+whose body is a prompt.
 `(^ E)` purely dualizes syntax orientation by recursively exchanging `->` and
 `<-`; it makes no model call and applying it twice returns `E`.
 
@@ -14,7 +18,8 @@ executing Rebis agent. Chat can therefore explain, debug, and write
 Rebis, while executing nodes understand the surrounding language without
 depending on the selected model's prior knowledge. That reference is also the
 concise example cookbook for higher-order macros, deep mediators,
-standard-library strategies, lazy routing, and bounded recursive refinement.
+standard-library strategies, `%`-based lazy routing, and bounded recursive
+refinement.
 
 Rebis is the default Kaos screen. Press `Ctrl-K` to open the command palette.
 The legacy `Ctrl-/` chord is still recognized too (including the `Ctrl-_` and
@@ -167,9 +172,10 @@ the folders that contain matches. The source editor stays visible while
 results occupy the scrollable visualization panel.
 
 The embedded standard library appears as the `std` folder. Expand it (Tab, or
-`/sigils std/`) to see its fourteen modules, then Enter (or
+`/sigils std/`) to see its twenty-two modules, then Enter (or
 `/sigil open std/spread`) loads one into the editor as a copy — its inline
-comments are the documentation. The `std/` name itself stays read-only:
+comments are the documentation, and they carry a contract for every parameter,
+a cost note, and an example per macro. The `std/` name itself stays read-only:
 `/sigil save std/...` is refused, so edits are saved under a new name.
 The visual Sigils tab reads the same catalog: `std/` modules can be drawn,
 opened as read-only source copies, searched, and attached to chat, but never
@@ -186,7 +192,7 @@ top-level `~` definitions without executing the module:
 
 Kaos resolves `(# repair-tools)` from
 `~/.kaos/sigils/repair-tools.rebis`. Qualified paths such as `std/loops` are
-supported by the same mechanism. `(# std)` imports all fourteen embedded
+supported by the same mechanism. `(# std)` imports all twenty-two embedded
 standard-library modules; `(# std/flow)` still imports only that exact module.
 Modules may contain only top-level macro definitions and nested `#` imports;
 missing modules, cycles, parse failures, and executable module bodies are
@@ -225,26 +231,27 @@ Named macros can be passed as arguments:
 
 Kaos executes the structurally expanded program using the selected model. Since
 macros can repeat arguments and worker calls, production configurations
-should retain model-call, token, cost, and time limits.
+should retain model-call, token, cost, and time limits. The complete setting
+reference, including provider, agent, transcript, and visual-editor options,
+is in [`CONFIGURATION.md`](CONFIGURATION.md).
 
 ## Macro loops
 
-Macros may call themselves. A two-branch square with a macro call inside its
-brackets evaluates that call first as a `yes`/`no` condition and executes only
-the selected branch:
+Macros may call themselves. A `%` gate evaluates its condition first and
+executes only the selected branch:
 
 ```rebis
 (
   (~ step (value) (-> value "Improve once."))
   (~ done (value)
-    (-> value "Is it finished? Answer exactly yes or no."))
+    (-> value "Is it finished? Answer exactly 0 or 1."))
   (~ loop (value work stop)
-    ([(stop value)] value (loop (work value) work stop)))
+    (% (stop value) value (loop (work value) work stop)))
   (loop "Initial implementation" step done))
 ```
 
-This supplies loops without adding `#`, `$`, or a dedicated loop form. The
-runtime bounds recursive macro expansion.
+This supplies loops without adding a dedicated loop form. The runtime bounds
+recursive macro expansion.
 
 The complete language manual is in the Rebis repository at `docs/GUIDE.md`,
 alongside `docs/REFERENCE.md` — a per-symbol dictionary with semantics,
@@ -297,7 +304,15 @@ program roots.
 
 An ordinary `father of` link from `A` to `B` makes `B` the next ordered
 operand of `A`. Click the father first and the child second; the grey arrow is
-drawn father → child. Operand order is link creation order, never screen position.
+drawn father → child. Children receive one-based positions `1..=n` per parent;
+link creation order supplies the default, while the selected form's `CHILD
+ORDER` controls can change the numbers without moving cells. Operand order is
+never inferred from screen position.
+For `(A B C)`, select `father of` and click the parent with `A`, the same
+parent with `B`, then the same parent with `C`; the three links become the
+ordered children. A standalone `→` or `←` is ordered the same way: place the
+arrow, then link its first child and second child in sequence. To make a flow
+with the blue shortcut, click its first operand and then its second operand.
 The `arrow` tool is a typed shorthand: drawing from `A` to `B` creates one
 real `Forward(A, B)` expression node. A `<-` loaded from source remains one
 explicit `Backflow` expression node.
@@ -307,6 +322,16 @@ proximity, overlap, apparent containment, movement, panning, marquee bounds,
 and camera projection never create source structure. Flow arrows are blue;
 `father of` edges are neutral grey.
 
+A mediator square is the one form drawn as a box, and the box takes whatever
+size the mediator code inside it needs. Its size can also be set by hand:
+press and hold within 8 world units inside a wall and drag. The centre stays
+put and the grabbed walls travel — a side wall changes the width, a corner
+both — so nothing drawn inside moves. The walls stop at the contents, which
+can never be pushed outside the box that holds them. Dragging anywhere else on
+the box still moves the box and its contents together, and a block dropped
+across a wall is still grabbed as a block. A hand-set size is presentation
+like every coordinate: the same source is generated either way.
+
 Drawing parsed source lays the syntax tree out as a left-to-right circuit:
 nesting depth is the column, so a form sits one column left of its operands,
 and a tidy row packing centres each form on the rows of the operands it drives,
@@ -314,8 +339,10 @@ so subtrees stack without overlapping. The grid cell is golden — columns are �
 the row pitch. Connections route as right-angle traces between the shapes, like
 a board wired stage to stage. This layout changes coordinates only.
 
-Selecting a node turns its attached arrows and connections purple, so its
-neighbourhood reads as one connected object. Connections default to the 90°
+Selecting a node thickens every attached edge and turns its `father of`
+connections deep blue, so its neighbourhood reads as one connected object. Flow
+arrows keep their red under selection: the hue is what distinguishes a flow from
+a structural link, and a selection is exactly when the drawing is read closest. Connections default to the 90°
 routing; holding **Shift** while you complete a connection draws that one as a
 straight angled line instead (a per-edge, presentation-only choice). A flow form
 can be selected from any point along its rendered line, not only its midpoint
@@ -355,7 +382,7 @@ the complete set as one undoable edit. **Run selection** builds the induced
 subgraph containing exactly the selected nodes and internal links, then runs it
 as a block only if that subgraph is itself an exact Rebis AST.
 
-The faint purple eight-rayed chaos star in the lower-right canvas is chrome
+The faint deep-blue eight-rayed chaos star in the lower-right canvas is chrome
 only. It is not a node, cannot be selected, never appears in generated Rebis,
 and has no runtime effect.
 
@@ -393,7 +420,8 @@ projection remains the editing surface.
 
 The mandala is scrollable. Enter `/graph`, then use `hjkl`, arrow keys, Page Up,
 Page Down, `Home`, or `g`. `Esc` returns to source focus. `/panel hide` removes
-the panel, `/panel show` restores it, and `/panel` toggles it.
+the panel, `/panel show` restores it, and `/panel` or `/panel toggle` toggles
+it.
 Vim window motions work too: `Ctrl-W l` focuses the right mandala/result panel,
 and `Ctrl-W h` returns to the source editor.
 The mouse wheel scrolls whichever pane is under the pointer: source on the left
@@ -467,8 +495,8 @@ they remain in the buffer and `gg` returns to the top.
 `/run` renders the program's returned value under `RESULT` before the complete
 `TRACE`. This follows the structural value path rather than guessing from the
 last model call: arrows return their consumer, squares return their mediator,
-conditional squares return the selected branch, and macro calls return their
-expanded program.
+`%` gates return the selected branch, and macro calls return their expanded
+program.
 
 Execution starts appearing in the right panel immediately: prompt starts and
 answers, arrow routing, macro expansion, module loads, mediator starts,
@@ -495,10 +523,13 @@ without changing the retained stream. Finished runs remain available until `u` o
 `Delete` removes them. Those keys also unqueue a waiting run while leaving chat
 messages and every other run intact. An active run cannot be removed while it
 is running.
-In the Rebis workspace, `Ctrl-C` exits Kaos, terminating every serial and
-parallel working and scattering every queued item first. (The chat screen
-treats `Ctrl-C` as cancel-first: it stops in-flight work and only exits when
-the chat is idle.)
+`Ctrl-C` is stop-first on both screens. In the Rebis workspace it terminates
+every serial and parallel working, scatters every queued item, drops any
+pending authority question, and ends any run left claiming to run with no
+subprocess behind it. Only with nothing in flight does it ask to quit: the
+first idle `Ctrl-C` arms the question, a second confirms it, and any other key
+answers "stay". (The chat screen is the same, with a typed draft as one more
+thing to clear before the ask.)
 Every header includes a live `WAIT` duration while queued or permission-gated
 and a `TIME` duration after execution starts. Completion and cancellation freeze
 that final duration in the retained run history; suspended time is excluded.
@@ -537,11 +568,13 @@ remains visible and can be removed with `u` or `Delete`. Approved agents execute
 in Kaos's current directory—the same root used by relative source paths,
 `/output write`, file edits, and commands.
 
-Kaos defaults to 256 macro expansions, 64 distinct module loads, and 1,024
-model calls per run. Override them with `KAOS_REBIS_MAX_EXPANSIONS`,
-`KAOS_REBIS_MAX_MODULES`, and `KAOS_REBIS_MAX_CALLS`; a zero value disables
-that capability. Each tool-using agent model turn has a 600-second wall-clock
-limit; set `KAOS_REBIS_TIMEOUT_S` to accommodate a slower local model.
+Kaos defaults to 256 macro expansions, 64 distinct module loads, 1,024 model
+calls per run, and four parallel square branches. Override them with
+`KAOS_REBIS_MAX_EXPANSIONS`, `KAOS_REBIS_MAX_MODULES`, `KAOS_REBIS_MAX_CALLS`,
+and `KAOS_REBIS_MAX_CONCURRENCY`. Zero disables macro expansion, imports, or
+model calls; zero concurrency means sequential evaluation. Each tool-using
+agent model turn has a 600-second wall-clock limit; set
+`KAOS_REBIS_TIMEOUT_S` to accommodate a slower local model.
 
 Use `/output` to show only the final value. `/output copy` places it in the
 embedded Vim yank register for `p`, and `/output write FILE` writes the exact

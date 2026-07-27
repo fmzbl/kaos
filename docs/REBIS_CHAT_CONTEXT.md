@@ -44,9 +44,12 @@ language but follow the node prompt and return only its flow value.
   are dropped, and executable mediator `M` receives the remaining labeled
   results. A prompt mediator calls the model; a symbol mediator judges
   deterministically without another model call.
-- A two-branch square can be conditional: when its mediator yields exactly
-  `yes` or `no`, only the selected branch expands. This is Rebis's lazy control
-  form and is what makes bounded recursive macros possible.
+- `(% condition when-one when-zero)` is the explicit lazy binary gate. It runs
+  the condition first, accepts only exact `0` or `1` (surrounding whitespace
+  ignored), and expands only the selected continuation.
+  `[]` is never conditional; it always evaluates all branches before its
+  mediator. The `std/control` wrappers route conditions through `std-binary`,
+  whose `$`-assembled instruction asks for one exact decision token.
 - `(~ name (parameters) body)` defines a structural macro. Arguments are raw
   Rebis syntax, not pre-evaluated string values. A quoted prompt passed as an
   argument remains an executable prompt wherever its parameter symbol appears.
@@ -68,13 +71,19 @@ language but follow the node prompt and return only its flow value.
   Recursive/search examples should still mention their cost.
 
 Useful editor commands are `/run`, `/run block`, `/run parallel`,
-`/run block parallel`, `/runs`, `/search [TEXT]`, `/format`, `/tree`, `/mandala`,
-`/output`, `/sigil save NAME`, and `/sigil chat`. `/sigil chat` opens a right-panel
-God Agent channel with the current source and every live bot's source, input,
-state, directive, trace, and checkpoint context. Valid source revisions rebuild
-only the bound run from its unchanged completed prompt prefix. Explicit user
-requests may pause/resume a named live run or apply/clear guidance for its next
-unfinished prompts; the channel cannot cancel or delete runs.
+`/run block parallel`, `/runs`, `/chat run ID QUESTION`, `/search [TEXT]`,
+`/format`, `/tree`, `/mandala`, `/output`, `/sigil save NAME`, and
+`/sigil chat`. In the visual editor, every source or mandala `run` button opens
+one settings modal for scope, dry/direct/chaos mode, and serial/parallel lane;
+there are no competing run buttons. `/sigil chat` opens a right-panel God Agent
+channel with the current source and every live bot's source, input, state,
+directive, trace, and checkpoint context. A run-browser `chat` action can ask
+about a running, paused, queued, or completed run; each answer receives the
+complete captured source, input, state, and retained output, not only the
+currently visible scroll window. Valid source revisions rebuild only the bound
+run from its unchanged completed prompt prefix. Explicit user requests may
+pause/resume a named live run or apply/clear guidance for its next unfinished
+prompts; the channel cannot cancel or delete runs.
 `/search TEXT` finds the next literal source
 match with wraparound; `/search` repeats the previous query. Saving a sigil also
 retains its last successful output and any unfinished run's record, trace, and
@@ -150,7 +159,7 @@ builder, so this compact program intentionally has substantial call exposure.
 (# std/spread)
 
 (~ build (task)
-  (with-evidence (-> task "Propose the smallest complete design.")))
+  (std-with-evidence (-> task "Propose the smallest complete design.")))
 
 (~ attack (task)
   (-> task "Find the strongest safety, concurrency, or operability failure."))
@@ -158,9 +167,9 @@ builder, so this compact program intentionally has substantial call exposure.
 (~ repair (task)
   (-> task "Repair the design without hiding the attack or weakening the requirements."))
 
-(best-of-three surviving-verified-design
-  (final-only
-    (red-team surviving-verified-design
+(std-best-of-three surviving-verified-design
+  (std-final-only
+    (std-red-team surviving-verified-design
       build attack repair
       "Design an idempotent retry queue for payment processing.")))
 ```
@@ -186,7 +195,7 @@ through implementation and review because `campaign` expands to an arrow.
   (-> task "Design rollout, rollback, alerts, and incident response."))
 
 (~ plan (task)
-  (chaired-panel chair strongest-operational-plan
+  (std-chaired-panel chair strongest-operational-plan
     reliability security operations task))
 
 (~ implement (task)
@@ -195,7 +204,7 @@ through implementation and review because `campaign` expands to an arrow.
 (~ review (task)
   (-> task "Audit the implementation against every acceptance criterion and list remaining risk."))
 
-(campaign plan implement review
+(std-campaign plan implement review
   "Replace synchronous webhook delivery with a durable asynchronous pipeline.")
 ```
 
@@ -211,31 +220,32 @@ uses a symbol judge to choose the result that best matches the desired terms.
 (# std/shape)
 
 (~ solve (task)
-  (with-evidence (-> task "Derive a root cause and a minimal corrective patch.")))
+  (std-with-evidence (-> task "Derive a root cause and a minimal corrective patch.")))
 
 (~ critic (task)
   (-> task "Try to disprove the proposed root cause using the observed behavior."))
 
-(best-of-three reproducible-minimal-verified-fix
-  (final-only
-    (reflexion solve critic
+(std-best-of-three reproducible-minimal-verified-fix
+  (std-final-only
+    (std-reflexion solve critic
       "Trace and fix the UTF-8 cursor corruption after multiline paste.")))
 ```
 
 ## Example 6: lazy nested routing
 
-Only one specialist branch runs at each conditional. The classifiers must
-return exactly `yes` or `no`, so `std/canon` supplies the answer contract.
+Only one specialist branch runs at each `%` gate. The classifiers must return
+exactly `0` or `1`; `std/control` supplies the lazy wrapper and `std-binary`
+supplies the answer contract.
 
 ```rebis
 (# std/search)
-(# std/canon)
+(# std/control)
 
 (~ parser-kind (task)
-  (yes-no (-> task "Is this primarily a parsing or syntax problem?")))
+  (std-binary (-> task "Is this primarily a parsing or syntax problem?")))
 
 (~ runtime-kind (task)
-  (yes-no (-> task "Is this primarily a runtime state problem rather than an integration problem?")))
+  (std-binary (-> task "Is this primarily a runtime state problem rather than an integration problem?")))
 
 (~ parser-specialist (task)
   (-> task "Trace tokens, delimiters, quoting state, and the smallest failing input."))
@@ -246,30 +256,30 @@ return exactly `yes` or `no`, so `std/canon` supplies the answer contract.
 (~ integration-specialist (task)
   (-> task "Trace process boundaries, environment, filesystem context, and provider behavior."))
 
-(route-three parser-kind runtime-kind
+(std-route-three parser-kind runtime-kind
   parser-specialist runtime-specialist integration-specialist
   "A completed background run sometimes leaves its panel in the running state.")
 ```
 
 ## Example 7: bounded recursive refinement
 
-Macros may call themselves. The two-branch conditional expands only the chosen
-branch, and runtime expansion/model-call limits prevent an unbounded run. The
-stop macro must return exactly `yes` or `no`.
+Macros may call themselves. The `%` gate expands only the chosen branch, and
+runtime expansion/model-call limits prevent an unbounded run. The stop macro
+must return exactly `0` or `1`.
 
 ```rebis
 (# std/loops)
-(# std/canon)
+(# std/control)
 
 (~ improve (value)
   (-> value "Rewrite the plan so each step is smaller, reversible, and independently testable."))
 
 (~ done (value)
-  (yes-no
+  (std-binary
     (-> value
         "Are all steps independently verifiable, with an explicit rollback?")))
 
-(loop
+(std-loop
   "Draft: migrate the billing schema and deploy every dependent service in one step."
   improve
   done)
@@ -285,11 +295,35 @@ When correcting a Rebis program, check these before changing its design:
 4. Higher-order macro calls use quote/unquote correctly: `(,worker ,value)`.
 5. Imported modules contain definitions/imports only; executable module bodies
    are rejected.
-6. A conditional classifier returns exactly `yes` or `no`.
+6. A `%` classifier returns exactly `0` or `1`.
 7. Repeated macro parameters intentionally repeat model work.
 8. `<-` has only reverse-flow semantics; rewrite it as `->` when direction is
    unclear.
 9. Use `/format` or `/tree` to validate structure before spending live model
    calls. `kaos rebis run --dry` also expands and traces model-free shapes, but
-   a model-driven `yes`/`no` conditional will intentionally report no decision
-   when its dry oracle returns `nothing`.
+   a model-driven `%` gate will intentionally report no decision when its dry
+   oracle returns `nothing`.
+
+## Parser and runtime checks
+
+Kaos delegates syntax authority to `rebis-lang`; there is no second, subtly
+different Kaos parser. Check a complete file without model calls from the Kaos
+checkout with:
+
+```sh
+cargo run --manifest-path ../rebis/Cargo.toml -- check path/to/program.rebis
+kaos rebis run --dry path/to/program.rebis
+```
+
+For a source-only collection module, point the host at the collection and run a
+small importing program:
+
+```sh
+REBIS_COLLECTION_PATH=../rebis-collection/modules \
+  kaos rebis run --dry '((# git/workflow) (git-intent "judge" "task"))'
+```
+
+Use `rebis tree` or Kaos `/tree` to inspect the expanded structure. A dry run
+can validate imports, macro expansion, arrows, and ordinary prompts without
+answering them; `%` gates still need a scripted `0` or `1` oracle to
+exercise their selected branch.

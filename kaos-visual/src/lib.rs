@@ -21,7 +21,8 @@ use std::collections::BTreeSet;
 
 use kaos_core::tabs::{TabId, Tabs};
 use kaos_core::visual::{
-    Form, Mandala, Node, NodeId, Shape, SpatialLayout, Stroke, View, WorldRect, NODE_R, NODE_RY,
+    Arrow, BorderGrab, Form, Mandala, Node, NodeId, Shape, SpatialLayout, Stroke, View, WorldRect,
+    NODE_R, NODE_RY,
 };
 use kaos_workspace::rebis_workspace::{
     handle_edit_key, highlights, EditKey, EditModifiers, Editor as SourceEditor,
@@ -29,6 +30,16 @@ use kaos_workspace::rebis_workspace::{
 };
 
 mod actions;
+mod automata;
+/// The automaton's geometry, re-exported for `examples/generation_preview.rs`.
+///
+/// That example renders the same composition to a PNG so the figure can be
+/// reviewed on a machine with no compositor — which is the only way to see it
+/// without launching a window. It shares `compose` with the pane rather than
+/// re-implementing it, so the preview cannot drift from what the pane draws.
+pub mod automata_preview {
+    pub use crate::automata::{ramp, Automaton, BinaryStream, Cell, Mark, Ramp, Site};
+}
 mod process;
 mod runs;
 mod settings;
@@ -119,6 +130,81 @@ struct ProjectedNode {
     camera_depth: f32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VisibleEdgeKind {
+    Father,
+    Flow,
+}
+
+/// A semantic connection shared by the planar and spatial renderers.
+///
+/// Complete flow nodes are syntax handles, not extra visible arrows: their two
+/// stored child links collapse into one directional flow edge. Keeping this
+/// projection shared prevents 2D and 3D from presenting different programs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VisibleEdge {
+    from: NodeId,
+    to: NodeId,
+    owner: NodeId,
+    source: Option<Arrow>,
+    kind: VisibleEdgeKind,
+}
+
+fn complete_flow(mandala: &Mandala, id: NodeId) -> bool {
+    mandala.flow_result(id).is_some()
+}
+
+fn resolved_flow_result(mandala: &Mandala, mut id: NodeId) -> NodeId {
+    for _ in 0..16 {
+        let Some(next) = mandala.flow_result(id) else {
+            break;
+        };
+        id = next;
+    }
+    id
+}
+
+/// Project stored child-to-parent links into the semantic connections shown
+/// by both canvases. A complete flow is one source form, not two grey links
+/// plus a blue link: its operand links collapse into one blue edge.
+fn visible_edges(mandala: &Mandala) -> Vec<VisibleEdge> {
+    let mut edges = Vec::new();
+    for arrow in mandala.arrows() {
+        if complete_flow(mandala, arrow.to) {
+            continue;
+        }
+        edges.push(VisibleEdge {
+            from: arrow.to,
+            to: resolved_flow_result(mandala, arrow.from),
+            owner: arrow.from,
+            source: Some(*arrow),
+            kind: VisibleEdgeKind::Father,
+        });
+    }
+    for node in mandala.nodes() {
+        if node.shape() != Shape::Arrow || !complete_flow(mandala, node.id) {
+            continue;
+        }
+        let kids = mandala.children(node.id);
+        let [first, second] = kids[..] else {
+            continue;
+        };
+        let (from, to) = if node.form == Form::Backflow {
+            (second, first)
+        } else {
+            (first, second)
+        };
+        edges.push(VisibleEdge {
+            from: resolved_flow_result(mandala, from),
+            to: resolved_flow_result(mandala, to),
+            owner: node.id,
+            source: None,
+            kind: VisibleEdgeKind::Flow,
+        });
+    }
+    edges
+}
+
 #[derive(Clone, Copy)]
 struct NodePaint {
     position: Pos2,
@@ -139,7 +225,7 @@ struct GlyphPaint {
 const fn node_outline_width(shape: Shape, emphasized: bool) -> f32 {
     if matches!(
         shape,
-        Shape::Square | Shape::Oval | Shape::Parallelogram | Shape::Amp
+        Shape::Square | Shape::Oval | Shape::Parallelogram | Shape::Amp | Shape::Hexagon
     ) {
         if emphasized {
             5.5
@@ -242,20 +328,20 @@ impl Doc {
     /// Toggle a whole block in or out of the selection. A block already fully
     /// selected is removed; otherwise its subtree is added, so blocks compose
     /// and decompose as units.
+    /// Ctrl-click toggles a *single* element in or out of the selection —
+    /// unlike a plain click, which selects the whole block. This is how you
+    /// trim one node from, or add one node to, an otherwise block-sized
+    /// selection.
     fn toggle_selection(&mut self, id: NodeId) {
-        let block = self.mandala.subtree(id);
-        if block.is_empty() {
+        if self.mandala.node(id).is_none() {
             return;
         }
-        if block.iter().all(|node| self.selection.contains(node)) {
-            for node in &block {
-                self.selection.remove(node);
-            }
-            if self.selected.is_some_and(|s| block.contains(&s)) {
+        if self.selection.remove(&id) {
+            if self.selected == Some(id) {
                 self.selected = self.selection.iter().next_back().copied();
             }
         } else {
-            self.selection.extend(block);
+            self.selection.insert(id);
             self.selected = Some(id);
         }
         self.pending = None;
@@ -323,6 +409,9 @@ struct ChatPane {
     /// Showing the session list rather than a transcript.
     browsing: bool,
     notice: Option<String>,
+    /// When present, each submitted turn receives a fresh snapshot of this
+    /// retained run, including its complete source and output.
+    run_id: Option<u64>,
 }
 
 impl Default for ChatPane {
@@ -337,6 +426,7 @@ impl Default for ChatPane {
             input: String::new(),
             browsing: true,
             notice: None,
+            run_id: None,
         }
     }
 }
@@ -349,10 +439,52 @@ enum SourceProjection {
     Mandala,
 }
 
+/// The automaton view's own state: the lattice, and how far the run transcript
+/// has been consumed.
+struct AutomataPane {
+    machine: automata::Automaton,
+    /// Which run is being watched. `None` means the lattice was built from
+    /// source and evolves on the default rule until a run supplies one.
+    run: Option<u64>,
+    /// Where the program came from, for the header.
+    origin: String,
+    /// Transcript entries already fed in, so a live run is consumed
+    /// incrementally instead of re-read from the start every frame.
+    consumed: usize,
+    /// Advance generations automatically.
+    running: bool,
+    /// Seconds between generations.
+    interval: f32,
+    /// Time of the last generation, so stepping is wall-clock paced rather
+    /// than frame-paced — the view must look the same on any refresh rate.
+    last_step: std::time::Instant,
+}
+
+impl AutomataPane {
+    /// Build the lattice by parsing `source`. The program's shape is the
+    /// lattice, so a program that does not parse has no lattice.
+    fn from_source(source: &str, origin: impl Into<String>) -> Result<Self, String> {
+        let expr = rebis_lang::parse(source).map_err(|error| error.to_string())?;
+        Ok(Self {
+            machine: automata::Automaton::from_program(&expr),
+            run: None,
+            origin: origin.into(),
+            consumed: 0,
+            running: true,
+            interval: 0.10,
+            last_step: std::time::Instant::now(),
+        })
+    }
+}
+
 struct SourcePane {
     /// Saved-hypersigil name, independent from an ordinary file path.
     name: String,
     editor: SourceEditor,
+    /// The cursor position most recently revealed by the editor. Scrolling the
+    /// viewport must not count as a cursor move, or the next frame will pull
+    /// the viewport back to the caret.
+    revealed_cursor: Option<usize>,
     vim_enabled: bool,
     mode: VimMode,
     command: String,
@@ -372,6 +504,7 @@ impl Default for SourcePane {
         Self {
             name: String::new(),
             editor: SourceEditor::new(""),
+            revealed_cursor: None,
             vim_enabled,
             mode: if vim_enabled {
                 VimMode::Normal
@@ -427,6 +560,16 @@ impl SourcePane {
             .map_err(|error| format!("run block: {error}"))
     }
 
+    fn run_options_source(&self) -> Result<(String, Option<String>), String> {
+        let program = self.editor.source().to_string();
+        let block = if self.editor.selected_text(self.mode).is_some() {
+            Some(self.run_program_source()?.0)
+        } else {
+            self.run_block_source().ok()
+        };
+        Ok((program, block))
+    }
+
     fn set_vim_enabled(&mut self, enabled: bool) {
         if self.vim_enabled && self.mode == VimMode::Insert {
             self.editor.end_insert_session();
@@ -453,12 +596,16 @@ enum SourceAction {
         path: String,
         text: String,
     },
+    ChooseSaveFile {
+        suggested: String,
+        text: String,
+    },
     Format,
     Draw(String),
+    Generation(String),
     Run {
-        text: String,
-        scope: runs::Scope,
-        lane: runs::Lane,
+        program: String,
+        block: Option<String>,
     },
     Copy(String),
     WriteProjection {
@@ -494,7 +641,7 @@ fn sigil_catalog_row(
     ui.horizontal(|ui| {
         ui.monospace(format!("{}   {} bytes", entry.name, entry.bytes));
         if entry.read_only {
-            ui.colored_label(ink.blue, "embedded · read only");
+            ui.colored_label(ink.secondary, "embedded · read only");
         }
         if ui.small_button("mandala").clicked() {
             *action = Some(SigilAction::Draw(entry.clone()));
@@ -543,6 +690,10 @@ enum Pane {
     /// Every non-secret Kaos preference, backed by the same persistent file as
     /// the terminal `/config` editor.
     Settings(settings::SettingsPane),
+    /// A run as the cellular automaton it generates: the program's geometry
+    /// supplies the lattice, the model's own bytes supply the rule. See the
+    /// `automata` module for why this is a generation and not a diagram.
+    Automata(AutomataPane),
     /// Retained Rebis executions shared by every drawing and source tab.
     Runs,
     /// Kaos rites and inspection commands that are not a document surface.
@@ -581,7 +732,8 @@ enum Tool {
 /// in the modal. The source and scope are fixed at click time; mode and lane
 /// are chosen in the modal and default to the desk's last choice.
 struct PendingRun {
-    source: String,
+    program_source: String,
+    block_source: Option<String>,
     scope: runs::Scope,
     /// Node ids to light with the working ring, when the run came from a
     /// mandala (whole graph or a selected block). Empty for source-tab runs.
@@ -600,6 +752,9 @@ enum Drag {
         id: NodeId,
         grab: (f64, f64),
     },
+    /// Dragging a square's wall to size its box. The centre stays put and the
+    /// grabbed walls follow the pointer, so the blocks inside do not move.
+    Resize(BorderGrab),
     /// Panning the canvas.
     Pan,
     /// Right-button world-space marquee. Ctrl preserves the existing set.
@@ -608,6 +763,29 @@ enum Drag {
         current: (f64, f64),
         additive: bool,
     },
+}
+
+impl Drag {
+    /// What a primary drag starting at this world point does.
+    ///
+    /// A wall offered for resizing wins first, then whatever shape the point
+    /// landed on, and bare canvas pans. `Mandala::resize_grab` is what keeps a
+    /// block dropped across a wall grabbable as a block.
+    fn beginning_at(mandala: &Mandala, wx: f64, wy: f64) -> Self {
+        if let Some(grab) = mandala.resize_grab(wx, wy) {
+            return Drag::Resize(grab);
+        }
+        match mandala.hit(wx, wy) {
+            Some(id) => {
+                let (x, y) = mandala.node(id).map(|n| (n.x, n.y)).unwrap_or((wx, wy));
+                Drag::Node {
+                    id,
+                    grab: (wx - x, wy - y),
+                }
+            }
+            None => Drag::Pan,
+        }
+    }
 }
 
 /// Exact in-app graph clipboard plus the text mirrored to the system
@@ -656,7 +834,6 @@ pub fn run(start: Mandala) {
     }
 }
 
-
 struct Editor {
     ink: Ink,
     /// Where kaos was started. Runs, relative reads, imports and output paths
@@ -681,6 +858,8 @@ struct Editor {
     /// this instead of launching immediately, so the user always picks dry vs.
     /// live-with-tools vs. chaos rather than silently getting the dry default.
     pending_run: Option<PendingRun>,
+    /// The run-status modal shown immediately after a configured run launches.
+    run_notice: Option<u64>,
     /// Process-backed run history and controls, shared by all source surfaces.
     runs: runs::Desk,
     /// Streamed chat/code/cast/conclave and inspection task history.
@@ -707,6 +886,7 @@ impl Editor {
             tool: Tool::Select,
             drag: Drag::None,
             pending_run: None,
+            run_notice: None,
             clipboard: None,
             notice: None,
             runs: runs::Desk::default(),
@@ -714,53 +894,75 @@ impl Editor {
         }
     }
 
-    /// Submit the same source snapshot the terminal runner receives.
-    /// Open the run-options modal for a source, rather than launching it
-    /// straight away. Mode and lane are seeded from the desk's last choice.
-    fn request_run(
+    fn request_run_options(
         &mut self,
-        source: String,
-        scope: runs::Scope,
+        program_source: String,
+        block_source: Option<String>,
         ring: std::collections::HashSet<NodeId>,
+        preferred_scope: runs::Scope,
     ) {
+        let block_available = self.pending_block_available(&block_source);
         self.pending_run = Some(PendingRun {
-            source,
-            scope,
+            program_source,
+            block_source,
+            scope: if preferred_scope == runs::Scope::Block && block_available {
+                runs::Scope::Block
+            } else {
+                runs::Scope::Program
+            },
             ring,
             mode: self.runs.mode,
             lane: self.runs.lane,
         });
     }
 
-    fn run_source(&mut self, source: &str) {
-        let ids: std::collections::HashSet<NodeId> =
-            self.doc().mandala.nodes().iter().map(|n| n.id).collect();
-        self.request_run(source.to_string(), runs::Scope::Program, ids);
+    fn pending_block_available(&self, block: &Option<String>) -> bool {
+        block
+            .as_ref()
+            .is_some_and(|source| !source.trim().is_empty())
     }
 
-    fn run_selected(&mut self) {
-        let ids = self.doc().selected_ids();
-        let selected = match self.doc().selected_source() {
-            Ok(Some(source)) => source,
-            Ok(None) => {
-                self.notice = Some("select one or more forms first".to_string());
+    fn run_mandala(&mut self) {
+        let program = match self.doc().mandala.to_rebis() {
+            Ok(source) => source,
+            Err(error) => {
+                self.notice = Some(error.to_string());
                 return;
             }
+        };
+        let ids = self.doc().selected_ids();
+        let block = match self.doc().selected_source() {
+            Ok(Some(selected)) => {
+                kaos_workspace::rebis_workspace::scoped_block_source(&program, &selected)
+                    .map(Some)
+                    .map_err(|error| error.to_string())
+            }
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
+        };
+        let block = match block {
+            Ok(block) => block,
             Err(error) => {
                 self.notice = Some(format!("selected block: {error}"));
                 return;
             }
         };
-        let source = self
-            .doc()
-            .mandala
-            .to_rebis()
-            .ok()
-            .and_then(|whole| {
-                kaos_workspace::rebis_workspace::scoped_block_source(&whole, &selected).ok()
-            })
-            .unwrap_or(selected);
-        self.request_run(source, runs::Scope::Block, ids.into_iter().collect());
+        let ring = if ids.is_empty() {
+            self.doc()
+                .mandala
+                .nodes()
+                .iter()
+                .map(|node| node.id)
+                .collect()
+        } else {
+            ids.into_iter().collect()
+        };
+        let preferred_scope = if block.is_some() {
+            runs::Scope::Block
+        } else {
+            runs::Scope::Program
+        };
+        self.request_run_options(program, block, ring, preferred_scope);
     }
 
     /// Draw the run-options modal when a run is pending. Returns nothing; on
@@ -786,13 +988,34 @@ impl Editor {
                     cancel = true;
                 }
             });
-        egui::Window::new("RUN")
+        // The backdrop is an Area at the same Order as a Window, so which one
+        // ends up on top is a tie. Losing it paints the scrim OVER the modal —
+        // the screen goes flat grey — and the backdrop then swallows every
+        // click as "outside", dismissing the dialog you were trying to use.
+        // Lifting the window each frame settles the tie in the only direction
+        // that makes sense.
+        let window = egui::Window::new("RUN")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 let pending = self.pending_run.as_mut().expect("pending run");
-                ui.colored_label(k.faint, format!("scope · {}", pending.scope.label()));
+                ui.colored_label(k.faint, "SCOPE");
+                ui.radio_value(
+                    &mut pending.scope,
+                    runs::Scope::Program,
+                    "program · complete source",
+                );
+                if pending.block_source.is_some() {
+                    ui.radio_value(
+                        &mut pending.scope,
+                        runs::Scope::Block,
+                        "block · selected/caret form",
+                    );
+                } else {
+                    ui.colored_label(k.faint, "block unavailable for this source");
+                    pending.scope = runs::Scope::Program;
+                }
                 ui.add_space(6.0);
                 ui.colored_label(k.faint, "MODE");
                 ui.radio_value(
@@ -826,6 +1049,9 @@ impl Editor {
                     }
                 });
             });
+        if let Some(window) = window {
+            ctx.move_to_top(window.response.layer_id);
+        }
         // Esc cancels the modal.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             cancel = true;
@@ -836,13 +1062,144 @@ impl Editor {
                 self.runs.mode = pending.mode;
                 self.runs.lane = pending.lane;
                 self.runs.scope = pending.scope;
-                self.runs.submit(pending.source, Some(pending.lane), &self.cwd);
-                if !pending.ring.is_empty() {
-                    self.doc_mut().running = pending.ring;
+                let ring = pending.ring;
+                let source = match pending.scope {
+                    runs::Scope::Program => pending.program_source,
+                    runs::Scope::Block => pending.block_source.unwrap_or(pending.program_source),
+                };
+                let id = self.runs.submit(source, Some(pending.lane), &self.cwd);
+                // Keep the working ring on the drawing before opening the
+                // generation tab; `Tabs::open` makes that new tab active.
+                if !ring.is_empty() {
+                    if let Some(Pane::Mandala(doc)) = self.tabs.active_mut() {
+                        doc.running = ring;
+                    }
                 }
+                // Every configured run gets its own generation tab immediately
+                // so the live output can start shaping the figure while the
+                // process is still running.
+                self.open_generation();
+                self.run_notice = Some(id);
             }
         } else if cancel {
             self.pending_run = None;
+        }
+    }
+
+    fn run_status_modal(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.run_notice else {
+            return;
+        };
+        let Some(run) = self.runs.runs.iter().find(|run| run.id == id) else {
+            self.run_notice = None;
+            return;
+        };
+        let state = run.state.label(run.paused);
+        let preview = run.preview();
+        let last_output = run.output.last().cloned();
+        let terminal = run.state.terminal();
+        let awaiting = run.state == runs::State::AwaitingPermission;
+        let mut close = false;
+        let mut go_to_runs = false;
+        let mut go_to_generation = false;
+        let mut permission = None;
+        let mut deny = false;
+
+        egui::Area::new("run_status_modal_backdrop".into())
+            .order(egui::Order::Middle)
+            .fixed_pos(Pos2::ZERO)
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.painter()
+                    .rect_filled(screen, 0.0, Color32::from_black_alpha(140));
+                ui.allocate_rect(screen, Sense::hover());
+            });
+        // Same tie as the run modal: lift the window above its own scrim.
+        let window = egui::Window::new(format!("RUN #{id}"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.heading(if awaiting {
+                    "run needs your authority"
+                } else if terminal {
+                    "run finished"
+                } else {
+                    "run is running"
+                });
+                ui.colored_label(self.ink.accent, state);
+                ui.label(format!("{} · {}", run.mode.label(), run.scope.label()));
+                ui.label(preview);
+                if let Some(last_output) = &last_output {
+                    ui.separator();
+                    ui.colored_label(self.ink.faint, last_output);
+                }
+                // A live run stops for authority the instant it is submitted,
+                // which is while this modal is on screen. Asking here is asking
+                // where the reader already is; the runs pane keeps the same
+                // decision for runs whose modal has been closed.
+                if awaiting {
+                    ui.add_space(8.0);
+                    ui.colored_label(
+                        self.ink.faint,
+                        "a live model may read, edit, and write files and run commands",
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("allow once").clicked() {
+                            permission = Some(runs::Authority::Once);
+                        }
+                        if ui.button("allow session").clicked() {
+                            permission = Some(runs::Authority::Session);
+                        }
+                        if ui.button("deny · Esc").clicked() {
+                            deny = true;
+                        }
+                    });
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("watch generation").clicked() {
+                        go_to_generation = true;
+                    }
+                    if ui.button("close").clicked() {
+                        close = true;
+                    }
+                    if ui.button("go to runs").clicked() {
+                        go_to_runs = true;
+                    }
+                });
+            });
+        if let Some(window) = window {
+            ctx.move_to_top(window.response.layer_id);
+        }
+        // While the question stands, Escape answers it by denying, exactly as it
+        // does in the terminal — the same key must not grant power on one screen
+        // and refuse it on the other. The button says so, because a key that
+        // decides authority may not be a secret.
+        let escaped = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        if awaiting {
+            deny |= escaped;
+        } else {
+            close |= escaped;
+        }
+        // The decision acts on THIS run, not on whatever was last selected.
+        if let Some(authority) = permission {
+            self.runs.selected = Some(id);
+            self.runs.grant_selected(authority, &self.cwd);
+        } else if deny {
+            self.runs.selected = Some(id);
+            self.runs.deny_selected();
+        }
+        if go_to_generation {
+            self.runs.selected = Some(id);
+            self.open_generation();
+            self.run_notice = None;
+        } else if go_to_runs {
+            self.runs.selected = Some(id);
+            self.open_runs();
+            self.run_notice = None;
+        } else if close {
+            self.run_notice = None;
         }
     }
 
@@ -925,6 +1282,7 @@ impl Editor {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         for (session_id, reply) in self.actions.take_chat_replies() {
+            let reply = kaos_core::chat::clean_chat_reply(&reply);
             let mut delivered = false;
             for tab in self.tabs.iter_mut() {
                 if let Pane::Chat(chat) = &mut tab.content {
@@ -969,6 +1327,21 @@ impl Editor {
     }
 }
 
+/// The colour an edge is drawn in.
+///
+/// Selection is expressed as WEIGHT, and — for the grey `father of` links —
+/// as the accent. A flow keeps its red either way: the hue is what separates a
+/// flow from a structural link, and a selection is exactly when the drawing is
+/// being read closest. Both the 2D and 3D projections call this, so they
+/// cannot drift apart on colour.
+pub(crate) fn edge_colour(kind: VisibleEdgeKind, touches: bool, k: Ink) -> Color32 {
+    match (kind, touches) {
+        (VisibleEdgeKind::Flow, _) => k.secondary,
+        (VisibleEdgeKind::Father, true) => k.accent,
+        (VisibleEdgeKind::Father, false) => k.faint,
+    }
+}
+
 impl eframe::App for Editor {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_keys(ctx);
@@ -991,19 +1364,23 @@ impl eframe::App for Editor {
                 Some(Pane::Chat(_)) => self.chat(ui),
                 Some(Pane::Source(_)) => self.source(ui),
                 Some(Pane::Sigils(_)) => self.sigils(ui),
+                Some(Pane::Automata(_)) => self.automata_tab(ui),
                 Some(Pane::Settings(_)) => self.settings(ui),
                 Some(Pane::Runs) => self.runs_tab(ui),
                 Some(Pane::Actions) => self.actions_tab(ui),
                 None => {}
             });
         self.run_modal(ctx);
+        self.run_status_modal(ctx);
     }
 }
 
 impl Editor {
     fn header(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            // Wrapped: the header carries up to seven controls, and a narrow
+            // window used to cut the last of them off the right edge.
+            ui.horizontal_wrapped(|ui| {
                 ui.colored_label(self.ink.accent, "KAOS VISUAL");
                 ui.separator();
                 if self.on_mandala() {
@@ -1031,66 +1408,253 @@ impl Editor {
                     };
                     ui.colored_label(self.ink.faint, format!("{}%", (zoom * 100.0).round()));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let editable =
-                        self.on_mandala() && self.doc().canvas_mode == CanvasMode::Planar;
-                    if editable && ui.button("clear").clicked() {
-                        let doc = self.doc_mut();
-                        if !doc.mandala.is_empty() {
-                            doc.checkpoint();
-                            doc.mandala = Mandala::new();
-                            doc.reset_interaction();
-                        }
-                    }
-                    if self.on_mandala() && ui.button("edit as text").clicked() {
-                        self.open_generated_source();
-                    }
-                    let selection_len = if self.on_mandala() {
-                        self.doc().selection_len()
-                    } else {
-                        0
-                    };
-                    if selection_len > 0
-                        && ui
-                            .button(format!("run selection ({selection_len})"))
-                            .clicked()
-                    {
-                        self.run_selected();
-                    }
-                    if self.on_mandala() && ui.button("run mandala").clicked() {
-                        match self.doc().mandala.to_rebis() {
-                            Ok(source) => self.run_source(&source),
-                            Err(error) => self.notice = Some(error.to_string()),
-                        }
-                    }
-                    if self.on_mandala() && ui.button("reset view").clicked() {
-                        let doc = self.doc_mut();
-                        match doc.canvas_mode {
-                            CanvasMode::Planar => doc.view = View::new(),
-                            CanvasMode::Spatial => doc.camera = SpatialCamera::default(),
-                        }
-                    }
-                    let built = self.doc_mut().mandala.to_rebis();
-                    // Only offer the hand-off when there is source to hand over.
-                    ui.add_enabled_ui(built.is_ok(), |ui| {
-                        if ui.button("open in terminal").clicked() {
-                            match &built {
-                                Ok(src) => {
-                                    self.notice = Some(match open_in_terminal(src, &self.cwd) {
-                                        Ok(()) => "opened in terminal".to_string(),
-                                        Err(e) => e,
-                                    })
-                                }
-                                Err(e) => self.notice = Some(e.to_string()),
+                // `with_main_wrap` is the part that matters: a right-to-left
+                // group nested in a horizontal row is ONE item to the outer
+                // row, so wrapping the outer row cannot reflow these buttons —
+                // the group has to wrap on its own or the last button is cut
+                // off the right edge.
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),
+                    |ui| {
+                        let editable =
+                            self.on_mandala() && self.doc().canvas_mode == CanvasMode::Planar;
+                        if editable && ui.button("clear").clicked() {
+                            let doc = self.doc_mut();
+                            if !doc.mandala.is_empty() {
+                                doc.checkpoint();
+                                doc.mandala = Mandala::new();
+                                doc.reset_interaction();
                             }
                         }
-                    });
-                    if let Some(note) = &self.notice {
-                        ui.colored_label(self.ink.faint, note);
-                    }
-                });
+                        if self.on_mandala() && ui.button("edit as text").clicked() {
+                            self.open_generated_source();
+                        }
+                        if self.on_mandala() && ui.button("run").clicked() {
+                            self.run_mandala();
+                        }
+                        if self.on_mandala() && ui.button("reset view").clicked() {
+                            let doc = self.doc_mut();
+                            match doc.canvas_mode {
+                                CanvasMode::Planar => doc.view = View::new(),
+                                CanvasMode::Spatial => doc.camera = SpatialCamera::default(),
+                            }
+                        }
+                        let built = self.doc_mut().mandala.to_rebis();
+                        // Only offer the hand-off when there is source to hand over.
+                        ui.add_enabled_ui(built.is_ok(), |ui| {
+                            if ui.button("open in terminal").clicked() {
+                                match &built {
+                                    Ok(src) => {
+                                        self.notice = Some(match open_in_terminal(src, &self.cwd) {
+                                            Ok(()) => "opened in terminal".to_string(),
+                                            Err(e) => e,
+                                        })
+                                    }
+                                    Err(e) => self.notice = Some(e.to_string()),
+                                }
+                            }
+                        });
+                        if let Some(note) = &self.notice {
+                            ui.colored_label(self.ink.faint, note);
+                        }
+                    },
+                );
             });
         });
+    }
+
+    /// Open a generation tab for the selected run, or for whatever program the
+    /// active tab is holding.
+    ///
+    /// A run is preferred because a run has answers, and the answers are what
+    /// build the rule. Without one the lattice is real but the rule is the
+    /// default, and the header says so rather than implying the model spoke.
+    fn open_generation(&mut self) {
+        let from_run = self
+            .runs
+            .selected
+            .and_then(|id| self.runs.runs.iter().find(|run| run.id == id))
+            .map(|run| (run.source.clone(), run.id));
+
+        let (source, run, origin) = match from_run {
+            Some((source, id)) => (source, Some(id), format!("run #{id}")),
+            None => match self.tabs.active() {
+                Some(Pane::Source(pane)) => {
+                    (pane.editor.source().to_string(), None, "source".to_string())
+                }
+                Some(Pane::Mandala(_)) => match self.doc().mandala.to_rebis() {
+                    Ok(text) => (text, None, "drawing".to_string()),
+                    Err(error) => {
+                        self.notice = Some(error.to_string());
+                        return;
+                    }
+                },
+                _ => {
+                    self.notice = Some(
+                        "select a run, or open a source or drawing tab — a generation needs a \
+                         program to build its lattice from"
+                            .to_string(),
+                    );
+                    return;
+                }
+            },
+        };
+
+        self.open_generation_for(source, run, origin);
+    }
+
+    /// Open a generation directly from a source surface. This deliberately
+    /// bypasses the selected-run preference used by the global `+ generation`
+    /// button: pressing `generation` beside source must visualize that source,
+    /// even when an older run remains selected in the Runs desk.
+    fn open_generation_from_source(&mut self, source: String) {
+        self.open_generation_for(source, None, "source".to_string());
+    }
+
+    fn open_generation_for(&mut self, source: String, run: Option<u64>, origin: String) {
+        match AutomataPane::from_source(&source, origin.clone()) {
+            Ok(mut pane) => {
+                pane.run = run;
+                self.tabs
+                    .open(format!("generation · {origin}"), Pane::Automata(pane));
+            }
+            Err(error) => {
+                self.notice = Some(format!(
+                    "that program does not parse, so it has no lattice: {error}"
+                ));
+            }
+        }
+    }
+
+    /// The generation: a run drawn as the automaton it computes.
+    ///
+    /// Two feeds meet here. The lattice came from the program's geometry when
+    /// the tab opened and never changes. The rule comes from the run's
+    /// transcript and keeps arriving, so each frame consumes whatever new lines
+    /// landed before advancing a generation.
+    fn automata_tab(&mut self, ui: &mut egui::Ui) {
+        let k = self.ink;
+
+        // Two-phase, because the pane and the run desk are both behind `self`:
+        // read what the pane still needs, take it from the desk, then hand it
+        // over. Cloning only the tail keeps a long transcript cheap.
+        let watching = match self.tabs.active() {
+            Some(Pane::Automata(pane)) => Some((pane.run, pane.consumed)),
+            _ => None,
+        };
+        let (fresh, state) = match watching {
+            Some((Some(id), consumed)) => {
+                self.runs
+                    .runs
+                    .iter()
+                    .find(|run| run.id == id)
+                    .map_or((Vec::new(), None), |run| {
+                        // Only the tail. This runs every frame, so cloning the whole
+                        // stream would make a long run cost more the longer it got.
+                        let from = consumed.min(run.output.len());
+                        (run.output[from..].to_vec(), Some((run.state, run.paused)))
+                    })
+            }
+            _ => (Vec::new(), None),
+        };
+        let Some(Pane::Automata(pane)) = self.tabs.active_mut() else {
+            return;
+        };
+        if !fresh.is_empty() {
+            // The cursor comes back relative to the tail it was given.
+            pane.consumed += pane.machine.consume(&fresh, 0);
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(k.faint, "GENERATION");
+            ui.colored_label(k.ink, &pane.origin);
+            ui.separator();
+            if ui
+                .small_button(if pane.running { "pause" } else { "play" })
+                .clicked()
+            {
+                pane.running = !pane.running;
+            }
+            if ui.small_button("step").clicked() {
+                pane.machine.step();
+            }
+            ui.add(
+                egui::Slider::new(&mut pane.interval, 0.02..=1.0)
+                    .logarithmic(true)
+                    .text("s/gen"),
+            );
+            ui.separator();
+            ui.colored_label(k.faint, "GEN");
+            ui.colored_label(k.ink, pane.machine.generation.to_string());
+            ui.colored_label(k.faint, "CELLS");
+            ui.colored_label(k.ink, pane.machine.cells.len().to_string());
+            ui.colored_label(k.faint, "PROMPTS");
+            ui.colored_label(k.ink, pane.machine.prompts_seen.to_string());
+            ui.colored_label(k.faint, "ANSWERS");
+            ui.colored_label(k.ink, pane.machine.answers_seen.to_string());
+            ui.colored_label(k.faint, "H");
+            // The entropy of the model's bytes IS the mixing rate, so it is the
+            // one number here that changes what you are looking at.
+            ui.colored_label(k.accent, format!("{:.2} bits/byte", pane.machine.entropy));
+            let dead = pane.machine.dead_count();
+            if dead > 0 {
+                ui.separator();
+                ui.colored_label(k.accent, format!("{dead} cells killed by a refusal"));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if pane.machine.answers_seen == 0 {
+                ui.colored_label(
+                    k.faint,
+                    "no answers yet — the lattice is the program's, the rule is still the default",
+                );
+            } else {
+                ui.colored_label(
+                    k.faint,
+                    "the rule table is this model's byte sequence · a settled figure means terse \
+                     output, not a good reading",
+                );
+            }
+            if let Some((run_state, paused)) = state {
+                ui.separator();
+                ui.colored_label(k.faint, run_state.label(paused));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(k.secondary, "PROMPT BIN");
+            ui.monospace(
+                pane.machine
+                    .binary_preview(automata::BinaryStream::Prompt, 3),
+            );
+            ui.colored_label(k.faint, format!("{} B", pane.machine.prompt_bytes_seen()));
+            ui.separator();
+            ui.colored_label(k.accent, "RESPONSE BIN");
+            ui.monospace(
+                pane.machine
+                    .binary_preview(automata::BinaryStream::Response, 3),
+            );
+            ui.colored_label(k.faint, format!("{} B", pane.machine.response_bytes_seen()));
+        });
+        ui.separator();
+
+        if pane.machine.is_empty() {
+            ui.colored_label(k.faint, "that program has no cells");
+            return;
+        }
+
+        // Wall-clock paced, not frame-paced: the same run must look the same on
+        // a 60Hz and a 144Hz display.
+        if pane.running && pane.last_step.elapsed().as_secs_f32() >= pane.interval {
+            pane.machine.step();
+            pane.last_step = std::time::Instant::now();
+        }
+        if pane.running {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f32(pane.interval.min(0.25)));
+        }
+
+        draw_generation(ui, &pane.machine, k);
     }
 
     /// Open the active drawing's exact one-to-one source in an ordinary tab.
@@ -1112,13 +1676,31 @@ impl Editor {
                 let active = self.tabs.active_id();
                 let mut select: Option<TabId> = None;
                 let mut close: Option<TabId> = None;
+                let mut reorder: Option<(TabId, usize)> = None;
                 let mut settings = false;
                 let mut runs = false;
                 let mut actions = false;
-                for tab in self.tabs.iter() {
+                let mut generation = false;
+                let ids: Vec<TabId> = self.tabs.iter().map(|tab| tab.id).collect();
+                for (index, tab) in self.tabs.iter().enumerate() {
                     let on = Some(tab.id) == active;
-                    if ui.selectable_label(on, &tab.title).clicked() {
-                        select = Some(tab.id);
+                    // A short press is a click; a held/moved press becomes a
+                    // drag payload and is accepted by the other tab zones.
+                    let dropped = ui
+                        .dnd_drop_zone::<usize, ()>(egui::Frame::none(), |ui| {
+                            let response = ui
+                                .selectable_label(on, &tab.title)
+                                .interact(Sense::click_and_drag());
+                            response.dnd_set_drag_payload(index);
+                            if response.clicked() {
+                                select = Some(tab.id);
+                            }
+                        })
+                        .1;
+                    if let Some(from) = dropped {
+                        if let Some(&from_id) = ids.get(*from) {
+                            reorder = Some((from_id, index));
+                        }
                     }
                     // Only the active tab offers its close button, so the bar
                     // stays quiet and a stray click cannot shut the wrong one.
@@ -1142,6 +1724,16 @@ impl Editor {
                 if ui.small_button("+ sigils").clicked() {
                     self.tabs.open("sigils", Pane::Sigils(SigilPane::default()));
                 }
+                if ui
+                    .small_button("+ generation")
+                    .on_hover_text(
+                        "run the selected run as a cellular automaton: its geometry is the \
+                         lattice, the model's own bytes are the rule",
+                    )
+                    .clicked()
+                {
+                    generation = true;
+                }
                 if ui.small_button("settings").clicked() {
                     settings = true;
                 }
@@ -1164,8 +1756,14 @@ impl Editor {
                 if let Some(id) = select {
                     self.tabs.select(id);
                 }
+                if let Some((id, to)) = reorder {
+                    self.tabs.reorder(id, to);
+                }
                 if let Some(id) = close {
                     self.tabs.close(id);
+                }
+                if generation {
+                    self.open_generation();
                 }
                 if settings {
                     self.open_settings();
@@ -1227,6 +1825,10 @@ impl Editor {
         let mut restore = false;
         let mut theme_change = None;
         let mut apply_cwd = false;
+        // Deferred out of the closure for the same reason every other mutation
+        // here is: the pane is borrowed while it draws.
+        let mut credential_store: Option<(String, String)> = None;
+        let mut credential_forget: Option<String> = None;
         let cwd_now = self.cwd.display().to_string();
         let cwd_edit = &mut self.cwd_edit;
         let Some(Pane::Settings(pane)) = self.tabs.active_mut() else {
@@ -1254,6 +1856,10 @@ impl Editor {
         if let Some(note) = &pane.notice {
             ui.colored_label(k.faint, note);
         }
+        ui.colored_label(
+            k.faint,
+            "Precedence: explicit uppercase environment values override the file; file-only editor settings stay local.",
+        );
         ui.separator();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1281,6 +1887,65 @@ impl Editor {
                     );
                 });
 
+            // ── credentials ─────────────────────────────────────────────
+            //
+            // Not config keys, and rendered from their own store on purpose:
+            // the settings file is ordinary text, the credential file is 0600,
+            // and a key that reaches the wrong one of those is a key that ends
+            // up in a pasted bug report. Nothing here ever renders a stored
+            // value — presence and length only.
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("CREDENTIALS")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.colored_label(
+                        k.faint,
+                        "Provider keys, stored 0600 outside the settings file. A stored key is never shown again — only whether one is present.",
+                    );
+                    for (provider, var, live, saved_key) in kaos_agent::auth::status() {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                if live { k.accent } else { k.faint },
+                                format!("{provider:<11}"),
+                            );
+                            ui.colored_label(
+                                k.faint,
+                                match (live, saved_key) {
+                                    (true, true) => "set".to_string(),
+                                    // An env-only key works now and vanishes
+                                    // with the shell, which is worth saying.
+                                    (true, false) => "set in this environment only".to_string(),
+                                    (false, true) => "saved, not in this environment".to_string(),
+                                    (false, false) => "unset".to_string(),
+                                },
+                            );
+                            ui.colored_label(k.faint, var);
+                            let edit = pane
+                                .credentials
+                                .entry(provider.to_string())
+                                .or_default();
+                            ui.add(
+                                egui::TextEdit::singleline(&mut edit.entry)
+                                    .desired_width(240.0)
+                                    .password(true)
+                                    .hint_text("paste a key"),
+                            );
+                            let typed = !edit.entry.trim().is_empty();
+                            if ui.add_enabled(typed, egui::Button::new("store")).clicked() {
+                                credential_store =
+                                    Some((provider.to_string(), edit.entry.trim().to_string()));
+                            }
+                            if ui.add_enabled(saved_key, egui::Button::new("forget")).clicked() {
+                                credential_forget = Some(provider.to_string());
+                            }
+                        });
+                    }
+                    ui.colored_label(
+                        k.faint,
+                        "The claude CLI authenticates through its own login and needs no key here.",
+                    );
+                });
+
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.colored_label(k.faint, "PERSISTENT");
@@ -1290,6 +1955,10 @@ impl Editor {
                         .hint_text("filter settings"),
                 );
             });
+            ui.colored_label(
+                k.faint,
+                "Every entry below shows its type, documented default, behavior, and a copyable example.",
+            );
             let needle = pane.filter.trim().to_ascii_lowercase();
             for group in settings::Group::ALL {
                 let keys = kaos_core::config::CONFIG_KEYS
@@ -1299,9 +1968,11 @@ impl Editor {
                     .filter(|key| {
                         needle.is_empty()
                             || key.to_ascii_lowercase().contains(&needle)
-                            || settings::description(key)
-                                .to_ascii_lowercase()
-                                .contains(&needle)
+                            || settings::documentation(key).is_some_and(|doc| {
+                                doc.summary.to_ascii_lowercase().contains(&needle)
+                                    || doc.details.to_ascii_lowercase().contains(&needle)
+                                    || doc.example.to_ascii_lowercase().contains(&needle)
+                            })
                     })
                     .collect::<Vec<_>>();
                 if keys.is_empty() {
@@ -1314,9 +1985,12 @@ impl Editor {
                     ))
                     .show(ui, |ui| {
                         for key in keys {
+                            let doc = settings::documentation(key)
+                                .expect("every persistent setting has documentation");
                             ui.push_id(key, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.monospace(key);
+                                    ui.colored_label(k.faint, doc.kind.label());
                                     if key == "theme" {
                                         let value = pane
                                             .values
@@ -1341,6 +2015,33 @@ impl Editor {
                                             theme_change =
                                                 kaos_core::theme::Mode::parse(value.as_str());
                                         }
+                                    } else if settings::is_tristate(key) {
+                                        let value = pane.values.entry(key.to_string()).or_default();
+                                        let selected = match value.trim() {
+                                            "1" | "true" | "yes" | "on" => "shell authority",
+                                            "0" | "false" | "no" => "edits only",
+                                            "" => "ask when needed",
+                                            _ => "custom value",
+                                        };
+                                        egui::ComboBox::from_id_salt(("setting-tristate", key))
+                                            .selected_text(selected)
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    value,
+                                                    String::new(),
+                                                    "ask when needed",
+                                                );
+                                                ui.selectable_value(
+                                                    value,
+                                                    "1".to_string(),
+                                                    "shell authority",
+                                                );
+                                                ui.selectable_value(
+                                                    value,
+                                                    "0".to_string(),
+                                                    "edits only",
+                                                );
+                                            });
                                     } else if settings::is_boolean(key) {
                                         let value = pane.values.entry(key.to_string()).or_default();
                                         let mut enabled = matches!(
@@ -1357,8 +2058,62 @@ impl Editor {
                                         );
                                     }
                                 });
-                                ui.colored_label(k.faint, settings::description(key));
+                                let default = kaos_core::config::default_value(key)
+                                    .unwrap_or_default();
+                                let default = if default.is_empty() {
+                                    "(empty)".to_string()
+                                } else {
+                                    default
+                                };
+                                ui.colored_label(
+                                    k.faint,
+                                    format!("{} · default: {default}", doc.summary),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(doc.details).color(k.faint),
+                                    )
+                                    .wrap(),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("example: {}", doc.example))
+                                            .monospace(),
+                                    )
+                                    .wrap(),
+                                );
                                 ui.add_space(4.0);
+                            });
+                        }
+                    });
+            }
+
+            let environment_docs = settings::ENVIRONMENT_DOCS
+                .iter()
+                .filter(|doc| {
+                    needle.is_empty()
+                        || doc.key.to_ascii_lowercase().contains(&needle)
+                        || doc.details.to_ascii_lowercase().contains(&needle)
+                })
+                .collect::<Vec<_>>();
+            if !environment_docs.is_empty() {
+                egui::CollapsingHeader::new("ENVIRONMENT ONLY & SECRETS")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.colored_label(
+                            k.faint,
+                            "These values are intentionally not editable or persisted by the Settings tab.",
+                        );
+                        for doc in environment_docs {
+                            ui.push_id(doc.key, |ui| {
+                                ui.monospace(doc.key);
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(doc.details).color(k.faint),
+                                    )
+                                    .wrap(),
+                                );
+                                ui.add_space(3.0);
                             });
                         }
                     });
@@ -1405,6 +2160,28 @@ impl Editor {
             }
             let _ = mode;
         }
+        // Credentials, applied after the draw. The typed value is cleared on
+        // both paths — a key that stays in UI state is a key in a screenshot.
+        if let Some((provider, key)) = credential_store {
+            let outcome = match kaos_agent::auth::store(&provider, &key) {
+                Ok((var, path)) => format!("stored {provider} as {var} in {}", path.display()),
+                Err(error) => format!("could not store {provider}: {error}"),
+            };
+            if let Some(Pane::Settings(pane)) = self.tabs.active_mut() {
+                pane.credentials.remove(&provider);
+                pane.notice = Some(outcome);
+            }
+        }
+        if let Some(provider) = credential_forget {
+            let outcome = match kaos_agent::auth::forget(&provider) {
+                Ok(var) => format!("forgot {provider} ({var})"),
+                Err(error) => format!("could not forget {provider}: {error}"),
+            };
+            if let Some(Pane::Settings(pane)) = self.tabs.active_mut() {
+                pane.credentials.remove(&provider);
+                pane.notice = Some(outcome);
+            }
+        }
         if apply_cwd {
             let candidate = std::path::PathBuf::from(self.cwd_edit.trim());
             match candidate.canonicalize() {
@@ -1431,11 +2208,17 @@ impl Editor {
     /// be picked up in the other.
     fn chat(&mut self, ui: &mut egui::Ui) {
         let k = self.ink;
-        let mut submission: Option<(String, String, bool)> = None;
+        let mut submission: Option<(String, String, bool, Option<u64>, Vec<(String, String)>)> =
+            None;
         let session_id = match self.tabs.active() {
             Some(Pane::Chat(chat)) => Some(chat.session.id.clone()),
             _ => None,
         };
+        let run_id = self.tabs.active().and_then(|pane| match pane {
+            Pane::Chat(chat) if !chat.browsing => chat.run_id,
+            _ => None,
+        });
+        let run_snapshot = run_id.and_then(|id| self.run_chat_snapshot(id));
         let chat_busy = session_id
             .as_deref()
             .is_some_and(|id| self.actions.session_active(id));
@@ -1492,8 +2275,16 @@ impl Editor {
             }
         } else {
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            // The run notice is a long line; wrapping stops it pushing the
+            // `sessions` button past the panel edge.
+            ui.horizontal_wrapped(|ui| {
                 ui.colored_label(k.faint, chat.session.title());
+                if let Some(run_id) = chat.run_id {
+                    ui.colored_label(
+                        k.accent,
+                        format!("run #{run_id} · retained content shown below · refreshed live"),
+                    );
+                }
                 if chat_busy {
                     ui.colored_label(k.accent, "● working");
                 }
@@ -1512,6 +2303,18 @@ impl Editor {
                 .stick_to_bottom(true)
                 .max_height(ui.available_height() - 60.0)
                 .show(ui, |ui| {
+                    if let Some(snapshot) = run_snapshot.as_deref() {
+                        ui.horizontal_top(|ui| {
+                            ui.colored_label(k.accent, "run");
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(snapshot).monospace().color(k.faint),
+                                )
+                                .wrap(),
+                            );
+                        });
+                        ui.separator();
+                    }
                     for turn in &chat.session.turns {
                         let (who, tone) = match turn.role {
                             kaos_core::sessions::Role::User => ("you", k.ink),
@@ -1530,7 +2333,7 @@ impl Editor {
             let send = ui
                 .add(
                     egui::TextEdit::singleline(&mut chat.input)
-                        .desired_width(ui.available_width() - 70.0)
+                        .desired_width((ui.available_width() - 70.0).max(80.0))
                         .hint_text("say something"),
                 )
                 .lost_focus()
@@ -1545,16 +2348,103 @@ impl Editor {
                     .any(|turn| turn.role == kaos_core::sessions::Role::Model);
                 chat.session
                     .push(kaos_core::sessions::Role::User, said.clone());
+                let mut history = Vec::new();
+                let prior_turns = chat.session.turns.len().saturating_sub(1);
+                for turn in chat.session.turns.iter().take(prior_turns) {
+                    match turn.role {
+                        kaos_core::sessions::Role::User => {
+                            history.push((turn.text.clone(), String::new()));
+                        }
+                        kaos_core::sessions::Role::Model => {
+                            if let Some((_, answer)) = history.last_mut() {
+                                *answer = turn.text.clone();
+                            }
+                        }
+                    }
+                }
+                let run_id = chat.run_id;
                 // Persist immediately: the terminal app saves on every turn for
                 // the same reason, so a crash loses nothing already said.
                 let _ = kaos_core::sessions::Store::default_store().save(&chat.session);
-                submission = Some((said, chat.session.id.clone(), resume));
+                submission = Some((said, chat.session.id.clone(), resume, run_id, history));
             }
         });
         let _ = chat;
-        if let Some((said, session, resume)) = submission {
-            self.actions.submit_chat(said, session, resume, &self.cwd);
+        if let Some((said, session, resume, run_id, history)) = submission {
+            let history_text = history
+                .iter()
+                .map(|(user, assistant)| format!("USER: {user}\nASSISTANT: {assistant}"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let prompt = run_id
+                .and_then(|id| self.run_chat_context(id, &history, &said))
+                .unwrap_or_else(|| {
+                    kaos_core::chat::DEFAULT_CONTEXT.render_chat(&history_text, &said)
+                });
+            self.actions.submit_chat(prompt, session, resume, &self.cwd);
         }
+    }
+
+    fn run_chat_context(
+        &self,
+        id: u64,
+        history: &[(String, String)],
+        question: &str,
+    ) -> Option<String> {
+        self.with_run_snapshot(id, |snapshot| {
+            kaos_core::chat::render_run_chat(snapshot, history, question)
+        })
+    }
+
+    fn with_run_snapshot<T>(
+        &self,
+        id: u64,
+        render: impl FnOnce(&kaos_core::chat::RunSnapshot<'_>) -> T,
+    ) -> Option<T> {
+        let child = self.runs.has_live_process(id);
+        let run = self.runs.runs.iter().find(|run| run.id == id)?;
+        let timer = run.timer();
+        let snapshot = kaos_core::chat::RunSnapshot {
+            id: run.id,
+            state: run.state.label(run.paused),
+            paused: run.paused,
+            pause_reason: run.pause_reason.as_deref().unwrap_or("none"),
+            scope: run.scope.label(),
+            mode: run.mode.label(),
+            lane: if run.parallel() { "parallel" } else { "serial" },
+            timer: &timer,
+            child: if child { "yes" } else { "no" },
+            source: &run.source,
+            input: &run.input,
+            output: &run.output,
+        };
+        Some(render(&snapshot))
+    }
+
+    fn run_chat_snapshot(&self, id: u64) -> Option<String> {
+        self.with_run_snapshot(id, kaos_core::chat::render_run_snapshot)
+    }
+
+    fn open_run_chat(&mut self, id: u64) {
+        if !self.runs.runs.iter().any(|run| run.id == id) {
+            self.notice = Some(format!("run #{id} is no longer retained"));
+            return;
+        }
+        let existing = self.tabs.iter().find_map(|tab| {
+            matches!(&tab.content, Pane::Chat(chat) if chat.run_id == Some(id)).then_some(tab.id)
+        });
+        if let Some(tab_id) = existing {
+            self.tabs.select(tab_id);
+            return;
+        }
+        let mut chat = ChatPane::default();
+        chat.browsing = false;
+        chat.run_id = Some(id);
+        chat.notice = Some(
+            "each message refreshes source, state, and the complete retained run output"
+                .to_string(),
+        );
+        self.tabs.open(format!("run #{id} chat"), Pane::Chat(chat));
     }
 
     /// The sigil library. Opening one parses it and lays it out as a drawing,
@@ -1581,7 +2471,7 @@ impl Editor {
         let lib = kaos_core::sigils::Library::default_library();
         let found = lib.search_catalog(&pane.query);
         if found.is_empty() {
-            ui.colored_label(k.faint, "no personal or std sigils match");
+            ui.colored_label(k.faint, "no personal or collection sigils match");
         }
         let personal = found
             .iter()
@@ -1589,7 +2479,11 @@ impl Editor {
             .collect::<Vec<_>>();
         let standard = found
             .iter()
-            .filter(|entry| entry.read_only)
+            .filter(|entry| entry.name.starts_with("std/"))
+            .collect::<Vec<_>>();
+        let collection = found
+            .iter()
+            .filter(|entry| entry.read_only && !entry.name.starts_with("std/"))
             .collect::<Vec<_>>();
         egui::ScrollArea::vertical().show(ui, |ui| {
             if !personal.is_empty() {
@@ -1610,6 +2504,18 @@ impl Editor {
                 .default_open(true)
                 .show(ui, |ui| {
                     for entry in standard {
+                        sigil_catalog_row(ui, k, pane, entry, &mut action);
+                    }
+                });
+            }
+            if !collection.is_empty() {
+                egui::CollapsingHeader::new(format!(
+                    "rebis-collection/ · {} read-only modules",
+                    collection.len()
+                ))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for entry in collection {
                         sigil_catalog_row(ui, k, pane, entry, &mut action);
                     }
                 });
@@ -1727,46 +2633,19 @@ impl Editor {
             if ui.button("mandala").clicked() {
                 actions.push(SourceAction::Draw(pane.editor.source().to_string()));
             }
+            if ui
+                .button("generation")
+                .on_hover_text("open this Rebis source as a live byte automaton on a new tab")
+                .clicked()
+            {
+                actions.push(SourceAction::Generation(pane.editor.source().to_string()));
+            }
             if ui.button("format").clicked() {
                 actions.push(SourceAction::Format);
             }
-            if ui.button("run program").clicked() {
-                match pane.run_program_source() {
-                    Ok((text, scope)) => actions.push(SourceAction::Run {
-                        text,
-                        scope,
-                        lane: runs::Lane::Serial,
-                    }),
-                    Err(error) => pane.notice = Some(error),
-                }
-            }
-            if ui.button("run block").clicked() {
-                match pane.run_block_source() {
-                    Ok(text) => actions.push(SourceAction::Run {
-                        text,
-                        scope: runs::Scope::Block,
-                        lane: runs::Lane::Serial,
-                    }),
-                    Err(error) => pane.notice = Some(error),
-                }
-            }
-            if ui.button("run parallel").clicked() {
-                match pane.run_program_source() {
-                    Ok((text, scope)) => actions.push(SourceAction::Run {
-                        text,
-                        scope,
-                        lane: runs::Lane::Parallel,
-                    }),
-                    Err(error) => pane.notice = Some(error),
-                }
-            }
-            if ui.button("run block ∥").clicked() {
-                match pane.run_block_source() {
-                    Ok(text) => actions.push(SourceAction::Run {
-                        text,
-                        scope: runs::Scope::Block,
-                        lane: runs::Lane::Parallel,
-                    }),
+            if ui.button("run").clicked() {
+                match pane.run_options_source() {
+                    Ok((program, block)) => actions.push(SourceAction::Run { program, block }),
                     Err(error) => pane.notice = Some(error),
                 }
             }
@@ -1791,6 +2670,12 @@ impl Editor {
                 if ui.button("save file").clicked() {
                     actions.push(SourceAction::SaveFile {
                         path: pane.file_path.clone(),
+                        text: pane.editor.source().to_string(),
+                    });
+                }
+                if ui.button("save as…").clicked() {
+                    actions.push(SourceAction::ChooseSaveFile {
+                        suggested: pane.file_path.clone(),
                         text: pane.editor.source().to_string(),
                     });
                 }
@@ -1834,17 +2719,11 @@ impl Editor {
         });
 
         let parsed = rebis_lang::parse(pane.editor.source());
-        let status = match &parsed {
-            _ if pane.editor.source().trim().is_empty() => String::new(),
-            Ok(_) => "valid".to_string(),
-            Err(error) => error.to_string(),
-        };
         if let Some(note) = pane.notice.clone() {
             ui.colored_label(k.faint, note);
         }
+        source_status(ui, k, pane.editor.source());
         ui.horizontal(|ui| {
-            ui.colored_label(k.faint, status);
-            ui.separator();
             let mut vim_enabled = pane.vim_enabled;
             if ui
                 .toggle_value(
@@ -1951,19 +2830,14 @@ impl Editor {
                 }
                 SourceAction::SaveFile { path: raw, text } => {
                     let path = self.resolve_path(&raw);
-                    match std::fs::write(&path, text) {
-                        Ok(()) => {
-                            if let Some(Pane::Source(pane)) = self.tabs.active_mut() {
-                                pane.editor.mark_clean();
-                                pane.file_path = path.display().to_string();
-                            }
-                            self.set_source_notice(format!("saved {}", path.display()));
-                        }
-                        Err(error) => self.set_source_notice(format!(
-                            "could not save {}: {error}",
-                            path.display()
-                        )),
+                    if raw.trim().is_empty() || path.is_dir() {
+                        self.choose_source_save_path(&raw, text);
+                    } else {
+                        self.save_source_file(path, text);
                     }
+                }
+                SourceAction::ChooseSaveFile { suggested, text } => {
+                    self.choose_source_save_path(&suggested, text);
                 }
                 SourceAction::Format => {
                     if let Some(Pane::Source(pane)) = self.tabs.active_mut() {
@@ -1988,12 +2862,21 @@ impl Editor {
                     }
                     Err(error) => self.set_source_notice(error.to_string()),
                 },
-                SourceAction::Run { text, scope, lane } => {
-                    // Route through the modal so the user picks dry/direct/chaos
-                    // and serial/parallel. The button's lane seeds the modal, so
-                    // "run parallel" still pre-selects the parallel lane.
-                    self.runs.lane = lane;
-                    self.request_run(text, scope, std::collections::HashSet::new());
+                SourceAction::Generation(text) => {
+                    self.open_generation_from_source(text);
+                }
+                SourceAction::Run { program, block } => {
+                    let scope = if block.is_some() {
+                        runs::Scope::Block
+                    } else {
+                        runs::Scope::Program
+                    };
+                    self.request_run_options(
+                        program,
+                        block,
+                        std::collections::HashSet::new(),
+                        scope,
+                    );
                 }
                 SourceAction::Copy(text) => {
                     ui.ctx().copy_text(text);
@@ -2046,6 +2929,59 @@ impl Editor {
         }
     }
 
+    fn save_source_file(&mut self, path: std::path::PathBuf, text: String) -> bool {
+        match std::fs::write(&path, &text) {
+            Ok(()) => {
+                if let Some(Pane::Source(pane)) = self.tabs.active_mut() {
+                    pane.editor.mark_clean();
+                    pane.file_path = path.display().to_string();
+                }
+                self.set_source_notice(format!("saved {}", path.display()));
+                true
+            }
+            Err(error) => {
+                self.set_source_notice(format!("could not save {}: {error}", path.display()));
+                false
+            }
+        }
+    }
+
+    fn choose_source_save_path(&mut self, suggested: &str, text: String) -> bool {
+        let candidate = self.resolve_path(suggested);
+        let directory = if candidate.is_dir() {
+            candidate.clone()
+        } else {
+            candidate
+                .parent()
+                .filter(|path| path.is_dir())
+                .map(|path| path.to_path_buf())
+                .unwrap_or_else(|| self.cwd.clone())
+        };
+        let file_name = if candidate.is_dir() {
+            "program.rebis".to_string()
+        } else {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or("program.rebis")
+                .to_string()
+        };
+        let selected = rfd::FileDialog::new()
+            .set_title("Save Rebis source")
+            .set_directory(directory)
+            .set_file_name(file_name)
+            .add_filter("Rebis source", &["rebis"])
+            .save_file();
+        match selected {
+            Some(path) => self.save_source_file(path, text),
+            None => {
+                self.set_source_notice("save canceled".to_string());
+                false
+            }
+        }
+    }
+
     fn execute_visual_vim_command(&mut self, raw: &str) {
         let command = raw.trim();
         if command.is_empty() {
@@ -2066,29 +3002,13 @@ impl Editor {
                 .filter(|path| !path.is_empty())
                 .unwrap_or(&current_path);
             if raw_path.is_empty() {
-                editor.set_source_notice("no file name · use :w path.rebis".to_string());
-                return false;
+                return editor.choose_source_save_path(raw_path, source.clone());
             }
             let path = editor.resolve_path(raw_path);
-            match std::fs::write(&path, &source) {
-                Ok(()) => {
-                    if let Some(Pane::Source(pane)) = editor.tabs.get_mut(id) {
-                        pane.editor.mark_clean();
-                        pane.file_path = path.display().to_string();
-                    }
-                    editor.set_source_notice(format!(
-                        "wrote {} bytes to {}",
-                        source.len(),
-                        path.display()
-                    ));
-                    true
-                }
-                Err(error) => {
-                    editor
-                        .set_source_notice(format!("could not write {}: {error}", path.display()));
-                    false
-                }
+            if path.is_dir() {
+                return editor.choose_source_save_path(raw_path, source.clone());
             }
+            editor.save_source_file(path, source.clone())
         };
 
         match command {
@@ -2162,12 +3082,22 @@ impl Editor {
                         self.doc_mut().pending = None;
                     }
                 }
+                ui.colored_label(
+                    self.ink.faint,
+                    "place →/← alone, then use `father of` to add its ordered children",
+                );
                 ui.add_space(10.0);
                 ui.colored_label(self.ink.faint, "LINK");
-                ui.colored_label(self.ink.faint, "only links compose");
+                ui.colored_label(self.ink.faint, "complete a flow between two forms");
+                ui.colored_label(self.ink.faint, "father of: parent, then children in order");
                 for (label, color, tool) in [
-                    // One arrow. `(<- a b)` is `(-> b a)`, so the direction you
-                    ("→  arrow", self.ink.blue, Tool::Flow(Form::Forward)),
+                    // One two-click shortcut. `(<- a b)` is `(-> b a)`, so the
+                    // direction you see is the direction in the source.
+                    (
+                        "→  connect flow",
+                        self.ink.secondary,
+                        Tool::Flow(Form::Forward),
+                    ),
                     ("┈  father of", self.ink.faint, Tool::Father),
                     ("▹  select", self.ink.ink, Tool::Select),
                 ] {
@@ -2196,8 +3126,14 @@ impl Editor {
         let doc = self.doc_mut();
         match fresh {
             Some(src) if src != doc.generated => {
+                // `generated` stays the canonical one-line form, so drift
+                // detection above compares like with like. The panel shows the
+                // readable, indented form: source generated from the drawing
+                // (or loaded) always appears formatted.
                 doc.generated = src.clone();
-                doc.text = src;
+                doc.text = rebis_lang::parse(&src)
+                    .map(|expr| rebis_lang::pretty_format(&expr))
+                    .unwrap_or(src);
             }
             _ => {}
         }
@@ -2215,13 +3151,76 @@ impl Editor {
         }
     }
 
+    /// Show and edit the selected form's one-based child positions. Positions
+    /// are local to this parent: a child is `1..=n`, where `n` is the number of
+    /// children attached to the selected form. Link creation supplies the
+    /// initial order; changing a number only reorders those siblings.
+    fn child_order_editor(&mut self, ui: &mut egui::Ui, father: NodeId, editable: bool) {
+        let children = self.doc().mandala.children(father);
+        if children.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        ui.colored_label(self.ink.faint, "CHILD ORDER · 1–n");
+        ui.colored_label(
+            self.ink.faint,
+            "link order is the default; numbers are configurable",
+        );
+        let mut requested = None;
+        for (index, child_id) in children.iter().copied().enumerate() {
+            let caption = self
+                .doc()
+                .mandala
+                .node(child_id)
+                .map(|child| {
+                    let caption = child.caption();
+                    if caption.is_empty() {
+                        child.form.name().to_string()
+                    } else {
+                        truncate(&caption)
+                    }
+                })
+                .unwrap_or_else(|| "missing".to_string());
+            let mut number = index + 1;
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        editable,
+                        egui::DragValue::new(&mut number).range(1..=children.len()),
+                    )
+                    .changed()
+                {
+                    requested = Some((child_id, number));
+                }
+                ui.colored_label(self.ink.ink, caption);
+            });
+        }
+        if let Some((child, number)) = requested {
+            if self.doc().mandala.child_number(father, child) != Some(number) {
+                let doc = self.doc_mut();
+                doc.checkpoint();
+                doc.mandala.set_child_number(father, child, number);
+            }
+        }
+    }
+
     fn side(&mut self, ctx: &egui::Context) {
         let mut open_in_editor = false;
         let mut format_source = false;
         let mut format_drawing = false;
-        let editable = self.doc().canvas_mode == CanvasMode::Planar;
+        let graph_editable = self.doc().canvas_mode == CanvasMode::Planar;
+        // Spatial mode is read-only for graph topology, but it is still the
+        // same selected mandala. Labels, prompts, macro names, and the source
+        // buffer therefore remain editable while the user inspects the 3D
+        // projection.
+        let text_editable = true;
         egui::SidePanel::right("side")
-            .exact_width(330.0)
+            // Resizable, not exact: the source box and the REBIS controls are
+            // as wide as the program in them, and a pane that cannot grow can
+            // only clip. 330 stays the default so nothing moves on first run.
+            .default_width(330.0)
+            .width_range(300.0..=760.0)
+            .resizable(true)
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 let selection_len = self.doc().selection_len();
@@ -2235,7 +3234,7 @@ impl Editor {
                 if let Some(id) = self.doc().primary_selected() {
                     if let Some(node) = self.doc_mut().mandala.node(id).cloned() {
                         ui.colored_label(self.ink.faint, node.form.name().to_uppercase());
-                        if editable && node.form.uses_text() {
+                        if text_editable && node.form.uses_text() {
                             let mut text = node.text.clone();
                             // A tall, wrapping field inside a height-capped
                             // scroll area: long text wraps and scrolls instead
@@ -2263,7 +3262,7 @@ impl Editor {
                                 doc.mandala.set_text(id, text);
                             }
                         }
-                        if editable {
+                        if text_editable {
                             if let Form::Function(params) = &node.form {
                                 let mut joined = params.join(" ");
                                 if ui.text_edit_singleline(&mut joined).changed() {
@@ -2280,6 +3279,7 @@ impl Editor {
                             self.ink.faint,
                             format!("takes {} ordered children", node.form.arity()),
                         );
+                        self.child_order_editor(ui, id, graph_editable);
                         // The code of the selected block — the exact Rebis the
                         // selection generates on its own, so selecting a shape
                         // shows what that shape (and its operands) is.
@@ -2294,6 +3294,10 @@ impl Editor {
                         );
                         match self.doc().selected_source() {
                             Ok(Some(code)) => {
+                                // Show the block in the readable, indented form.
+                                let code = rebis_lang::parse(&code)
+                                    .map(|expr| rebis_lang::pretty_format(&expr))
+                                    .unwrap_or(code);
                                 egui::ScrollArea::vertical()
                                     .max_height(160.0)
                                     .id_salt(("selected-source", id.0))
@@ -2320,7 +3324,7 @@ impl Editor {
                             }
                         }
                         ui.add_space(4.0);
-                        if editable
+                        if graph_editable
                             && ui
                                 .button(if selection_len > 1 {
                                     "delete selection"
@@ -2331,10 +3335,10 @@ impl Editor {
                         {
                             self.doc_mut().delete_selected();
                         }
-                        if !editable {
+                        if !graph_editable {
                             ui.colored_label(
                                 self.ink.faint,
-                                "3D inspection · switch to 2D to edit",
+                                "3D inspection · text edits are live; switch to 2D for graph edits",
                             );
                         }
                         ui.separator();
@@ -2342,7 +3346,9 @@ impl Editor {
                 }
                 let k = self.ink;
                 let exact = self.doc().mandala.to_rebis();
-                ui.horizontal(|ui| {
+                // `open in editor` + `format` + `format mandala` overflow 330px
+                // together; wrapping keeps the last button reachable.
+                ui.horizontal_wrapped(|ui| {
                     ui.colored_label(k.faint, "REBIS");
                     let typed = self.doc().text.clone();
                     let status = if typed.trim().is_empty() {
@@ -2362,7 +3368,7 @@ impl Editor {
                     // rewrite it in canonical indented form. Only ever applied
                     // to source that parses, so a half-typed program is never
                     // mangled.
-                    if editable
+                    if text_editable
                         && ui
                             .small_button("format")
                             .on_hover_text("rewrite the source in canonical form")
@@ -2372,7 +3378,7 @@ impl Editor {
                     }
                     // Redraw the drawing itself with the standard circuit
                     // layout, so a hand-dragged graph snaps back onto the grid.
-                    if editable
+                    if graph_editable
                         && ui
                             .small_button("format mandala")
                             .on_hover_text("re-lay the mandala out as a circuit")
@@ -2382,18 +3388,34 @@ impl Editor {
                     }
                 });
                 let mut edited = false;
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                // Both directions: Rebis indentation carries meaning, so the
+                // code box must not soft-wrap — which leaves scrolling as the
+                // only way to reach a long line.
+                egui::ScrollArea::both().show(ui, |ui| {
+                    // Same colouring and the same parenthesis matching as the
+                    // Source tab: this box holds Rebis too, and one without
+                    // them reads as a different editor.
+                    let id = egui::Id::new("side_source_edit");
+                    let pair = matched_pair(ui.ctx(), id, &self.doc().text);
+                    let mut layouter = |ui: &egui::Ui, text: &str, _wrap: f32| {
+                        ui.fonts(|fonts| {
+                            fonts.layout_job(rebis_layout_job(text, k, 12.5, &|_| false, pair))
+                        })
+                    };
                     let doc = self.doc_mut();
                     edited = ui
                         .add(
                             egui::TextEdit::multiline(&mut doc.text)
+                                .id(id)
                                 .code_editor()
-                                .interactive(editable)
+                                .interactive(text_editable)
                                 .desired_width(f32::INFINITY)
-                                .desired_rows(24),
+                                .desired_rows(24)
+                                .layouter(&mut layouter),
                         )
                         .changed();
                 });
+                source_status(ui, k, &self.doc().text);
                 // Typing redraws the canvas as soon as what you have typed is a
                 // program.
                 if edited {
@@ -2442,9 +3464,15 @@ impl Editor {
         let mut cancel_all = false;
         let mut remove = false;
         let mut deny_run: Option<u64> = None;
+        // Typing into a waiting run's input box, and sending it. The run list is
+        // walked immutably, so both are collected here and applied after it.
+        let mut input_edit: Option<(u64, String)> = None;
+        let mut deliver: Option<(u64, String)> = None;
         let mut copy = false;
         let mut write = false;
         let mut rerun = None;
+        let mut run_chat = None;
+        let mut auto_generation = None;
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -2517,13 +3545,23 @@ impl Editor {
                 }
                 ui.columns(2, |columns| {
                     columns[0].colored_label(k.faint, "REBIS SOURCE");
+                    let id = egui::Id::new("run_draft_source");
+                    let pair = matched_pair(columns[0].ctx(), id, &self.runs.draft_source);
+                    let mut layouter = |ui: &egui::Ui, text: &str, _wrap: f32| {
+                        ui.fonts(|fonts| {
+                            fonts.layout_job(rebis_layout_job(text, k, 12.5, &|_| false, pair))
+                        })
+                    };
                     columns[0].add(
                         egui::TextEdit::multiline(&mut self.runs.draft_source)
+                            .id(id)
                             .code_editor()
                             .desired_width(f32::INFINITY)
                             .desired_rows(7)
-                            .hint_text("\"prompt\""),
+                            .hint_text("\"prompt\"")
+                            .layouter(&mut layouter),
                     );
+                    source_status(&mut columns[0], k, &self.runs.draft_source);
                     columns[1].colored_label(k.faint, "RECORD / INPUT");
                     columns[1].add(
                         egui::TextEdit::multiline(&mut self.runs.input)
@@ -2546,9 +3584,6 @@ impl Editor {
                         if ui.button("run").clicked() {
                             submit = Some(self.runs.lane);
                         }
-                        if ui.button("run parallel").clicked() {
-                            submit = Some(runs::Lane::Parallel);
-                        }
                     });
                     ui.colored_label(if valid { k.faint } else { k.accent }, diagnostic);
                 });
@@ -2563,6 +3598,7 @@ impl Editor {
         // row; clicking it selects and toggles its expansion; an expanded run
         // shows its controls and captured stream inline beneath its header.
         let mut toggle = None;
+        let mut run_generation = None;
         egui::ScrollArea::vertical()
             .id_salt("run_list")
             .auto_shrink([false, false])
@@ -2586,6 +3622,23 @@ impl Editor {
                         {
                             select = Some(run.id);
                             toggle = Some(run.id);
+                        }
+                        if ui
+                            .small_button("chat")
+                            .on_hover_text("ask about this run with a fresh live snapshot")
+                            .clicked()
+                        {
+                            run_chat = Some(run.id);
+                        }
+                        if ui
+                            .small_button("generation")
+                            .on_hover_text(
+                                "watch this run as the automaton it computes — its geometry is \
+                                 the lattice, its answers are the rule",
+                            )
+                            .clicked()
+                        {
+                            run_generation = Some(run.id);
                         }
                         // Remove is always available in the list itself, on any
                         // run that is not currently running — the terminal's
@@ -2624,6 +3677,34 @@ impl Editor {
                             if let Some(reason) = &run.pause_reason {
                                 ui.colored_label(k.accent, reason);
                             }
+                            // A run stopped on an `&` port is waiting for a
+                            // person, not for a process. This is where that
+                            // person answers: the value goes to the port and the
+                            // run continues from exactly where it stopped.
+                            if let Some(port) = run.awaiting_port() {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(k.accent, format!("⌷ {port} ←"));
+                                    let mut draft = run.input_draft.clone();
+                                    let field = ui.add(
+                                        egui::TextEdit::singleline(&mut draft)
+                                            .id(egui::Id::new(("run_input", id)))
+                                            .desired_width(300.0)
+                                            .hint_text("value for this port · Enter sends"),
+                                    );
+                                    if draft != run.input_draft {
+                                        input_edit = Some((id, draft.clone()));
+                                    }
+                                    let entered = field.lost_focus()
+                                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                                    let sent = ui.button("send").clicked() || entered;
+                                    // An empty value is not an answer: the port
+                                    // would receive nothing and the run would
+                                    // park again with no sign of why.
+                                    if sent && !draft.trim().is_empty() {
+                                        deliver = Some((id, draft));
+                                    }
+                                });
+                            }
                             ui.horizontal_wrapped(|ui| {
                                 if state == runs::State::AwaitingPermission {
                                     if ui.button("allow once").clicked() {
@@ -2639,9 +3720,7 @@ impl Editor {
                                     }
                                 }
                                 if state == runs::State::Running
-                                    && ui
-                                        .button(if paused { "resume" } else { "pause" })
-                                        .clicked()
+                                    && ui.button(if paused { "resume" } else { "pause" }).clicked()
                                 {
                                     select = Some(id);
                                     pause = true;
@@ -2694,17 +3773,16 @@ impl Editor {
                                 );
                             }
                             for line in &run.output {
-                                let tone = if line.starts_with("result")
-                                    || line.starts_with("complete")
-                                {
-                                    k.ink
-                                } else if line.starts_with("diagnostic")
-                                    || line.starts_with("paused")
-                                {
-                                    k.accent
-                                } else {
-                                    k.faint
-                                };
+                                let tone =
+                                    if line.starts_with("result") || line.starts_with("complete") {
+                                        k.ink
+                                    } else if line.starts_with("diagnostic")
+                                        || line.starts_with("paused")
+                                    {
+                                        k.accent
+                                    } else {
+                                        k.faint
+                                    };
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(line).monospace().color(tone),
@@ -2729,7 +3807,17 @@ impl Editor {
         }
         if let Some(parallel) = submit {
             let source = self.runs.draft_source.clone();
-            self.runs.submit(source, Some(parallel), &self.cwd);
+            auto_generation = Some(self.runs.submit(source, Some(parallel), &self.cwd));
+        }
+        // The draft lands before the send, so a value typed and sent in the same
+        // frame is the value delivered — and `deliver_input` clears it after.
+        if let Some((id, draft)) = input_edit {
+            if let Some(run) = self.runs.runs.iter_mut().find(|run| run.id == id) {
+                run.input_draft = draft;
+            }
+        }
+        if let Some((id, value)) = deliver {
+            self.runs.deliver_input(id, &value);
         }
         if let Some(authority) = permission {
             self.runs.grant_selected(authority, &self.cwd);
@@ -2751,7 +3839,18 @@ impl Editor {
             self.runs.remove_selected();
         }
         if let Some(source) = rerun {
-            self.runs.submit(source, None, &self.cwd);
+            auto_generation = Some(self.runs.submit(source, None, &self.cwd));
+        }
+        if let Some(id) = run_generation {
+            self.runs.selected = Some(id);
+            self.open_generation();
+        }
+        if let Some(id) = run_chat {
+            self.open_run_chat(id);
+        }
+        if let Some(id) = auto_generation {
+            self.runs.selected = Some(id);
+            self.open_generation();
         }
         if copy {
             ui.ctx().copy_text(self.runs.selected_output());
@@ -2987,7 +4086,7 @@ impl Editor {
                 let state = task.state;
                 let output = task.output.clone();
                 ui.colored_label(
-                    k.blue,
+                    k.secondary,
                     format!(
                         "#{} · {} · {} · {}",
                         task.id,
@@ -3110,7 +4209,7 @@ impl Editor {
                 let hint = if self.on_mandala()
                     && self.doc().canvas_mode == CanvasMode::Spatial
                 {
-                    "drag to orbit · arrows move · wheel to zoom · click selects · 2D edits the source"
+                    "drag to orbit · arrows move · wheel to zoom · click selects · edit text in the side panel"
                 } else {
                     "drag/pan · right-drag marquee · Ctrl-click toggles · Ctrl-C/V block · Delete · Ctrl-Z"
                 };
@@ -3131,6 +4230,12 @@ impl Editor {
                             Tool::Place(_) | Tool::Select => String::new(),
                         };
                         ui.colored_label(self.ink.ink, message);
+                    }
+                    if matches!(self.tool, Tool::Place(Form::Forward | Form::Backflow)) {
+                        ui.colored_label(
+                            self.ink.ink,
+                            "standalone arrow: place it, then link one child at a time",
+                        );
                     }
                 }
                 ui.separator();
@@ -3254,6 +4359,32 @@ impl Editor {
             }
         }
 
+        // A wall is a narrow target, so the cursor names it before the drag
+        // begins — otherwise resizing is invisible until stumbled on.
+        if response.hovered() && matches!(self.drag, Drag::None) {
+            if let Some(p) = response.hover_pos() {
+                let (sx, sy) = local(p);
+                let (wx, wy) = self.doc().view.to_world(sx, sy);
+                if let Some(grab) = self.doc().mandala.resize_grab(wx, wy) {
+                    let centre = self
+                        .doc()
+                        .mandala
+                        .node(grab.id)
+                        .map(|node| (node.x, node.y))
+                        .unwrap_or((wx, wy));
+                    ui.ctx().set_cursor_icon(match (grab.wide, grab.tall) {
+                        // On a corner the cursor names the diagonal it lies on.
+                        (true, true) if (wx - centre.0 > 0.0) == (wy - centre.1 > 0.0) => {
+                            egui::CursorIcon::ResizeNwSe
+                        }
+                        (true, true) => egui::CursorIcon::ResizeNeSw,
+                        (true, false) => egui::CursorIcon::ResizeHorizontal,
+                        _ => egui::CursorIcon::ResizeVertical,
+                    });
+                }
+            }
+        }
+
         // Secondary drag is always a marquee, independent of the active
         // drawing tool. Primary drag retains node movement and canvas panning.
         if !menu_open && response.drag_started_by(PointerButton::Secondary) {
@@ -3271,32 +4402,42 @@ impl Editor {
             if let Some(p) = response.interact_pointer_pos() {
                 let (sx, sy) = local(p);
                 let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
-                let hit = self.doc_mut().mandala.hit(wx, wy);
-                self.drag = match hit {
-                    Some(id) => {
-                        self.doc_mut().checkpoint();
-                        let n = self
-                            .doc()
-                            .mandala
-                            .node(id)
-                            .map(|n| (n.x, n.y))
-                            .unwrap_or((wx, wy));
-                        Drag::Node {
-                            id,
-                            grab: (wx - n.0, wy - n.1),
-                        }
-                    }
-                    None => Drag::Pan,
-                };
+                let drag = Drag::beginning_at(&self.doc().mandala, wx, wy);
+                // Moving a shape and sizing a box both change the drawing;
+                // panning only changes where it is looked at.
+                if !matches!(drag, Drag::Pan) {
+                    self.doc_mut().checkpoint();
+                }
+                self.drag = drag;
             }
         }
         if response.dragged_by(PointerButton::Primary) {
             match self.drag {
+                Drag::Resize(grab) => {
+                    if let Some(p) = response.interact_pointer_pos() {
+                        let (sx, sy) = local(p);
+                        let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
+                        let (mut half_w, mut half_h) = self.doc().mandala.extent(grab.id);
+                        if let Some(node) = self.doc().mandala.node(grab.id) {
+                            if grab.wide {
+                                half_w = (wx - node.x).abs();
+                            }
+                            if grab.tall {
+                                half_h = (wy - node.y).abs();
+                            }
+                        }
+                        self.doc_mut().mandala.resize(grab.id, half_w, half_h);
+                    }
+                }
                 Drag::Node { id, grab } => {
                     if let Some(p) = response.interact_pointer_pos() {
                         let (sx, sy) = local(p);
                         let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
-                        self.doc_mut().mandala.move_to(id, wx - grab.0, wy - grab.1);
+                        // A box and what it holds read as one object, so
+                        // dragging the box carries its interior along.
+                        self.doc_mut()
+                            .mandala
+                            .move_group_to(id, wx - grab.0, wy - grab.1);
                     }
                 }
                 Drag::Pan => {
@@ -3346,12 +4487,47 @@ impl Editor {
         // Right-click opens a context menu. A right *drag* is still the
         // marquee; egui only opens the menu on a click that did not drag.
         let mut reset_view = false;
+        let mut copy = false;
+        let mut paste = false;
+        let has_selection = self.doc().selection_len() > 0;
+        // Paste is offered whenever something is on either clipboard — the
+        // in-app block or Rebis source on the OS clipboard.
+        let can_paste = self.clipboard.is_some();
         response.context_menu(|ui| {
+            if ui
+                .add_enabled(has_selection, egui::Button::new("copy block"))
+                .clicked()
+            {
+                copy = true;
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(can_paste, egui::Button::new("paste"))
+                .clicked()
+            {
+                paste = true;
+                ui.close_menu();
+            }
+            ui.separator();
             if ui.button("reset view").clicked() {
                 reset_view = true;
                 ui.close_menu();
             }
         });
+        if copy {
+            self.copy_selected(ui.ctx());
+        }
+        if paste {
+            // Prefer OS-clipboard source so a block copied in another window
+            // pastes here; fall back to the in-app clipboard.
+            let os_text = ui.ctx().input(|i| {
+                i.events.iter().find_map(|event| match event {
+                    egui::Event::Paste(text) => Some(text.clone()),
+                    _ => None,
+                })
+            });
+            self.paste_selected(os_text.as_deref());
+        }
         if reset_view {
             self.doc_mut().view = View::new();
         }
@@ -3413,7 +4589,11 @@ impl Editor {
             if input.key_down(Key::ArrowDown) {
                 forward_amount -= speed;
             }
-            (strafe, forward_amount, strafe != 0.0 || forward_amount != 0.0)
+            (
+                strafe,
+                forward_amount,
+                strafe != 0.0 || forward_amount != 0.0,
+            )
         });
         if held {
             let camera = &mut self.doc_mut().camera;
@@ -3432,20 +4612,41 @@ impl Editor {
         let projected = project_spatial(&layout, response.rect, self.doc().camera);
         if !menu_open && response.clicked() {
             if let Some(pointer) = response.interact_pointer_pos() {
+                // Look up a projected node's on-screen centre by id.
+                let pos_of = |id: NodeId| {
+                    projected
+                        .iter()
+                        .find(|n| n.id == id)
+                        .map(|n| (n.position, n.scale))
+                };
                 let selected = projected
                     .iter()
                     .filter_map(|node| {
-                        let distance = node.position.distance(pointer);
                         let form = self.doc().mandala.node(node.id)?;
+                        if form.shape() == Shape::Arrow {
+                            // A complete flow is drawn as the arrow *between its
+                            // two children*, not at its own cone position, so
+                            // that midpoint is where it is clickable.
+                            let (point, scale) = self
+                                .doc()
+                                .mandala
+                                .flow_result(node.id)
+                                .and(match self.doc().mandala.children(node.id)[..] {
+                                    [a, b] => Some((a, b)),
+                                    _ => None,
+                                })
+                                .and_then(|(a, b)| Some((pos_of(a)?, pos_of(b)?)))
+                                .map(|((pa, sa), (pb, sb))| (pa + (pb - pa) * 0.5, (sa + sb) * 0.5))
+                                .unwrap_or((node.position, node.scale));
+                            let distance = point.distance(pointer);
+                            return (distance <= 20.0 * scale.max(0.6))
+                                .then_some((node.id, distance));
+                        }
                         let scale = node.scale.max(0.6);
                         let offset = (pointer - node.position) / scale;
-                        let hit = if form.shape() == Shape::Arrow {
-                            distance <= 18.0 * scale
-                        } else {
-                            form.shape()
-                                .contains(f64::from(offset.x), f64::from(offset.y))
-                        };
-                        hit.then_some((node.id, distance))
+                        form.shape()
+                            .contains(f64::from(offset.x), f64::from(offset.y))
+                            .then_some((node.id, node.position.distance(pointer)))
                     })
                     .min_by(|left, right| left.1.total_cmp(&right.1))
                     .map(|(id, _)| id);
@@ -3577,8 +4778,8 @@ impl Editor {
         let radius = 21.0;
         let head = 5.5;
         let accent = self.ink.accent;
-        let purple = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38);
-        let stroke = UiStroke::new(1.15, purple);
+        let wash = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38);
+        let stroke = UiStroke::new(1.15, wash);
         for ray in 0..8 {
             let angle = std::f32::consts::TAU * ray as f32 / 8.0;
             let tip = Pos2::new(
@@ -3592,7 +4793,7 @@ impl Editor {
                 painter.line_segment([tip, barb], stroke);
             }
         }
-        painter.circle_filled(centre, 1.7, purple);
+        painter.circle_filled(centre, 1.7, wash);
     }
 
     fn arrow_head(
@@ -3631,10 +4832,13 @@ impl Editor {
                 painter.circle(centre, NODE_R as f32 * zoom, k.fill, outline);
             }
             Shape::Square => {
+                // `[m]` writes its mediator inside the brackets, so the box
+                // grows to hold it rather than pushing it out as a child.
+                let (half_w, half_h) = self.doc().mandala.extent(node.id);
                 painter.rect(
                     Rect::from_center_size(
                         centre,
-                        Vec2::new(NODE_R as f32 * 2.0, NODE_RY as f32 * 2.0) * zoom,
+                        Vec2::new(half_w as f32 * 2.0, half_h as f32 * 2.0) * zoom,
                     ),
                     4.0 * zoom,
                     k.fill,
@@ -3660,6 +4864,12 @@ impl Editor {
                     .collect();
                 painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
             }
+            Shape::Hexagon => {
+                let points = Shape::hexagon_points()
+                    .map(|(x, y)| centre + Vec2::new(x * zoom, y * zoom))
+                    .to_vec();
+                painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
+            }
             Shape::Amp => {
                 let points = Shape::inlet_points()
                     .iter()
@@ -3679,7 +4889,7 @@ impl Editor {
                         "→"
                     },
                     FontId::monospace(18.0 * zoom),
-                    k.blue,
+                    k.secondary,
                 );
             }
             // A sigil is the shape; the disc behind it is the click target
@@ -3748,10 +4958,14 @@ impl Editor {
         let k = self.ink;
         let hot = self.doc().is_selected(node.id) || self.doc().pending == Some(node.id);
         let accented = hot || recursive || shape == Shape::Arrow;
-        let outline_color = if hot || recursive {
+        // An arrow is red whatever else is true of it. Selecting a block must
+        // not repaint the one form whose colour carries its meaning; the
+        // thicker outline below, and the accent ring for recursion, already
+        // say everything selection needs to say.
+        let outline_color = if shape == Shape::Arrow {
+            k.secondary
+        } else if hot || recursive {
             k.accent
-        } else if shape == Shape::Arrow {
-            k.blue
         } else {
             k.faint
         };
@@ -3821,7 +5035,7 @@ impl Editor {
         painter.text(
             painter.clip_rect().left_top() + Vec2::new(14.0, 14.0),
             Align2::LEFT_TOP,
-            "STRUCTURAL 3D  ·  Z = nesting  ·  purple arcs = recursion",
+            "STRUCTURAL 3D  ·  Z = nesting  ·  lifted arcs = recursion",
             FontId::monospace(10.0),
             k.faint,
         );
@@ -3837,20 +5051,13 @@ impl Editor {
         }
 
         let find = |id: NodeId| projected.iter().find(|node| node.id == id);
-        for edge in self.doc().mandala.arrows() {
+        for edge in visible_edges(&self.doc().mandala) {
             let (Some(from), Some(to)) = (find(edge.from), find(edge.to)) else {
                 continue;
             };
-            let flow_edge = self
-                .doc()
-                .mandala
-                .node(edge.to)
-                .is_some_and(|node| node.shape() == Shape::Arrow);
-            // Structural links are presented as father → child. Flow nodes
-            // keep their source direction because their blue edges are part of
-            // the explicit `->` / `<-` form.
-            let (from, to) = if flow_edge { (from, to) } else { (to, from) };
-            let recursive = layout.recursive_edges.contains(edge);
+            let recursive = edge
+                .source
+                .is_some_and(|source| layout.recursive_edges.contains(&source));
             let delta = to.position - from.position;
             let length = delta.length();
             let direction = if length > 0.001 {
@@ -3860,22 +5067,17 @@ impl Editor {
             };
             let start = from.position + direction * NODE_R as f32 * from.scale.min(1.0);
             let end = to.position - direction * (NODE_R as f32 + 4.0) * to.scale.min(1.0);
-            // Edges into an explicit flow node participate in the blue
-            // arrow form; every ordinary operand/child edge remains grey.
-            // Either way, an edge touching the selection turns purple.
-            // Purple marks an edge *inside* the selected block: both endpoints
-            // selected. An edge to a node just outside (e.g. the block's
-            // parent) stays neutral, so selecting a block never lights the
-            // arrow climbing up to its parent.
-            let touches =
-                self.doc().is_selected(edge.from) && self.doc().is_selected(edge.to);
-            let link_color = if touches {
-                k.accent
-            } else if flow_edge {
-                k.blue
-            } else {
-                k.faint
+            let touches = match edge.kind {
+                VisibleEdgeKind::Father => {
+                    self.doc().is_selected(edge.from) && self.doc().is_selected(edge.owner)
+                }
+                VisibleEdgeKind::Flow => {
+                    let hot = self.doc().is_selected(edge.owner)
+                        || self.doc().pending == Some(edge.owner);
+                    hot || (self.doc().is_selected(edge.from) && self.doc().is_selected(edge.to))
+                }
             };
+            let link_color = edge_colour(edge.kind, touches, k);
             if recursive {
                 let stroke = UiStroke::new(if touches { 2.8 } else { 2.2 }, link_color);
                 let lift = (start.distance(end) * 0.42).clamp(48.0, 150.0);
@@ -3917,6 +5119,9 @@ impl Editor {
             let Some(node) = self.doc().mandala.node(projected_node.id) else {
                 continue;
             };
+            if node.shape() == Shape::Arrow && complete_flow(&self.doc().mandala, node.id) {
+                continue;
+            }
             let spatial = layout.node(node.id);
             let recursive = spatial.is_some_and(|node| node.recursive);
             self.paint_graph_node(
@@ -3944,6 +5149,31 @@ impl Editor {
                 );
             }
         }
+        if let Some(father) = self.doc().selected.or(self.doc().pending) {
+            if let Some(parent) = self.doc().mandala.node(father) {
+                let children = self.doc().mandala.children(parent.id);
+                for (index, child_id) in children.into_iter().enumerate() {
+                    let Some(child) = find(child_id) else {
+                        continue;
+                    };
+                    let scale = child.scale.clamp(0.65, 1.2);
+                    let badge = child.position
+                        + Vec2::new(
+                            -(NODE_R as f32 + 9.0) * scale,
+                            -(NODE_R as f32 + 9.0) * scale,
+                        );
+                    painter.circle_filled(badge, 8.0 * scale, k.fill);
+                    painter.circle_stroke(badge, 8.0 * scale, UiStroke::new(1.0, k.accent));
+                    painter.text(
+                        badge,
+                        Align2::CENTER_CENTER,
+                        (index + 1).to_string(),
+                        FontId::monospace(9.0 * scale),
+                        k.accent,
+                    );
+                }
+            }
+        }
     }
 
     fn paint_2d(&self, painter: &egui::Painter, origin: Pos2, time: f32) {
@@ -3958,137 +5188,124 @@ impl Editor {
         };
         self.chaos_star(painter);
 
-        // A flow node is drawn as the arrow between its own two children, so
-        // the edges that feed it must not also be drawn — otherwise the canvas
-        // shows `a -> [box] <- b` instead of `a -> b`.
-        let is_flow = |id: NodeId| {
-            self.doc()
-                .mandala
-                .node(id)
-                .is_some_and(|n| n.shape() == Shape::Arrow)
-        };
-
-        // A flow node has no 2D body, so a father-of edge ending at one of its
-        // children starts where that flow visually ends instead.
-        let head_of = |mut id: NodeId| {
-            for _ in 0..16 {
-                let Some(n) = self.doc().mandala.node(id) else {
-                    break;
-                };
-                if n.shape() != Shape::Arrow {
-                    break;
+        // The semantic projection is shared with 3D: complete flows collapse
+        // into one directional blue edge, while father-of links remain grey.
+        // Edges and forms are drawn in two passes. Everything outside the boxes
+        // goes down first, then the boxes themselves, then the contents — edges
+        // included, or a box's own fill would paint over the arrows inside it.
+        let paint_edges = |want_interior: bool| {
+            for edge in visible_edges(&self.doc().mandala) {
+                let interior = self.doc().mandala.is_inlined(edge.from)
+                    && self.doc().mandala.is_inlined(edge.to);
+                if interior != want_interior {
+                    continue;
                 }
-                let kids = self.doc().mandala.children(id);
-                let [first, second] = kids[..] else { break };
-                id = if n.form == Form::Backflow {
-                    first
-                } else {
-                    second
+                // A mediator drawn inside its square needs no link to it: the
+                // containment already says what the grey arrow would have said.
+                if edge.kind == VisibleEdgeKind::Father
+                    && (self.doc().mandala.inlined_mediator(edge.from) == Some(edge.to)
+                        || self.doc().mandala.inlined_mediator(edge.to) == Some(edge.from))
+                {
+                    continue;
+                }
+                let (Some(from), Some(to)) = (
+                    self.doc().mandala.node(edge.from),
+                    self.doc().mandala.node(edge.to),
+                ) else {
+                    continue;
                 };
-            }
-            id
-        };
-
-        // Father-of links first, so shapes paint over their endpoints. The
-        // graph stores child → parent for source generation; presentation
-        // reverses that to the gesture's father → child direction.
-        for a in self.doc().mandala.arrows() {
-            if is_flow(a.to) {
-                continue;
-            }
-            let (Some(f), Some(t)) = (
-                self.doc().mandala.node(a.to),
-                self.doc().mandala.node(head_of(a.from)),
-            ) else {
-                continue;
-            };
-            // A link touching the selection turns purple so its neighbourhood
-            // reads as one connected object.
-            // Only an edge whose both ends are selected (inside the block)
-            // turns purple — never the arrow up to an unselected parent.
-            let touches = self.doc().is_selected(a.to) && self.doc().is_selected(a.from);
-            let (link_color, width) = if touches {
-                (k.accent, 2.4)
-            } else {
-                (k.faint, 1.8)
-            };
-            let stroke = UiStroke::new(width * zoom, link_color);
-            // Father → child, routed as a right-angle trace unless the user drew
-            // it angled (keyed by the child node).
-            circuit_trace(
-                painter,
-                at(f.x, f.y),
-                at(t.x, t.y),
-                NODE_R as f32 * zoom,
-                10.0 * zoom,
-                stroke,
-                self.doc().angled.contains(&a.from),
-            );
-        }
-
-        // Flow nodes: one arrow between the two children, no box. `(<- a b)` is
-        // `(-> b a)`, so backflow is the same line drawn the other way.
-        for n in self.doc().mandala.nodes() {
-            if n.shape() != Shape::Arrow {
-                continue;
-            }
-            let kids = self.doc().mandala.children(n.id);
-            let [first, second] = kids[..] else { continue };
-            let (from, to) = if n.form == Form::Backflow {
-                (second, first)
-            } else {
-                (first, second)
-            };
-            let (Some(f), Some(t)) = (self.doc().mandala.node(from), self.doc().mandala.node(to))
-            else {
-                continue;
-            };
-            let hot = self.doc().is_selected(n.id) || self.doc().pending == Some(n.id);
-            // The arrow also lights up when either endpoint it joins is selected.
-            // The flow lights when it is itself selected, or when both children
-            // it joins are inside the selection — not when just one endpoint is.
-            let touches =
-                hot || (self.doc().is_selected(from) && self.doc().is_selected(to));
-            let link_color = if touches { k.accent } else { k.blue };
-            let stroke = UiStroke::new(if touches { 2.6 } else { 1.8 } * zoom, link_color);
-            // The flow is a right-angle trace between its two children unless
-            // the user drew it angled (keyed by the flow node).
-            circuit_trace(
-                painter,
-                at(f.x, f.y),
-                at(t.x, t.y),
-                NODE_R as f32 * zoom,
-                11.0 * zoom,
-                stroke,
-                self.doc().angled.contains(&n.id),
-            );
-            // A small handle at the midpoint, so the arrow can be selected and
-            // deleted like any other node. Only drawn when it is the target.
-            if hot {
-                painter.circle_stroke(
-                    at(n.x, n.y),
-                    kaos_core::visual::ARROW_HANDLE as f32 * zoom,
-                    UiStroke::new(1.5 * zoom, link_color),
+                let (touches, width, head) = match edge.kind {
+                    VisibleEdgeKind::Father => (
+                        self.doc().is_selected(edge.from) && self.doc().is_selected(edge.owner),
+                        1.8,
+                        10.0,
+                    ),
+                    VisibleEdgeKind::Flow => {
+                        let hot = self.doc().is_selected(edge.owner)
+                            || self.doc().pending == Some(edge.owner);
+                        (
+                            hot || (self.doc().is_selected(edge.from)
+                                && self.doc().is_selected(edge.to)),
+                            1.8,
+                            11.0,
+                        )
+                    }
+                };
+                let stroke = UiStroke::new(
+                    if touches {
+                        if edge.kind == VisibleEdgeKind::Flow {
+                            2.6
+                        } else {
+                            2.4
+                        }
+                    } else {
+                        width
+                    } * zoom,
+                    edge_colour(edge.kind, touches, k),
+                );
+                circuit_trace(
+                    painter,
+                    at(from.x, from.y),
+                    at(to.x, to.y),
+                    NODE_R as f32 * zoom,
+                    head * zoom,
+                    stroke,
+                    self.doc().angled.contains(&edge.owner),
                 );
             }
-        }
+        };
 
-        for n in self.doc().mandala.nodes() {
-            if n.shape() == Shape::Arrow {
-                continue;
+        let paint_nodes = |pass: bool| {
+            for id in self.doc().mandala.paint_order(pass) {
+                let Some(n) = self.doc().mandala.node(id) else {
+                    continue;
+                };
+                if n.shape() == Shape::Arrow && complete_flow(&self.doc().mandala, n.id) {
+                    continue;
+                }
+                let centre = at(n.x, n.y);
+                self.paint_graph_node(
+                    painter,
+                    n,
+                    NodePaint {
+                        position: centre,
+                        scale: zoom,
+                        spin,
+                        arrow_body: true,
+                        recursive: false,
+                    },
+                );
             }
-            let centre = at(n.x, n.y);
-            self.paint_graph_node(
-                painter,
-                n,
-                NodePaint {
-                    position: centre,
-                    scale: zoom,
-                    spin,
-                    arrow_body: false,
-                    recursive: false,
-                },
-            );
+        };
+
+        paint_edges(false);
+        paint_nodes(false);
+        paint_edges(true);
+        paint_nodes(true);
+
+        if let Some(father) = self.doc().selected.or(self.doc().pending) {
+            let children = self.doc().mandala.children(father);
+            for (index, child_id) in children.into_iter().enumerate() {
+                let Some(child) = self.doc().mandala.node(child_id) else {
+                    continue;
+                };
+                let centre = at(child.x, child.y);
+                let scale = zoom.clamp(0.65, 1.2);
+                let badge = centre
+                    + Vec2::new(
+                        -(NODE_R as f32 + 9.0) * scale,
+                        -(NODE_R as f32 + 9.0) * scale,
+                    );
+                painter.circle_filled(badge, 8.0 * scale, k.fill);
+                painter.circle_stroke(badge, 8.0 * scale, UiStroke::new(1.0, k.accent));
+                painter.text(
+                    badge,
+                    Align2::CENTER_CENTER,
+                    (index + 1).to_string(),
+                    FontId::monospace(9.0 * scale),
+                    k.accent,
+                );
+            }
         }
         if let Drag::Marquee { start, current, .. } = self.drag {
             let first = at(start.0, start.1);
@@ -4146,8 +5363,14 @@ fn circuit_trace(
         painter.line_segment([p0, Pos2::new(mid, p0.y)], stroke);
         painter.line_segment([Pos2::new(mid, p0.y), Pos2::new(mid, p1.y)], stroke);
         painter.line_segment([Pos2::new(mid, p1.y), p1], stroke);
-        painter.line_segment([p1, Pos2::new(p1.x - dir * head, p1.y - head * 0.6)], stroke);
-        painter.line_segment([p1, Pos2::new(p1.x - dir * head, p1.y + head * 0.6)], stroke);
+        painter.line_segment(
+            [p1, Pos2::new(p1.x - dir * head, p1.y - head * 0.6)],
+            stroke,
+        );
+        painter.line_segment(
+            [p1, Pos2::new(p1.x - dir * head, p1.y + head * 0.6)],
+            stroke,
+        );
     } else {
         let dir = if dy >= 0.0 { 1.0 } else { -1.0 };
         let p0 = Pos2::new(from.x, from.y + dir * r);
@@ -4156,8 +5379,14 @@ fn circuit_trace(
         painter.line_segment([p0, Pos2::new(p0.x, mid)], stroke);
         painter.line_segment([Pos2::new(p0.x, mid), Pos2::new(p1.x, mid)], stroke);
         painter.line_segment([Pos2::new(p1.x, mid), p1], stroke);
-        painter.line_segment([p1, Pos2::new(p1.x - head * 0.6, p1.y - dir * head)], stroke);
-        painter.line_segment([p1, Pos2::new(p1.x + head * 0.6, p1.y - dir * head)], stroke);
+        painter.line_segment(
+            [p1, Pos2::new(p1.x - head * 0.6, p1.y - dir * head)],
+            stroke,
+        );
+        painter.line_segment(
+            [p1, Pos2::new(p1.x + head * 0.6, p1.y - dir * head)],
+            stroke,
+        );
     }
 }
 
@@ -4223,8 +5452,7 @@ fn project_spatial(
             let screen_scale = fit * camera.zoom * perspective;
             ProjectedNode {
                 id: node.id,
-                position: rect.center()
-                    + Vec2::new(yaw_x * screen_scale, pitch_y * screen_scale),
+                position: rect.center() + Vec2::new(yaw_x * screen_scale, pitch_y * screen_scale),
                 // Glyph size tracks the SAME `fit` the positions use, so a node
                 // and the gap to its neighbour scale together. Otherwise a large
                 // graph packs the positions while the glyphs stay full size, and
@@ -4241,44 +5469,98 @@ fn project_spatial(
 /// egui supplies focus, pointer hit-testing, clipboard events, and pixels; all
 /// editing state transitions are delegated to `kaos-workspace`, the same core
 /// used by the terminal frontend.
-fn draw_source_editor(
-    ui: &mut egui::Ui,
-    pane: &mut SourcePane,
+/// The live parse state, drawn under an editor.
+///
+/// Every text surface that holds Rebis answers the same question in the same
+/// words — the ones the terminal app already uses — so the answer reads the
+/// same wherever you meet it.
+pub(crate) fn source_status(ui: &mut egui::Ui, k: Ink, source: &str) {
+    let state = kaos_workspace::rebis_workspace::SourceState::of(source);
+    if matches!(state, kaos_workspace::rebis_workspace::SourceState::Empty) {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        let tone = if state.is_valid() {
+            k.faint
+        } else {
+            k.secondary
+        };
+        ui.colored_label(tone, state.mark());
+        let detail = state.detail();
+        if !detail.is_empty() {
+            ui.colored_label(k.secondary, detail);
+        }
+    });
+}
+
+/// The parenthesis pair around a plain `TextEdit`'s cursor, if any.
+///
+/// The Source tab owns a real editor and can be asked directly. These boxes are
+/// ordinary egui widgets, so the cursor has to be read back out of the state
+/// egui stored for them last frame — which is why each one needs a stable id.
+pub(crate) fn matched_pair(
+    ctx: &egui::Context,
+    id: egui::Id,
+    source: &str,
+) -> Option<(usize, usize)> {
+    let state = egui::text_edit::TextEditState::load(ctx, id)?;
+    let range = state.cursor.char_range()?;
+    kaos_workspace::rebis_workspace::matching_form(source, range.primary.index)
+}
+
+/// One Rebis syntax colouring, shared by every text surface in the editor.
+///
+/// Symbols carry the blue, operators and delimiters the red, prompt text stays
+/// ink. Extracted so the Source tab, the mandala's source box, and the run
+/// draft cannot drift into three different-looking editors.
+pub(crate) fn rebis_layout_job(
+    source: &str,
     ink: Ink,
-    actions: &mut Vec<SourceAction>,
-) {
-    let source = pane.editor.source();
+    font: f32,
+    selected: &dyn Fn(usize) -> bool,
+    matched: Option<(usize, usize)>,
+) -> egui::text::LayoutJob {
     let syntax = highlights(source);
-    let selections = pane.editor.selection_ranges(pane.mode);
-    let selected = |index: usize| {
-        selections
-            .iter()
-            .any(|(from, to)| *from <= index && index < *to)
-    };
     let mut job = egui::text::LayoutJob::default();
+    // Code does not soft-wrap: Rebis indentation carries meaning, so a long
+    // line is reached by scrolling, not by being folded.
     job.wrap.max_width = f32::INFINITY;
     for (index, character) in source.chars().enumerate() {
         let tone = match syntax.get(index).copied().unwrap_or(SourceHighlight::Atom) {
+            // Operators and delimiters share one colour — the red — as the
+            // language legend in the top bar does, parentheses included.
             SourceHighlight::Forward
             | SourceHighlight::Backflow
             | SourceHighlight::Mediate
             | SourceHighlight::Import
-            | SourceHighlight::Invert => ink.accent,
+            | SourceHighlight::Invert
+            | SourceHighlight::Parenthesis => ink.secondary,
             SourceHighlight::Whitespace | SourceHighlight::Comment => ink.faint,
-            SourceHighlight::Parenthesis => ink.faint,
-            SourceHighlight::Invalid => ink.accent,
-            SourceHighlight::Atom | SourceHighlight::Prompt => ink.ink,
+            // Symbols carry the blue; prompt text is content and stays ink.
+            SourceHighlight::Atom | SourceHighlight::Invalid => ink.accent,
+            SourceHighlight::Prompt => ink.ink,
         };
+        // A matched pair is marked on the delimiters themselves. Selection
+        // wins where they overlap: a selection is something you are doing, a
+        // match is something you are being told.
+        let pair = matched.is_some_and(|(left, right)| index == left || index == right);
         job.append(
             &character.to_string(),
             0.0,
             egui::TextFormat {
-                font_id: FontId::monospace(14.0),
+                font_id: FontId::monospace(font),
                 color: tone,
                 background: if selected(index) {
                     ink.accent.gamma_multiply(0.28)
+                } else if pair {
+                    ink.accent.gamma_multiply(0.20)
                 } else {
                     Color32::TRANSPARENT
+                },
+                underline: if pair {
+                    UiStroke::new(1.0, tone)
+                } else {
+                    UiStroke::NONE
                 },
                 ..egui::TextFormat::default()
             },
@@ -4289,13 +5571,37 @@ fn draw_source_editor(
             " ",
             0.0,
             egui::TextFormat {
-                font_id: FontId::monospace(14.0),
+                font_id: FontId::monospace(font),
                 color: ink.ink,
                 ..egui::TextFormat::default()
             },
         );
     }
+    job
+}
 
+fn draw_source_editor(
+    ui: &mut egui::Ui,
+    pane: &mut SourcePane,
+    ink: Ink,
+    actions: &mut Vec<SourceAction>,
+) {
+    let source = pane.editor.source();
+    let cursor_before_frame = pane.editor.cursor();
+    let reveal_cursor = pane.revealed_cursor != Some(cursor_before_frame);
+    let selections = pane.editor.selection_ranges(pane.mode);
+    let selected = |index: usize| {
+        selections
+            .iter()
+            .any(|(from, to)| *from <= index && index < *to)
+    };
+    let job = rebis_layout_job(
+        source,
+        ink,
+        14.0,
+        &selected,
+        pane.editor.matching_parentheses(),
+    );
     let galley = ui.painter().layout_job(job);
     let viewport_height = ui.available_height().max(260.0);
     let interaction = egui::ScrollArea::both()
@@ -4320,21 +5626,29 @@ fn draw_source_editor(
                 // over the character; insert mode and non-Vim editing keep the
                 // thin bar. The block is one monospace cell wide.
                 let block = pane.vim_enabled && pane.mode != VimMode::Insert;
+                if reveal_cursor {
+                    if block {
+                        let cell = ui.fonts(|f| f.glyph_width(&FontId::monospace(14.0), 'M'));
+                        let rect =
+                            Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + cell, bottom));
+                        ui.scroll_to_rect(rect, None);
+                    } else {
+                        ui.scroll_to_rect(
+                            Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + 2.0, bottom)),
+                            None,
+                        );
+                    }
+                }
                 if block {
                     let cell = ui.fonts(|f| f.glyph_width(&FontId::monospace(14.0), 'M'));
                     let rect = Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + cell, bottom));
                     // Translucent so the character under the cursor stays legible.
                     ui.painter()
                         .rect_filled(rect, 1.0, ink.accent.gamma_multiply(0.55));
-                    ui.scroll_to_rect(rect, None);
                 } else {
                     ui.painter().line_segment(
                         [Pos2::new(x, top), Pos2::new(x, bottom)],
                         UiStroke::new(1.5, ink.accent),
-                    );
-                    ui.scroll_to_rect(
-                        Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + 2.0, bottom)),
-                        None,
                     );
                 }
             }
@@ -4355,6 +5669,15 @@ fn draw_source_editor(
     };
     if response.clicked() {
         response.request_focus();
+        if pane.vim_enabled
+            && matches!(
+                pane.mode,
+                VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+            )
+        {
+            pane.editor.end_visual();
+            pane.mode = VimMode::Normal;
+        }
         if let Some(cursor) = pointer_cursor() {
             pane.editor.set_cursor(cursor);
         }
@@ -4374,7 +5697,41 @@ fn draw_source_editor(
         }
     }
 
-    if response.has_focus() {
+    // egui treats these six keys as focus navigation and surrenders the
+    // widget's focus over them before it is ever polled — Escape and Tab at the
+    // top of the pass, the arrows during the interact. All six belong to the
+    // editor: Escape leaves insert mode, Tab indents, the arrows move the
+    // caret. Claim them so egui keeps its hands off.
+    const CLAIMED: [egui::Key; 6] = [
+        egui::Key::Escape,
+        egui::Key::Tab,
+        egui::Key::ArrowUp,
+        egui::Key::ArrowDown,
+        egui::Key::ArrowLeft,
+        egui::Key::ArrowRight,
+    ];
+    ui.memory_mut(|memory| {
+        memory.set_focus_lock_filter(
+            response.id,
+            egui::EventFilter {
+                tab: true,
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                escape: true,
+            },
+        );
+    });
+    // The lock only takes hold once the widget has been focused for a whole
+    // frame, so the first claimed key after clicking in still arrives with the
+    // focus already handed away. Take it back and handle the key anyway.
+    let stolen = response.lost_focus()
+        && ui.input(|input| CLAIMED.iter().any(|key| input.key_pressed(*key)));
+    if stolen {
+        response.request_focus();
+    }
+    let focused = response.has_focus() || stolen;
+
+    if focused {
         let events = ui.input(|input| input.events.clone());
         for event in events {
             if pane.mode == VimMode::Command {
@@ -4466,6 +5823,10 @@ fn draw_source_editor(
         }
     }
 
+    if focused && pane.editor.cursor() == cursor_before_frame {
+        pane.revealed_cursor = Some(cursor_before_frame);
+    }
+
     if pane.mode == VimMode::Command {
         ui.colored_label(
             ink.accent,
@@ -4549,6 +5910,168 @@ fn truncate(label: &str) -> String {
     }
     let head: String = label.chars().take(MAX - 1).collect();
     format!("{head}…")
+}
+
+// ── the generation ──────────────────────────────────────────────────────────
+
+/// Paint the automaton.
+///
+/// The composition itself lives in [`automata::Automaton::compose`] — this is
+/// the translation from its marks into egui shapes plus the palette. Keeping the
+/// split means the offline preview in `examples/generation_preview.rs` renders
+/// the same figure this does, rather than an approximation of it.
+fn draw_generation(ui: &mut egui::Ui, machine: &automata::Automaton, k: Ink) {
+    use automata::Mark;
+
+    let available = ui.available_size();
+    let rect = ui.allocate_response(available, Sense::hover()).rect;
+    let painter = ui.painter_at(rect);
+    let centre = rect.center();
+    // Leave a margin for the rim glyphs, which sit outside the outermost ring.
+    let extent = (rect.width().min(rect.height()) / 2.0 - 34.0).max(12.0);
+
+    let at = |(x, y): (f32, f32)| Pos2::new(x, y);
+    // A state maps to a colour along the shared ramp: faint → ink, then ink →
+    // accent only at the top of the range.
+    let tint = |state: u8, alpha: f32| -> Color32 {
+        let (from, to, local) = match automata::ramp(state) {
+            automata::Ramp::Dim(t) => (k.ground, k.faint, t),
+            automata::Ramp::Quiet(t) => (k.faint, k.ink, t),
+            automata::Ramp::Loud(t) => (k.ink, k.accent, t),
+        };
+        let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * local) as u8;
+        Color32::from_rgba_unmultiplied(
+            lerp(from.r(), to.r()),
+            lerp(from.g(), to.g()),
+            lerp(from.b(), to.b()),
+            (alpha.clamp(0.0, 1.0) * 255.0) as u8,
+        )
+    };
+
+    for mark in machine.compose((centre.x, centre.y), extent) {
+        match mark {
+            Mark::Dot {
+                at: point,
+                radius,
+                state,
+                alpha,
+                filled,
+            } => {
+                let colour = tint(state, alpha);
+                if filled {
+                    painter.circle_filled(at(point), radius, colour);
+                } else {
+                    painter.circle_stroke(at(point), radius, UiStroke::new(1.0, colour));
+                }
+            }
+            Mark::Line {
+                from,
+                to,
+                width,
+                state,
+                alpha,
+            } => {
+                painter.line_segment([at(from), at(to)], UiStroke::new(width, tint(state, alpha)));
+            }
+            Mark::Poly {
+                points,
+                state,
+                alpha,
+                filled,
+                width,
+            } => {
+                let colour = tint(state, alpha);
+                let points: Vec<Pos2> = points.into_iter().map(at).collect();
+                painter.add(egui::Shape::convex_polygon(
+                    points,
+                    if filled { colour } else { Color32::TRANSPARENT },
+                    if filled {
+                        UiStroke::NONE
+                    } else {
+                        UiStroke::new(width, colour)
+                    },
+                ));
+            }
+            Mark::Cross {
+                at: point,
+                arm,
+                state,
+                alpha,
+            } => {
+                let stroke = UiStroke::new(1.0, tint(state, alpha));
+                painter.line_segment(
+                    [
+                        Pos2::new(point.0 - arm, point.1 - arm),
+                        Pos2::new(point.0 + arm, point.1 + arm),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(point.0 - arm, point.1 + arm),
+                        Pos2::new(point.0 + arm, point.1 - arm),
+                    ],
+                    stroke,
+                );
+            }
+            Mark::Bit {
+                from,
+                to,
+                value,
+                on,
+                stream,
+                alpha,
+                ..
+            } => {
+                // The two tapes get separate semantic colours. Brightness is
+                // still derived from the byte itself, so the halo does not
+                // reduce the response to a decorative on/off animation.
+                let base = match stream {
+                    automata::BinaryStream::Prompt => k.secondary,
+                    automata::BinaryStream::Response => k.accent,
+                };
+                let byte_weight = 0.35 + value as f32 / 255.0 * 0.65;
+                let width = if on { 2.0 } else { 0.65 };
+                painter.line_segment(
+                    [at(from), at(to)],
+                    UiStroke::new(width, base.gamma_multiply(alpha * byte_weight)),
+                );
+            }
+        }
+    }
+
+    // The legend, in the corner rather than over the figure.
+    let mut y = rect.top() + 6.0;
+    for (name, count) in machine.census() {
+        painter.text(
+            Pos2::new(rect.left() + 8.0, y),
+            Align2::LEFT_TOP,
+            format!("{name} {count}"),
+            FontId::monospace(10.0),
+            k.faint,
+        );
+        y += 13.0;
+    }
+    painter.text(
+        Pos2::new(rect.left() + 8.0, rect.bottom() - 31.0),
+        Align2::LEFT_BOTTOM,
+        format!(
+            "P {}",
+            machine.binary_preview(automata::BinaryStream::Prompt, 3)
+        ),
+        FontId::monospace(10.0),
+        k.secondary,
+    );
+    painter.text(
+        Pos2::new(rect.right() - 8.0, rect.bottom() - 8.0),
+        Align2::RIGHT_BOTTOM,
+        format!(
+            "R {}",
+            machine.binary_preview(automata::BinaryStream::Response, 3)
+        ),
+        FontId::monospace(10.0),
+        k.accent,
+    );
 }
 
 // ── terminal hand-off ───────────────────────────────────────────────────────
@@ -4639,10 +6162,354 @@ fn launch_terminal(command: &str, cwd: &std::path::Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// Height of the top header at a given window width, laid out headlessly.
+    fn header_height(width: f32) -> f32 {
+        let mut editor = Editor::new(Mandala::new());
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(width, 900.0),
+        ));
+        // egui sizes a panel from the previous frame's content, so settle it.
+        let mut top = 0.0;
+        for _ in 0..3 {
+            let _ = ctx.run(input.clone(), |ctx| {
+                editor.header(ctx);
+                // Inside the pass: the space the header left for everything
+                // else starts exactly where the header ends.
+                top = ctx.available_rect().top();
+            });
+        }
+        top
+    }
+
+    #[test]
+    fn the_header_wraps_in_a_narrow_window_instead_of_clipping() {
+        // A plain `horizontal` row overflows its panel silently — the last
+        // control is simply cut off the right edge, with nothing in the layout
+        // to show for it. A wrapped row reflows onto a second line, so HEIGHT
+        // is the observable that tells the two apart.
+        let narrow = header_height(420.0);
+        let wide = header_height(1600.0);
+        assert!(
+            narrow > wide,
+            "header must reflow when narrow: narrow={narrow} wide={wide}"
+        );
+    }
+
+    /// Drive the Source tab headlessly: click into it, wait `idle` frames, then
+    /// press `pressed`. Returns the pane the interaction left behind.
+    ///
+    /// A button is laid out beside the editor because focus navigation needs
+    /// somewhere to go — with the editor alone on screen, egui has no other
+    /// widget to hand the focus to and the bug hides.
+    fn drive_source_tab(mode: VimMode, idle: usize, pressed: egui::Key) -> SourcePane {
+        let mut pane = SourcePane::with_text("(-> a b)");
+        pane.vim_enabled = true;
+        pane.mode = mode;
+        let ink = crate::theme::Ink::load();
+
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+        let centre = screen.center();
+        let click = |pressed: bool| egui::Event::PointerButton {
+            pos: centre,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let key = |key: egui::Key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+
+        // A click is a press in one frame and a release in the next; the
+        // release is what focuses the editor. Idle frames in between stand for
+        // the repaints a real session does before the next keystroke.
+        let mut frames = vec![
+            vec![],
+            vec![egui::Event::PointerMoved(centre), click(true)],
+            vec![click(false)],
+        ];
+        frames.extend(std::iter::repeat_n(vec![], idle));
+        frames.push(vec![key(pressed)]);
+
+        for events in frames {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let mut actions = Vec::new();
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw_source_editor(ui, &mut pane, ink, &mut actions);
+                    let _ = ui.button("elsewhere");
+                });
+            });
+        }
+        pane
+    }
+
+    #[test]
+    fn escape_leaves_insert_mode_in_the_visual_source_tab() {
+        // egui claims Escape for focus navigation and surrenders the widget's
+        // focus at the top of the pass, before the editor is polled — so a
+        // has_focus() gate over the event loop drops the key and Vim never
+        // leaves insert mode. Both the immediate Escape (focus already gone
+        // this frame) and the settled one (focus lock installed) must land.
+        for idle in [0, 3] {
+            let pane = drive_source_tab(VimMode::Insert, idle, egui::Key::Escape);
+            assert_eq!(
+                pane.mode,
+                VimMode::Normal,
+                "Escape after {idle} idle frames must leave insert mode"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_indents_in_the_visual_source_tab_instead_of_moving_focus() {
+        // Escape is not the only key egui takes for focus navigation: Tab and
+        // the arrows go the same way. Tab is the one with a visible effect in
+        // the buffer, so it stands in for all three.
+        for idle in [0, 3] {
+            let pane = drive_source_tab(VimMode::Insert, idle, egui::Key::Tab);
+            // The click that focuses the editor lands past the end of this
+            // one-line buffer, so the caret — and the indent — sit at the end.
+            assert_eq!(
+                pane.editor.source(),
+                "(-> a b)  ",
+                "Tab after {idle} idle frames must indent, not move focus"
+            );
+        }
+    }
+
+    #[test]
+    fn symbols_are_blue_and_operators_red_in_every_editor() {
+        // One layout function serves the Source tab, the mandala's source box,
+        // and the run draft, so pinning it here pins all three.
+        let k = crate::theme::Ink::load();
+        //             0 12 3 45 6 789 10
+        let job = rebis_layout_job("(-> ab \"p\")", k, 14.0, &|_| false, None);
+        let colour = |i: usize| job.sections[i].format.color;
+        for (i, what) in [(0, "("), (1, "-"), (2, ">"), (10, ")")] {
+            assert_eq!(colour(i), k.secondary, "operator {what} must be red");
+        }
+        for i in [4, 5] {
+            assert_eq!(colour(i), k.accent, "a symbol must be blue");
+        }
+        // The quote marks themselves are classified Atom by the shared
+        // highlighter, so they take the symbol red; the text between them is
+        // Prompt and stays ink.
+        assert_eq!(colour(8), k.ink, "prompt text stays ink");
+        for i in [7, 9] {
+            assert_eq!(colour(i), k.accent, "quote marks follow the symbols");
+        }
+        assert_ne!(k.accent, k.secondary);
+    }
+
+    #[test]
+    fn a_matched_pair_is_marked_and_nothing_else_is() {
+        // One layout function serves all three editors, so marking it here
+        // marks it in the Source tab, the mandala's source box, and the run
+        // draft alike.
+        let k = crate::theme::Ink::load();
+        let source = "(-> a b)";
+        let pair = kaos_workspace::rebis_workspace::matching_form(source, 0);
+        assert_eq!(pair, Some((0, 7)), "the outer parentheses are the pair");
+
+        let job = rebis_layout_job(source, k, 14.0, &|_| false, pair);
+        let marked: Vec<usize> = (0..source.chars().count())
+            .filter(|index| job.sections[*index].format.underline != UiStroke::NONE)
+            .collect();
+        assert_eq!(marked, vec![0, 7]);
+
+        // With the cursor away from any delimiter, nothing is marked.
+        let none = rebis_layout_job(source, k, 14.0, &|_| false, None);
+        assert!((0..source.chars().count())
+            .all(|index| none.sections[index].format.underline == UiStroke::NONE));
+    }
+
+    #[test]
+    fn a_flow_arrow_keeps_its_red_when_the_block_is_selected() {
+        // The hue is what separates a flow from a structural link. Selection is
+        // allowed to thicken an edge and to colour the otherwise-grey `father
+        // of` links, but repainting a flow would erase the one cue that says
+        // what it is — and it does so exactly when the drawing is being read
+        // closest.
+        let k = crate::theme::Ink::load();
+        for touches in [false, true] {
+            assert_eq!(
+                edge_colour(VisibleEdgeKind::Flow, touches, k),
+                k.secondary,
+                "a flow must stay red with touches={touches}"
+            );
+        }
+        assert_eq!(edge_colour(VisibleEdgeKind::Father, false, k), k.faint);
+        assert_eq!(edge_colour(VisibleEdgeKind::Father, true, k), k.accent);
+        assert_ne!(k.secondary, k.accent, "the two roles must be distinct");
+    }
+
     fn prompt_doc() -> Doc {
         let mut doc = Doc::default();
         doc.mandala.add(Form::Prompt, "first", 0.0, 0.0);
         doc
+    }
+
+    /// Run one frame of the run-status modal over an editor, feeding `events`.
+    fn frame_of_run_status(editor: &mut Editor, ctx: &egui::Context, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| editor.run_status_modal(ctx));
+    }
+
+    /// An editor showing the status modal for one freshly submitted live run,
+    /// which is therefore waiting for authority.
+    fn editor_awaiting_authority() -> (Editor, u64) {
+        let mut editor = Editor::new(Mandala::new());
+        editor.runs.mode = runs::Mode::Direct;
+        editor.runs.authority_remembered = false;
+        let id = editor
+            .runs
+            .submit("\"work\"".to_string(), None, &editor.cwd.clone());
+        assert_eq!(
+            editor.runs.runs[0].state,
+            runs::State::AwaitingPermission,
+            "a live run must stop for authority"
+        );
+        editor.run_notice = Some(id);
+        (editor, id)
+    }
+
+    #[test]
+    fn escape_denies_the_authority_the_run_modal_is_asking_for() {
+        // The authority question is raised the instant a live run is submitted —
+        // while this modal is the thing on screen. Escape answers it by denying,
+        // as it does in the terminal; the same key must not refuse power on one
+        // screen and dismiss the question on the other.
+        let (mut editor, _) = editor_awaiting_authority();
+        let ctx = egui::Context::default();
+        let escape = || {
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }]
+        };
+
+        frame_of_run_status(&mut editor, &ctx, escape());
+        assert_eq!(
+            editor.runs.runs[0].state,
+            runs::State::Cancelled,
+            "Escape denied the run"
+        );
+        assert!(
+            editor.runs.runs[0]
+                .output
+                .iter()
+                .any(|line| line.contains("denied")),
+            "the denial is recorded on the run: {:?}",
+            editor.runs.runs[0].output
+        );
+
+        // With no question standing, the same key goes back to closing the modal.
+        assert!(editor.run_notice.is_some(), "the modal stayed to show why");
+        frame_of_run_status(&mut editor, &ctx, escape());
+        assert_eq!(editor.run_notice, None, "Escape now closes the modal");
+    }
+
+    #[test]
+    fn granting_from_the_modal_acts_on_that_run_not_the_selected_one() {
+        // `grant_selected` works on the desk's selection, which is not
+        // necessarily the run this modal is about — a second submission moves
+        // it. Granting here must free the run the reader is looking at.
+        let (mut editor, first) = editor_awaiting_authority();
+        let cwd = editor.cwd.clone();
+        let second = editor.runs.submit("\"other\"".to_string(), None, &cwd);
+        assert_eq!(
+            editor.runs.selected,
+            Some(second),
+            "the newer run is selected"
+        );
+
+        // The modal is still the one for the first run.
+        assert_eq!(editor.run_notice, Some(first));
+        editor.runs.selected = Some(first);
+        editor.runs.grant_selected(runs::Authority::Once, &cwd);
+
+        let state_of = |editor: &Editor, id: u64| {
+            editor
+                .runs
+                .runs
+                .iter()
+                .find(|run| run.id == id)
+                .map(|run| run.state)
+        };
+        assert_ne!(
+            state_of(&editor, first),
+            Some(runs::State::AwaitingPermission),
+            "the modal's run was granted"
+        );
+        assert_eq!(
+            state_of(&editor, second),
+            Some(runs::State::AwaitingPermission),
+            "the other run still waits on its own decision"
+        );
+    }
+
+    #[test]
+    fn a_primary_drag_resizes_from_a_wall_and_moves_from_anywhere_else() {
+        let mut doc = Doc::default();
+        let square = doc.mandala.add(Form::Square, "", 0.0, 0.0);
+        let (half_w, half_h) = doc.mandala.extent(square);
+
+        // On the wall: a resize, naming the axis the wall governs. Aiming at the
+        // drawn line lands either side of it, so both sides must resize — a miss
+        // to the outside used to reach bare canvas and pan the whole view.
+        for x in [half_w - 1.0, half_w, half_w + 1.0] {
+            let wall = Drag::beginning_at(&doc.mandala, x, 0.0);
+            let Drag::Resize(grab) = wall else {
+                panic!("the wall at {x} must begin a resize, not a pan or a move");
+            };
+            assert_eq!(grab.id, square);
+            assert!(grab.wide && !grab.tall);
+        }
+
+        // In the middle: the box moves, exactly as before.
+        assert!(
+            matches!(
+                Drag::beginning_at(&doc.mandala, 0.0, 0.0),
+                Drag::Node { id, .. } if id == square
+            ),
+            "the middle of the box still moves it"
+        );
+
+        // Off the drawing: the canvas pans.
+        assert!(matches!(
+            Drag::beginning_at(&doc.mandala, 900.0, 900.0),
+            Drag::Pan
+        ));
+
+        // Carrying that wall outward widens the box and leaves it where it is.
+        doc.mandala.resize(square, half_w + 50.0, half_h);
+        assert_eq!(doc.mandala.extent(square), (half_w + 50.0, half_h));
+        assert_eq!(
+            doc.mandala.node(square).map(|node| (node.x, node.y)),
+            Some((0.0, 0.0))
+        );
     }
 
     #[test]
@@ -4707,6 +6574,40 @@ mod tests {
         assert!(doc.undo());
         assert_eq!(doc.mandala.nodes().len(), 3);
         assert_eq!(doc.mandala.arrows().len(), 2);
+    }
+
+    #[test]
+    fn visible_edges_collapse_a_complete_flow_to_one_directional_edge() {
+        let mut mandala = Mandala::new();
+        let left = mandala.add(Form::Prompt, "left", 0.0, 0.0);
+        let right = mandala.add(Form::Prompt, "right", 200.0, 0.0);
+        let flow = mandala.flow(left, right, Form::Forward).unwrap();
+        let parent = mandala.add(Form::Compose, "", 0.0, -200.0);
+        mandala.father_of(parent, flow);
+
+        let edges = visible_edges(&mandala);
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|edge| edge.kind == VisibleEdgeKind::Flow)
+                .count(),
+            1
+        );
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|edge| edge.kind == VisibleEdgeKind::Father)
+                .count(),
+            1
+        );
+        let flow_edge = edges
+            .iter()
+            .find(|edge| edge.kind == VisibleEdgeKind::Flow)
+            .unwrap();
+        assert_eq!(
+            (flow_edge.from, flow_edge.to, flow_edge.owner),
+            (left, right, flow)
+        );
     }
 
     #[test]
@@ -4859,5 +6760,198 @@ mod tests {
         assert_eq!(scope, runs::Scope::Block);
         assert!(source.contains("~ inspect"));
         assert!(rebis_lang::parse(&source).is_ok());
+    }
+
+    /// The generation opens on its own tab, built from the selected run's own
+    /// program — the lattice must be that run's geometry and nothing else.
+    #[test]
+    fn opening_a_generation_builds_the_lattice_from_the_selected_runs_program() {
+        let mut editor = Editor::new(Mandala::new());
+        editor.runs.runs.push(runs::Run::test_fixture(
+            11,
+            "([m] \"one\" \"two\" \"three\")",
+            "",
+            vec![
+                "event    prompt started · abstraction 1 · one".to_string(),
+                "answer   a varied answer with many distinct bytes".to_string(),
+                "complete    ✓ run finished".to_string(),
+            ],
+        ));
+        editor.runs.selected = Some(11);
+
+        editor.open_generation();
+
+        let Some(Pane::Automata(pane)) = editor.tabs.active() else {
+            panic!("the generation did not open on a new tab");
+        };
+        assert_eq!(pane.run, Some(11));
+        assert_eq!(pane.origin, "run #11");
+        // A three-branch square: mediator plus three prompts, all under one root.
+        assert_eq!(
+            pane.machine
+                .cells
+                .iter()
+                .filter(|cell| cell.site == automata::Site::Prompt)
+                .count(),
+            3
+        );
+        assert_eq!(pane.consumed, 0, "the transcript is consumed while drawing");
+    }
+
+    /// The run's answers are what build the rule, so consuming its transcript
+    /// must change how the lattice evolves.
+    #[test]
+    fn a_runs_answers_drive_the_generation() {
+        let mut pane = AutomataPane::from_source("([m] \"one\" \"two\")", "test").unwrap();
+        assert_eq!(pane.machine.entropy, 0.0);
+
+        let transcript = vec![
+            "event    prompt started · abstraction 1 · one".to_string(),
+            "answer   many different characters here 0123456789".to_string(),
+            "complete    ✓ run finished".to_string(),
+        ];
+        pane.consumed = pane.machine.consume(&transcript, pane.consumed);
+
+        assert_eq!(pane.consumed, transcript.len());
+        assert_eq!(pane.machine.prompts_seen, 1);
+        assert!(
+            pane.machine.entropy > 3.0,
+            "a varied answer has real entropy"
+        );
+    }
+
+    /// The pane consumes only the tail of a growing transcript, so a long run
+    /// does not cost more each frame. Feeding it in slices must land exactly the
+    /// same automaton as feeding it whole.
+    #[test]
+    fn a_growing_transcript_is_consumed_by_the_tail() {
+        let transcript = vec![
+            "event    prompt started · abstraction 1 · one".to_string(),
+            "answer   a varied first answer".to_string(),
+            "event    prompt started · abstraction 1 · two".to_string(),
+            "answer   a second answer, differently varied".to_string(),
+            "complete    \u{2713} run finished".to_string(),
+        ];
+
+        let mut whole = AutomataPane::from_source("([m] \"one\" \"two\")", "test").unwrap();
+        whole.consumed += whole.machine.consume(&transcript, 0);
+        assert_eq!(whole.consumed, transcript.len());
+
+        let mut tailed = AutomataPane::from_source("([m] \"one\" \"two\")", "test").unwrap();
+        for upto in 1..=transcript.len() {
+            let tail = &transcript[tailed.consumed.min(upto)..upto];
+            tailed.consumed += tailed.machine.consume(tail, 0);
+        }
+
+        assert_eq!(tailed.consumed, whole.consumed);
+        assert_eq!(tailed.machine.prompts_seen, whole.machine.prompts_seen);
+        assert_eq!(tailed.machine.answers_seen, whole.machine.answers_seen);
+        assert_eq!(tailed.machine.entropy, whole.machine.entropy);
+    }
+
+    /// A program that does not parse has no geometry, so there is nothing to
+    /// build a lattice from and the pane must not open empty.
+    #[test]
+    fn an_unparsable_program_has_no_generation() {
+        assert!(AutomataPane::from_source("([m] \"unclosed", "test").is_err());
+
+        let mut editor = Editor::new(Mandala::new());
+        editor
+            .runs
+            .runs
+            .push(runs::Run::test_fixture(3, "([m] \"unclosed", "", vec![]));
+        editor.runs.selected = Some(3);
+        let before = editor.tabs.len();
+
+        editor.open_generation();
+
+        assert_eq!(
+            editor.tabs.len(),
+            before,
+            "no tab opens for a broken program"
+        );
+        assert!(
+            editor
+                .notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("lattice"),
+            "the failure explains itself: {:?}",
+            editor.notice
+        );
+    }
+
+    /// With no run selected the generation falls back to the program in front of
+    /// you, rather than refusing or opening something empty.
+    #[test]
+    fn without_a_run_the_generation_uses_the_active_source() {
+        let mut editor = Editor::new(Mandala::new());
+        editor.tabs.open(
+            "source",
+            Pane::Source(SourcePane::with_text("(-> \"a\" \"b\")".to_string())),
+        );
+
+        editor.open_generation();
+
+        let Some(Pane::Automata(pane)) = editor.tabs.active() else {
+            panic!("the generation did not open from the source tab");
+        };
+        assert_eq!(pane.origin, "source");
+        assert_eq!(pane.run, None, "there is no run to watch");
+        assert!(!pane.machine.is_empty());
+    }
+
+    #[test]
+    fn source_generation_ignores_an_older_selected_run() {
+        let mut editor = Editor::new(Mandala::new());
+        editor.runs.runs.push(runs::Run::test_fixture(
+            12,
+            "(-> \"old\" \"run\")",
+            "",
+            vec![],
+        ));
+        editor.runs.selected = Some(12);
+
+        editor.open_generation_from_source("(-> \"source\" \"tab\")".to_string());
+
+        let Some(Pane::Automata(pane)) = editor.tabs.active() else {
+            panic!("the source generation did not open");
+        };
+        assert_eq!(pane.origin, "source");
+        assert_eq!(pane.run, None);
+        assert_eq!(
+            pane.machine
+                .cells
+                .iter()
+                .filter(|cell| cell.site == automata::Site::Prompt)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn opening_a_visual_run_chat_exposes_the_complete_snapshot() {
+        let mut editor = Editor::new(Mandala::new());
+        editor.runs.runs.push(runs::Run::test_fixture(
+            7,
+            "(-> \"question\" \"answer\")",
+            "captured record",
+            vec![
+                "prompt   question".to_string(),
+                "result   answer".to_string(),
+            ],
+        ));
+
+        editor.open_run_chat(7);
+
+        let snapshot = editor.run_chat_snapshot(7).unwrap();
+        assert!(snapshot.contains("SOURCE\n(-> \"question\" \"answer\")"));
+        assert!(snapshot.contains("RECORD / INPUT\ncaptured record"));
+        assert!(snapshot.contains("prompt   question\nresult   answer"));
+        let Some(Pane::Chat(chat)) = editor.tabs.active() else {
+            panic!("run chat did not open");
+        };
+        assert_eq!(chat.run_id, Some(7));
+        assert!(!chat.browsing);
     }
 }

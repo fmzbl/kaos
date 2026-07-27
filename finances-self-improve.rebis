@@ -9,20 +9,20 @@
 ; scripts/deep-backtest.mjs), not the model's own return estimates.
 ;
 ; COST WARNING: this is a bounded recursive loop. Every iteration fires:
-;   - study-champion  (+ with-evidence fan-out)
+;   - study-champion  (+ std-with-evidence fan-out)
 ;   - three proposal branches + one convergence mediator
 ;   - one measured backtest evaluation
 ;   - one rewrite
-;   - one yes/no stop check
+;   - one std-binary stop check
 ; Total model calls = per-iteration cost x number of iterations. It stops when
-; `done` returns yes; otherwise only Rebis's runtime model-call and
+; `done` returns 1; otherwise only Rebis's runtime model-call and
 ; macro-expansion limits bound it. Validate the shape with /tree (or
 ; `kaos rebis run --dry`) BEFORE spending live calls.
 ; ---------------------------------------------------------------------------
 
-(# std/loops)   ; loop  (bounded recursive refinement)
-(# std/canon)   ; yes-no (forces the stop check to answer exactly yes/no)
-(# std/spread)  ; with-evidence (makes the study cite the real source)
+(# std/loops)   ; std-loop (bounded recursive refinement)
+(# std/canon)   ; std-binary (forces the stop check to answer exactly 0/1)
+(# std/spread)  ; std-with-evidence (makes the study cite the real source)
 
 ; The fixed objective — a text constant (no model call), woven into prompts
 ; with $ (never fired).
@@ -33,7 +33,7 @@
 ; woven in with $; the running value from the previous iteration arrives as
 ; arrow INPUT.
 (~ study-champion (goal)
-  (with-evidence
+  (std-with-evidence
     ($ goal
        "\n\nUsing the progress supplied in INPUT, read src/trade/bot/plan.ts and src/trade/auto/index.ts in ~/code/finances and reconstruct the champion exactly: the MAX_RETURN_PROFILE values, the DEFAULT_BOT_CONFIG fields it overrides, the auto bot's universe/interval/sizing rails, and the measured result. State the three assumptions its ~100%/yr edge depends on.")))
 
@@ -60,12 +60,12 @@
 
 ; Stop only when the MEASURED numbers clear the bar.
 (~ done (value)
-  (yes-no
+  (std-binary
     (-> value
-        "Do the MEASURED backtest numbers in this report show >=5x the champion's annualized return (>=500%/yr), with max drawdown no worse than the champion, from an actually-executed backtest run (not an estimate)? Answer yes only if ALL conditions hold.")))
+        "Do the MEASURED backtest numbers in this report show >=5x the champion's annualized return (>=500%/yr), with max drawdown no worse than the champion, from an actually-executed backtest run (not an estimate)? Return exactly 1 only if ALL conditions hold; otherwise return exactly 0.")))
 
 ; The recursive loop: seed with the objective, self-improve until `done` says yes.
-(loop
+(std-loop
   (objective)
   improve
   done)

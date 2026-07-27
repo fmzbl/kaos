@@ -1,7 +1,7 @@
 //! The palette, shared by the terminal app and `kaos visual`.
 //!
-//! Two modes, each a neutral grey scale with two semantic colours. Purple
-//! marks focus, recursion, and chaos; blue carries flow. Both the terminal app
+//! Two modes, each a neutral grey scale with two semantic colours. Deep blue
+//! marks focus, recursion, and chaos; red carries flow. Both the terminal app
 //! and `kaos visual` read this one palette. `/theme dark` and `/theme light`
 //! persist the choice in the Kaos config, and both interfaces read it back
 //! through [`mode`]. Pure std — these are just escape codes.
@@ -37,8 +37,8 @@ pub fn BONE() -> (u8, u8, u8) {
 /// Which way round the interface runs.
 ///
 /// The structural palette is deliberately neutral: shapes, glyphs and rules
-/// carry meaning through form and brightness. Purple marks interaction and
-/// recursion; blue marks flow. One mode reverses the neutral figure and
+/// carry meaning through form and brightness. Deep blue marks interaction and
+/// recursion; red marks flow. One mode reverses the neutral figure and
 /// ground.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Mode {
@@ -89,11 +89,15 @@ pub struct Palette {
     pub mid: (u8, u8, u8),
     /// Secondary text and rules.
     pub faint: (u8, u8, u8),
-    /// Purple, for what the eye should go to first — headings, selection,
+    /// Deep blue, for what the eye should go to first — headings, selection,
     /// recursion, the active tool, and the chaos star.
     pub accent: (u8, u8, u8),
-    /// Blue, for executable flow, navigation, live data, and range selections.
-    pub blue: (u8, u8, u8),
+    /// Red, for executable flow, navigation, live data, and range selections.
+    ///
+    /// Named for its ROLE, not its hue: the palette's second chromatic voice.
+    /// A field called `blue` holding red is the kind of thing that survives a
+    /// repaint and misleads for years.
+    pub secondary: (u8, u8, u8),
 }
 
 /// The palette for a mode. Light is not a tint of dark — it is the inverse, so
@@ -107,9 +111,10 @@ pub const fn palette(mode: Mode) -> Palette {
             ink: (238, 238, 238),
             mid: (190, 190, 190),
             faint: (140, 140, 140),
-            // Bright enough to carry on a near-black ground.
-            accent: (176, 132, 232),
-            blue: (86, 162, 255),
+            // Lifted off true navy so the deep blue still carries on a
+            // near-black ground; light mode is where it can actually be deep.
+            accent: (74, 124, 240),
+            secondary: (238, 68, 84),
         },
         Mode::Light => Palette {
             ground: (250, 250, 250),
@@ -118,9 +123,9 @@ pub const fn palette(mode: Mode) -> Palette {
             ink: (16, 16, 16),
             mid: (70, 70, 70),
             faint: (120, 120, 120),
-            // Deepened so it still reads against white.
-            accent: (104, 58, 168),
-            blue: (28, 88, 168),
+            // Deepened so both still read against white.
+            accent: (24, 60, 148),
+            secondary: (178, 24, 44),
         },
     }
 }
@@ -166,13 +171,19 @@ pub fn fg(rgb: (u8, u8, u8), s: &str) -> String {
 /// Bold + coloured.
 pub fn bold(rgb: (u8, u8, u8), s: &str) -> String {
     let bg = ground_sgr(current().ground);
-    format!("\x1b[1;{bg};38;2;{};{};{}m{}\x1b[0m", rgb.0, rgb.1, rgb.2, s)
+    format!(
+        "\x1b[1;{bg};38;2;{};{};{}m{}\x1b[0m",
+        rgb.0, rgb.1, rgb.2, s
+    )
 }
 
 /// Dim coloured.
 pub fn dim(rgb: (u8, u8, u8), s: &str) -> String {
     let bg = ground_sgr(current().ground);
-    format!("\x1b[2;{bg};38;2;{};{};{}m{}\x1b[0m", rgb.0, rgb.1, rgb.2, s)
+    format!(
+        "\x1b[2;{bg};38;2;{};{};{}m{}\x1b[0m",
+        rgb.0, rgb.1, rgb.2, s
+    )
 }
 
 pub fn red(s: &str) -> String {
@@ -186,7 +197,7 @@ pub fn bone(s: &str) -> String {
 }
 
 /// The Sigil of Chaos — Carroll's eight-rayed star, the sole symbol of the Pact,
-/// rendered small in the purple accent for prompts and banners.
+/// rendered small in the deep-blue accent for prompts and banners.
 pub fn chaosphere() -> String {
     red("\u{2734}") // an eight-pointed star ✴
 }
@@ -219,7 +230,7 @@ pub fn compact_chaos_star_lines() -> [&'static str; 5] {
     ["↖ ↑ ↗", " ╲│╱ ", "←─•─→", " ╱│╲ ", "↙ ↓ ↘"]
 }
 
-/// The Chaos Star rendered in the bold purple accent, ready for a banner.
+/// The Chaos Star rendered in the bold deep-blue accent, ready for a banner.
 pub fn chaos_star_red() -> String {
     chaos_star_lines()
         .iter()
@@ -292,16 +303,46 @@ mod tests {
     }
 
     #[test]
-    fn the_semantic_colours_are_purple_and_blue() {
+    fn the_semantic_colours_are_blue_and_red() {
         for m in [Mode::Dark, Mode::Light] {
             let p = palette(m);
             let (r, g, b) = p.accent;
             assert!(!(r == g && g == b), "{m:?} accent is grey, not an accent");
-            // Purple: blue strongest, red above green, green lowest.
-            assert!(b > r && r > g, "{m:?} accent {r},{g},{b} is not purple");
-            let (r, g, b) = p.blue;
-            assert!(!(r == g && g == b), "{m:?} blue is grey, not an accent");
-            assert!(b > g && g > r, "{m:?} blue {r},{g},{b} is not blue");
+            // Blue: blue strongest, then green, red lowest. No purple anywhere:
+            // a red channel at or above green is what turns a blue violet.
+            assert!(b > g && g > r, "{m:?} accent {r},{g},{b} is not blue");
+            let (r, g, b) = p.secondary;
+            assert!(
+                !(r == g && g == b),
+                "{m:?} secondary is grey, not an accent"
+            );
+            assert!(r > g && r > b, "{m:?} secondary {r},{g},{b} is not red");
+            // ...and red, not orange. Orange is a red with green lifted well
+            // clear of blue; keeping blue at or above green holds the hue on
+            // the crimson side of the wheel instead of letting it drift warm.
+            assert!(b >= g, "{m:?} secondary {r},{g},{b} reads orange, not red");
+        }
+    }
+
+    #[test]
+    fn no_tone_in_either_mode_is_purple() {
+        // The repaint's actual requirement, checked directly rather than
+        // implied by the two accents: purple is blue-dominant with red above
+        // green, and nothing in the palette may be that.
+        for m in [Mode::Dark, Mode::Light] {
+            let p = palette(m);
+            for (name, (r, g, b)) in [
+                ("ground", p.ground),
+                ("chrome", p.chrome),
+                ("fill", p.fill),
+                ("ink", p.ink),
+                ("mid", p.mid),
+                ("faint", p.faint),
+                ("accent", p.accent),
+                ("secondary", p.secondary),
+            ] {
+                assert!(!(b > r && r > g), "{m:?} {name} is purple: {r},{g},{b}");
+            }
         }
     }
 
@@ -312,7 +353,7 @@ mod tests {
             let lum = |(r, g, b): (u8, u8, u8)| {
                 0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)
             };
-            for (name, colour) in [("purple", p.accent), ("blue", p.blue)] {
+            for (name, colour) in [("accent", p.accent), ("secondary", p.secondary)] {
                 assert!(
                     (lum(colour) - lum(p.ground)).abs() > 40.0,
                     "{m:?} {name} does not separate from the ground"

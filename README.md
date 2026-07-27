@@ -69,7 +69,7 @@ workers, and performs a red-team design review:
 (# std/shape)
 
 (~ build (task)
-  (with-evidence (-> task "Propose the design.")))
+  (std-with-evidence (-> task "Propose the design.")))
 
 (~ attack (task)
   (-> task "Find the strongest failure mode."))
@@ -77,9 +77,9 @@ workers, and performs a red-team design review:
 (~ repair (task)
   (-> task "Revise the design so it survives the attack."))
 
-(red-team surviving-verified-design
-  build attack repair
-  "Design a retry queue for a payment service.")
+(std-red-team surviving-verified-design
+ build attack repair
+ "Design a retry queue for a payment service.")
 ```
 
 Paste it into the editor, press `Ctrl-K`, and run `/run`. Rebis accepts several
@@ -172,7 +172,7 @@ Useful workspace commands:
 /mandala                show the o-[]-o flow projection
 /graph                  focus the right panel
 /source                 return focus to source
-/panel hide|show        control the right panel
+/panel toggle|hide|show control the right panel
 /chat                   switch to chat without losing editor state
 /rebis                  return from chat to the suspended workspace
 /quit                   exit Kaos
@@ -187,8 +187,10 @@ pane-local selection.
 In the chat, `Ctrl-C` stops what is in flight instead of exiting: it cancels
 active and queued work first (terminating every serial and parallel job), then
 a pending permission question, then a typed draft; only an idle, empty chat
-exits on `Ctrl-C` (`Esc` also quits). In the Rebis workspace, `Ctrl-C` exits
-Kaos, terminating all active jobs before restoring the terminal.
+exits on `Ctrl-C` (`Esc` also quits). The Rebis workspace behaves the same way:
+`Ctrl-C` first stops all active work — including a run stranded without a
+subprocess, which would otherwise keep reading as busy — and only an idle
+workspace reaches the exit, where one `Ctrl-C` asks and the next confirms.
 
 ## Running programs and blocks
 
@@ -256,6 +258,18 @@ other backend. Before any agent run starts, Kaos asks for authority:
 - `y` approves one run;
 - `a` approves and remembers the choice for the current session;
 - `n` or Esc denies it without launching an agent or command.
+
+A Conductor agent's tools are `read_file`, `write_file`, `edit_file`, `bash`,
+`timer`, and `finish`. `timer` is how an agent comes back to something later
+rather than checking on it at once — `for` is a delay (`30s`, `5m`, `2h`) and
+`note` is what it wants handed back then, which is what you want after leaving a
+build or a long command running in the background. A reply asking for nothing but
+a timer means the agent has nothing in hand, so the run waits quietly instead of
+spending model calls to ask whether the time has passed; the timer and its note
+appear in the run's trace, so the quiet is legible rather than looking like a
+stall. Timers belong to one run: the longest is an hour, a run holds at most
+eight, and none of them outlive the run — no more than the subprocess they were
+set to watch does. The Claude CLI backend brings its own tools and has no timer.
 
 Permission requests and decisions are retained inside the corresponding run.
 Parallel runs remain independent, while their authority questions are presented
@@ -327,14 +341,16 @@ imported with `(# team/reviews)`. Importing `(# team)` recursively loads every
 `.rebis` module below that folder in stable order. Opening another sigil parks
 dirty source as a restorable `temp:N` entry instead of discarding it.
 
-The embedded `std` folder contains fourteen documented modules and 51 macros:
+The embedded `std` folder contains twenty documented modules and 77 `std-` macros:
 
 ```text
 std/flow         application, composition, and fan-out
+std/assurance    verified review, repair, and evidence protocols
 std/spread       deterministic best-of-two/three/five
 std/map          static map and zip shapes
 std/gate         guards, fallback, and independent audit
 std/loops        bounded iteration and convergence
+std/control      lazy binary flow control
 std/evolve       judged refinement and hill-climbing
 std/debate       panels, cross-examination, and red teams
 std/dialectic    synthesis and reconciliation
@@ -344,6 +360,10 @@ std/search       routing, fallback, and tree search
 std/tournament   bracket reduction and consensus
 std/reflexion    critique-and-retry structures
 std/committee    chaired panels and quorum workflows
+std/spiral       Fibonacci restart scheduling, banishment, and the reverse twin
+std/sieve        short-circuit conjunction and disjunction over judges
+std/mirror       orientation duality (`^`) as a combinator
+std/seam         the `&` input port: host-in-the-loop and mechanical gates
 ```
 
 Import one module with `(# std/spread)` or all of them with `(# std)`. Expand
@@ -352,6 +372,16 @@ documentation. This catalog is shared by the terminal and visual Sigils tabs;
 visual mode can draw, inspect, or chat about embedded modules. The `std/`
 namespace is read-only, has no delete action, and saves edited copies only
 under a personal name.
+
+The source-only Rebis Collection is discovered through the same catalog and
+resolver. Kaos looks at `REBIS_COLLECTION_PATH` first, then at the sibling
+`../rebis-collection/modules` in development. Every `.rebis` file below that
+directory becomes a read-only sigil and a module automatically; adding a file
+does not require a Kaos change. The current collection includes
+`archetypes/*` composition protocols, the `git/workflow` repository-workflow
+module, `forge/repair` (the coding repair loop wired onto `std/spiral`), and
+`science/method` (claims that have to survive something), and `madness/descent`
+(`i-am-crazy` — deliberate destabilization with a sober return).
 
 ## Non-interactive Rebis CLI
 
@@ -364,6 +394,12 @@ kaos rebis edit program.rebis
 
 # Execute with the selected model.
 kaos rebis run program.rebis
+
+# One chat request; progress is flushed as it arrives, then the final answer
+# is printed. Bare `kaos chat` still opens the interactive REPL.
+kaos chat "Explain the current failure"
+kaos request chat "Explain the current failure"
+printf '%s' "Explain the current failure" | kaos request chat
 
 # Tool-using execution requires explicit approval outside the TUI:
 # one direct tool agent per prompt, on any backend…
@@ -381,7 +417,12 @@ kaos rebis mandala '(-> "Reproduce the bug" "Write the fix")'
 ```
 
 `rebis run` accepts either a file or inline Rebis source. `tree` and `mandala`
-accept inline source. Piped stdin becomes a record for the run.
+accept inline source. Piped stdin becomes a record for the run. Live Rebis
+execution prints prompt, model, tool, routing, and answer events as they occur;
+the `chat` request forms likewise flush their model/tool trace before emitting
+the cleaned final answer. The interactive TUI and visual editor use the same
+child processes but retain only the final assistant text in their conversation
+stores.
 
 ## Visual mandala editor
 
@@ -407,7 +448,7 @@ soon as what you have typed parses; change the drawing and the source
 regenerates. Neither overwrites the other mid-keystroke, and source that does
 not yet parse is left alone rather than discarded.
 
-While a run is in flight each node wears a rotating dashed purple ring, driven
+While a run is in flight each node wears a rotating dashed accent ring, driven
 by the run's own thread rather than a timer standing in for one.
 
 The singleton **Runs** tab owns the same canonical `kaos rebis run` lifecycle
@@ -417,6 +458,14 @@ output, timers, pause/resume/retry, cancellation, rerun, copy, and file output.
 Dry mode is the safe visual default; live modes are explicit. Changing the
 session working directory also changes where later jobs resolve files, imports,
 tools, and output paths.
+
+Every visual run also opens a **Generation** tab. It is a spacetime automaton,
+not a second graph: the selected Rebis block supplies the lattice's cells and
+neighbourhoods, while the exact bytes of routed prompts and model responses
+seed and drive the rule. Generations grow as concentric rings; the prompt and
+response byte streams appear as colored binary pulse halos, with compact 8-bit
+values in the pane header. The tab follows a live run as output arrives, and a
+completed run remains replayable from the Runs tab's `generation` action.
 
 Tabs hold drawings, Rebis source, conversations, the sigil library, Runs,
 Actions, and Settings. A source tab checks and formats with the Rebis parser,
@@ -428,7 +477,9 @@ does. Drawing source lays the syntax tree out as a left-to-right circuit:
 nesting depth is the column, a tidy row packing stacks subtrees, and
 connections route as right-angle traces between the shapes (calls are drawn as
 a parallelogram, a `(& port …)` input as an inlet). Selecting a node turns its
-attached connections purple; holding **Shift** while completing a connection
+attached `father of` connections deep blue and thickens every attached edge;
+flow arrows keep their red, since that is the colour carrying direction.
+Holding **Shift** while completing a connection
 draws that one as a straight angled line instead of the default 90° routing. A
 drawing's `edit as text` goes the other way. The sigil browser supports
 draw/edit/chat actions for personal and embedded `std/` entries, with delete
@@ -455,7 +506,7 @@ layer is its own plane, and every form fans its operands onto a golden ring
 around itself in the next one, so structure occupies real volume. Invalid shared
 forms stay single so the structural error remains visible instead of being
 copied into several expressions. Recursive
-back-edges rise above the graph as purple curves and recursive components gain
+back-edges rise above the graph as lifted curves and recursive components gain
 a small helical separation, so recursion reads as a loop instead of a crossing
 line. Flow forms become explicit arrow-glyph nodes in 3D. Camera movement and
 mode switching never change Rebis or enter undo history; use 2D to edit.
@@ -486,9 +537,14 @@ valid Rebis AST. Its `open in editor` action opens that exact snapshot.
 `Ctrl-Z` and `Ctrl-Shift-Z` undo and redo semantic drawing edits per tab; camera
 movement is deliberately excluded.
 
-Composition comes only from the two link tools. Blue `arrow` creates an
-explicit Rebis flow form; grey `father of` makes the second clicked shape the
-next ordered child of the first. Its grey arrow therefore reads father → child.
+Composition comes only from the two link tools. Blue `connect flow` creates an
+explicit Rebis flow form between two shapes; the Forms palette also lets you
+place an incomplete `→` or `←` alone, then use grey `father of` to add its
+ordered children one at a time. Its grey arrow therefore reads father → child.
+Children receive positions `1..n` under each parent: link order supplies the
+default, and the selected form's `CHILD ORDER` controls can change those
+numbers without moving the cells. Numbers are local to their parent, not
+global node labels.
 Position is presentation only: moving, overlapping, or drawing one shape inside
 another never links them or changes the program. The same blue/grey distinction
 is retained in 2D and 3D.
@@ -501,7 +557,23 @@ complete structural contract is in
 The derived depth and recursion rules are in
 [Structural 3D projection](docs/REBIS.md#structural-3d-projection).
 
-Right-drag draws a purple marquee and selects every touched form, including a
+A run that reaches a `(& port …)` input with no value waits for you rather than
+failing. In the Runs tab it shows the port it is stopped on with a box beside it:
+type the value and press Enter (or click send) and the run continues from exactly
+where it stopped, which is how one agent's answer feeds another. The value is
+delivered to that port alone, and the box belongs to that run, so two waiting
+runs cannot receive each other's answers. The RECORD / INPUT field is a different
+thing — evidence for scoring, supplied before the run starts. Ports need a live
+mode: a dry run is evaluated without an input seam and reports the port
+unavailable instead of waiting.
+
+A mediator square sizes itself to the code inside it, and can also be sized by
+hand: press and hold just inside a wall and drag. The box's centre stays put, so
+its contents do not move, and the walls stop at those contents. Dragging the box
+anywhere else still moves it and everything inside it together. The size is
+presentation, like every coordinate — the generated source is unchanged.
+
+Right-drag draws a deep-blue marquee and selects every touched form, including a
 flow arrow when the marquee crosses its rendered line. `Ctrl`-click toggles
 individual forms in that block; a blue arrow can be toggled by clicking
 anywhere along its rendered line. Delete removes the whole selected block in
@@ -532,8 +604,8 @@ window is native egui on OpenGL, so it needs no system webkit — see
 
 ## Theme
 
-Kaos is a neutral grey scale with purple and blue semantic accents, in two
-modes. Purple marks focus, recursion, running state, and the chaos star. Blue
+Kaos is a neutral grey scale with deep-blue and red semantic accents, in two
+modes. Deep blue marks focus, recursion, running state, and the chaos star. Red
 marks flow, navigation, live data, and source ranges: it colors arrows in the
 terminal and the 2D/3D mandala, terminal navigation and parallel state, and
 visual source ranges; structural `father of` links remain grey. Both the
@@ -559,7 +631,7 @@ becomes the default for later sessions:
 
 ```text
 /model claude:sonnet
-/model claude:opus
+/model claude:opus          # Opus 5
 /model claude:fable
 /model ollama:qwen3:14b
 /model openai:gpt-4o
@@ -595,9 +667,12 @@ apply manual config edits.
 
 The visual **Settings** tab exposes every declared non-secret Kaos key, grouped
 as Appearance, Mind, Agent, Conclave, Rebis, and Diagnostics, with search,
-save/reload/restore, descriptions, and the actual config path. Persistent
-settings are separated from session-only state such as the current working
-directory. Theme changes save and repaint immediately.
+save/reload/restore, type/default/behavior documentation, examples, and the
+actual config path. It also explains environment-only credentials and child-run
+transport values without allowing them to be persisted. Persistent settings
+are separated from session-only state such as the current working directory.
+Theme changes save and repaint immediately. See the complete reference in
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
 Important Rebis settings:
 
@@ -611,10 +686,12 @@ KAOS_REBIS_MAX_CONCURRENCY  runtime branch concurrency (4)
 vim_mode                    persistent embedded-Vim preference (false)
 ```
 
-The runtime limits are per Rebis process. In a hosted TUI run, the model-call
-limit is a renewable slice: reaching it pauses the live run and `p` grants the
-next slice. Setting a limit to `0` disables that limit. Explicit shell
-environment variables override values loaded from the config file.
+The runtime limits are per Rebis process. `0` disables macro expansion, module
+imports, or model calls; `KAOS_REBIS_MAX_CONCURRENCY=0` means sequential
+execution and a zero Rebis timeout falls back to its safe default. In a hosted
+TUI run, the model-call limit is a renewable slice: reaching it pauses the live
+run and `p` grants the next slice. Explicit shell environment variables
+override values loaded from the config file.
 
 ## Chat and coding-agent workflows
 

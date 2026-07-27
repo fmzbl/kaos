@@ -69,8 +69,97 @@ pub enum Highlight {
 /// Complete punctuation token set accepted by Rebis, in reference-manual
 /// order. The editor renders this as a compact top-bar language legend.
 pub const REBIS_SYMBOLS: &[&str] = &[
-    "(", ")", "[", "]", "~", "#", "'", ",", "$", "^", "->", "<-", ";", "\"",
+    "(", ")", "[", "]", "~", "#", "'", ",", "$", "%", "^", "&", "->", "<-", ";", "\"",
 ];
+
+/// The live state of a source buffer, for an editor's status line.
+///
+/// Every editor in both frontends answers the same question — does this parse,
+/// and if not, where — so they answer it with the same value rather than each
+/// inventing a phrasing. A reader who learns to read the status in the terminal
+/// should not have to learn it again in the visual editor.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SourceState {
+    /// Nothing typed yet. An empty buffer is not an error and says nothing.
+    Empty,
+    /// Parses.
+    Valid,
+    /// Does not parse, with the reason and — when the parser gives an offset —
+    /// the one-based line and column it stopped at.
+    Invalid {
+        message: String,
+        line: usize,
+        column: usize,
+    },
+}
+
+impl SourceState {
+    /// Parse `source` and describe the result.
+    #[must_use]
+    pub fn of(source: &str) -> Self {
+        if source.trim().is_empty() {
+            return Self::Empty;
+        }
+        match rebis_lang::parse(source) {
+            Ok(_) => Self::Valid,
+            Err(error) => {
+                let (line, column) = error
+                    .offset
+                    .map_or((0, 0), |offset| line_column(source, offset));
+                Self::Invalid {
+                    message: error.message,
+                    line,
+                    column,
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid)
+    }
+
+    /// The short marker: nothing, a tick, or a cross.
+    #[must_use]
+    pub const fn mark(&self) -> &'static str {
+        match self {
+            Self::Empty => "",
+            Self::Valid => "\u{2713} valid",
+            Self::Invalid { .. } => "\u{2717} invalid",
+        }
+    }
+
+    /// The reason, placed. Empty unless the source is invalid.
+    ///
+    /// A parser message alone makes the reader hunt for the character it is
+    /// talking about; with a line and column the status is actionable.
+    #[must_use]
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Empty | Self::Valid => String::new(),
+            Self::Invalid {
+                message,
+                line,
+                column,
+            } if *line > 0 => format!("{line}:{column} \u{2014} {message}"),
+            Self::Invalid { message, .. } => message.clone(),
+        }
+    }
+}
+
+/// One-based line and column of a UTF-8 byte offset.
+#[must_use]
+pub fn line_column(source: &str, byte: usize) -> (usize, usize) {
+    let upto = source.get(..byte.min(source.len())).unwrap_or(source);
+    let line = upto.matches('\n').count() + 1;
+    let column = upto
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count())
+        + 1;
+    (line, column)
+}
 
 /// Find the complete structural form whose delimiter is at the character
 /// cursor (or immediately before it). Both frontends use this for "run block".
@@ -276,7 +365,10 @@ impl ModuleResolver for HypersigilModules {
         match fs::read_to_string(&path) {
             Ok(source) => Ok(Some(source)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.resolve_folder(module)
+                match self.resolve_folder(module)? {
+                    Some(source) => Ok(Some(source)),
+                    None => kaos_core::sigils::resolve_collection_module(module.as_str()),
+                }
             }
             Err(error) => Err(format!("{}: {error}", path.display())),
         }
@@ -2417,7 +2509,8 @@ fn highlight_for(
         | TokenKind::Quote
         | TokenKind::Unquote
         | TokenKind::Dollar
-        | TokenKind::Amp => Highlight::Mediate,
+        | TokenKind::Amp
+        | TokenKind::Percent => Highlight::Mediate,
         TokenKind::Invert => Highlight::Invert,
         TokenKind::Forward => Highlight::Forward,
         TokenKind::Backflow => Highlight::Backflow,
@@ -2494,6 +2587,11 @@ pub enum WorkspaceAction {
     OpenSigilChat,
     /// Send one turn to the supervisory agent without leaving the workspace.
     SigilChat(String),
+    /// Ask a retained Rebis run about its current or completed execution.
+    RunChat {
+        id: u64,
+        question: String,
+    },
     /// Execute a session-level Kaos command without leaving the editor.
     Kaos(String),
 }
@@ -3015,6 +3113,28 @@ impl Workspace {
         let run_selection = self.run_selection.take();
         match command.as_str() {
             "chat" => return WorkspaceAction::Suspend,
+            _ if command.starts_with("chat run ") => {
+                let mut parts = command.splitn(4, char::is_whitespace);
+                let _ = parts.next();
+                let _ = parts.next();
+                let Some(raw_id) = parts.next().filter(|value| !value.is_empty()) else {
+                    self.message = "usage: /chat run ID QUESTION".to_string();
+                    return WorkspaceAction::None;
+                };
+                let Ok(id) = raw_id.parse::<u64>() else {
+                    self.message = "chat run: ID must be a number".to_string();
+                    return WorkspaceAction::None;
+                };
+                let Some(question) = parts.next().map(str::trim).filter(|value| !value.is_empty())
+                else {
+                    self.message = "usage: /chat run ID QUESTION".to_string();
+                    return WorkspaceAction::None;
+                };
+                return WorkspaceAction::RunChat {
+                    id,
+                    question: question.to_string(),
+                };
+            }
             "runs" => return WorkspaceAction::BrowseRuns,
             "model" | "new" | "clear" | "quit" | "mouse" | "chaos" | "chaos on"
             | "chaos off" | "config" | "config restore" | "theme" | "theme dark"
@@ -3254,7 +3374,7 @@ impl Workspace {
             }
             "help" | "" => {
                 self.message =
-                    "/chat /config [restore] /model [MODEL] /chaos [on|off] /new /clear /quit /run [block|parallel] /runs /save [FILE] /vim toggle|on|off|always|never /search [TEXT] /output [copy|write FILE] /theme dark|light /mandala /visual [open] /tree /sigils [QUERY] /sigil save|open NAME /sigil chat /panel hide|show /graph /source /format[!] /mouse [on|off] /record FILE"
+                    "/chat [run ID QUESTION] /config [restore] /model [MODEL] /chaos [on|off] /new /clear /quit /run [block|parallel] /runs /save [FILE] /vim toggle|on|off|always|never /search [TEXT] /output [copy|write FILE] /theme dark|light /mandala /visual [open] /tree /sigils [QUERY] /sigil save|open NAME /sigil chat /panel toggle|hide|show /graph /source /format[!] /mouse [on|off] /record FILE"
                         .to_string()
             }
             _ => self.message = format!("unknown Kaos command /{command}"),
@@ -3748,16 +3868,27 @@ impl Workspace {
             self.open_temporary_sigil(id);
             return;
         }
-        // std/ names open the embedded standard library — a buffer copy;
-        // saving back into std/ is refused, so edits go to a new name.
+        // Read-only modules open as buffer copies; saving back into their
+        // namespace is refused, so edits go to a new name.
         let requested_name = requested.trim().trim_end_matches(".rebis");
-        if let Some((_, source)) = rebis_lang::std_modules()
+        let standard_source = rebis_lang::std_modules()
             .iter()
             .find(|(name, _)| *name == requested_name)
-        {
+            .map(|(_, source)| (*source).to_string());
+        let embedded_label = if standard_source.is_some() {
+            "embedded std"
+        } else {
+            "rebis collection"
+        };
+        let embedded_source = standard_source.or_else(|| {
+            kaos_core::sigils::resolve_collection_module(requested_name)
+                .ok()
+                .flatten()
+        });
+        if let Some(source) = embedded_source {
             let parked = self.park_current_as_temporary_sigil();
             self.reset_sigil_chat();
-            self.editor = Editor::new((*source).to_string());
+            self.editor = Editor::new(source);
             self.chaos_star_visible = false;
             self.path = None;
             self.current_sigil = None;
@@ -3767,10 +3898,10 @@ impl Workspace {
             self.view_left = 0;
             self.refresh();
             let message = parked.map_or_else(
-                || format!("opened {requested_name} (embedded std) · /sigil save NAME copies it"),
+                || format!("opened {requested_name} ({embedded_label}) · /sigil save NAME copies it"),
                 |id| {
                     format!(
-                    "opened {requested_name} (embedded std) · previous edits parked as temp:{id}"
+                    "opened {requested_name} ({embedded_label}) · previous edits parked as temp:{id}"
                 )
                 },
             );
@@ -3907,6 +4038,13 @@ impl Workspace {
                 .map(|(name, _)| *name)
                 .filter(|name| name.to_ascii_lowercase().contains(&query))
                 .map(|name| SigilEntry::Std(name.to_string())),
+        );
+        temporary.extend(
+            kaos_core::sigils::collection_entries()
+                .into_iter()
+                .map(|entry| entry.name)
+                .filter(|name| name.to_ascii_lowercase().contains(&query))
+                .map(SigilEntry::Std),
         );
         self.sigil_results = temporary;
         self.sigil_choice = 0;
@@ -4541,6 +4679,34 @@ mod tests {
     }
 
     #[test]
+    fn the_source_state_places_the_error_it_reports() {
+        assert_eq!(SourceState::of("   \n  "), SourceState::Empty);
+        assert!(SourceState::of("(-> \"a\" \"b\")").is_valid());
+
+        // The user's real case: a prompt that is never closed.
+        let broken = "(\n  (-> \"a\"\n     \"never closed)\n";
+        let state = SourceState::of(broken);
+        assert!(!state.is_valid());
+        let SourceState::Invalid { line, column, .. } = &state else {
+            panic!("expected an invalid state, got {state:?}");
+        };
+        assert_eq!(*line, 3, "the unterminated prompt starts on line 3");
+        assert!(*column > 1);
+        // The detail is actionable rather than just a sentence.
+        assert!(state.detail().starts_with("3:"), "{}", state.detail());
+        assert_eq!(state.mark(), "\u{2717} invalid");
+    }
+
+    #[test]
+    fn line_and_column_are_one_based_and_count_characters() {
+        assert_eq!(line_column("abc", 0), (1, 1));
+        assert_eq!(line_column("abc", 2), (1, 3));
+        assert_eq!(line_column("ab\ncd", 3), (2, 1));
+        // Columns count characters, not bytes.
+        assert_eq!(line_column("é\nx", "é".len() + 1), (2, 1));
+    }
+
+    #[test]
     fn matching_supports_parentheses_and_mediator_brackets() {
         let mut editor = Editor::new("([\"synthesize\"] (\"a\") (\"b\"))");
         assert_eq!(editor.matching_parentheses(), Some((0, 27)));
@@ -4776,6 +4942,39 @@ mod tests {
     }
 
     #[test]
+    fn terminal_views_parse_format_and_render_percent_control() {
+        let source = "(% (-> \"question\" ($ \"Return exactly one token: 0 or 1. \" \"No explanation.\")) one zero)";
+        let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+        workspace.editor = Editor::new(source);
+        workspace.refresh();
+
+        assert!(workspace.diagnostic().is_none());
+        assert!(workspace
+            .canonical()
+            .is_some_and(|text| text.contains("(%")));
+
+        workspace.visualization = Visualization::Tree;
+        let tree = workspace.graph_lines(240, 100).join("\n");
+        assert!(tree.contains("% binary gate"));
+        assert!(tree.contains("Return exactly one token: 0 or 1."));
+
+        workspace.command = "format".to_string();
+        assert_eq!(workspace.execute_kaos_command(), WorkspaceAction::None);
+        assert!(workspace.editor.source().contains("(%"));
+
+        workspace.command = "mandala".to_string();
+        assert_eq!(workspace.execute_kaos_command(), WorkspaceAction::None);
+        assert!(workspace.graph_lines(240, 100).join("\n").contains('%'));
+
+        let percent = source.find('%').unwrap();
+        let colours = highlights(source);
+        assert_eq!(
+            colours[source[..percent].chars().count()],
+            Highlight::Mediate
+        );
+    }
+
+    #[test]
     fn mandala_renders_function_templates_and_call_boxes() {
         let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
         workspace.editor = Editor::new(
@@ -4991,6 +5190,12 @@ mod tests {
         workspace.editor = Editor::new("([\"merge\"] \"left\" \"right\")");
         workspace.refresh();
         workspace.command = "panel hide".to_string();
+        workspace.execute_kaos_command();
+        assert!(!workspace.panel_visible);
+        workspace.command = "panel toggle".to_string();
+        workspace.execute_kaos_command();
+        assert!(workspace.panel_visible);
+        workspace.command = "panel toggle".to_string();
         workspace.execute_kaos_command();
         assert!(!workspace.panel_visible);
         workspace.command = "graph".to_string();
@@ -5551,7 +5756,7 @@ mod tests {
         assert!(workspace
             .editor
             .source()
-            .contains("(~ apply (worker value)"));
+            .contains("(~ std-apply (worker value)"));
         assert!(workspace.message.contains("embedded std"));
         // The buffer is a copy: no sigil identity, and saving back into
         // std/ stays refused at the command layer.

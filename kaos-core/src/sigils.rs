@@ -126,6 +126,8 @@ impl Library {
                     read_only: true,
                 }),
         );
+        entries.extend(collection_entries());
+        entries.sort();
         entries
     }
 
@@ -153,6 +155,9 @@ impl Library {
                 .map(|(_, source)| (*source).to_string())
                 .ok_or_else(|| SigilError::Io(format!("embedded module not found: {trimmed}")));
         }
+        if let Some(source) = resolve_collection_module(trimmed).map_err(SigilError::Io)? {
+            return Ok(source);
+        }
         self.load(trimmed)
     }
 
@@ -161,7 +166,11 @@ impl Library {
     /// dead weight that looks load-bearing.
     pub fn save(&self, name: &str, source: &str) -> Result<PathBuf, SigilError> {
         let trimmed = name.trim().trim_matches('/');
-        if is_reserved(trimmed) {
+        if is_reserved(trimmed)
+            || resolve_collection_module(trimmed)
+                .map_err(SigilError::Io)?
+                .is_some()
+        {
             return Err(SigilError::Reserved);
         }
         let path = self.path(trimmed)?;
@@ -174,7 +183,11 @@ impl Library {
 
     pub fn delete(&self, name: &str) -> Result<(), SigilError> {
         let trimmed = name.trim().trim_matches('/');
-        if is_reserved(trimmed) {
+        if is_reserved(trimmed)
+            || resolve_collection_module(trimmed)
+                .map_err(SigilError::Io)?
+                .is_some()
+        {
             return Err(SigilError::Reserved);
         }
         let path = self.path(trimmed)?;
@@ -188,6 +201,124 @@ impl Library {
 
 fn is_reserved(name: &str) -> bool {
     name == "std" || name.starts_with("std/")
+}
+
+pub fn resolve_collection_module(name: &str) -> Result<Option<String>, String> {
+    let name = name.trim().trim_matches('/');
+    if name.is_empty() || rebis_lang::ModuleName::try_from(name).is_err() {
+        return Ok(None);
+    }
+    let Some(root) = collection_root() else {
+        return Ok(None);
+    };
+    let mut path = root.join(name);
+    path.set_extension("rebis");
+    match fs::read_to_string(&path) {
+        Ok(source) => Ok(Some(source)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut names = Vec::new();
+            collect_collection_modules(&root, &root, &mut names)?;
+            let prefix = format!("{name}/");
+            names.retain(|module| module.starts_with(&prefix));
+            names.sort();
+            names.dedup();
+            if names.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(format!(
+                    "({})",
+                    names
+                        .iter()
+                        .map(|module| format!("(# {module})"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )))
+            }
+        }
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+pub fn collection_entries() -> Vec<Entry> {
+    let Some(root) = collection_root() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    if collect_collection_modules(&root, &root, &mut names).is_err() {
+        return Vec::new();
+    }
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let mut path = root.join(&name);
+            path.set_extension("rebis");
+            let bytes = fs::metadata(path).ok()?.len();
+            Some(Entry {
+                name,
+                bytes,
+                read_only: true,
+            })
+        })
+        .collect()
+}
+
+fn collection_root() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("REBIS_COLLECTION_PATH") {
+        let path = PathBuf::from(path);
+        candidates.push(path.clone());
+        candidates.push(path.join("modules"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("../rebis-collection/modules"));
+        candidates.push(cwd.join("rebis-collection/modules"));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            candidates.push(parent.join("../../../rebis-collection/modules"));
+            candidates.push(parent.join("../../rebis-collection/modules"));
+        }
+    }
+    candidates.into_iter().find_map(|path| {
+        if path.join("modules").is_dir() {
+            Some(path.join("modules"))
+        } else if path.is_dir() {
+            Some(path)
+        } else {
+            None
+        }
+    })
+}
+
+fn collect_collection_modules(
+    root: &Path,
+    directory: &Path,
+    names: &mut Vec<String>,
+) -> Result<(), String> {
+    let entries =
+        fs::read_dir(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_collection_modules(root, &path, names)?;
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rebis") {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            names.push(
+                relative
+                    .with_extension("")
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<Entry>) {
@@ -289,9 +420,9 @@ mod tests {
         assert!(catalog
             .iter()
             .any(|entry| entry.name == "std/flow" && entry.read_only));
-        assert_eq!(
-            catalog.iter().filter(|entry| entry.read_only).count(),
-            rebis_lang::std_modules().len()
+        assert!(
+            catalog.iter().filter(|entry| entry.read_only).count()
+                >= rebis_lang::std_modules().len()
         );
         assert_eq!(
             lib.load_catalog("std/flow").unwrap(),
@@ -320,6 +451,24 @@ mod tests {
     #[test]
     fn listing_a_missing_library_is_empty_not_an_error() {
         assert!(Library::new("/nonexistent/kaos/sigils").list().is_empty());
+    }
+
+    #[test]
+    fn collection_modules_are_read_only_catalog_entries_when_configured() {
+        let entries = collection_entries();
+        if entries.is_empty() {
+            return;
+        }
+        assert!(entries.iter().any(|entry| entry.name == "archetypes/core"));
+        let source = resolve_collection_module("archetypes/core")
+            .unwrap()
+            .expect("collection module");
+        assert!(source.contains("name-pattern"));
+        let lib = temp("collection");
+        assert_eq!(lib.save("archetypes/core", "x"), Err(SigilError::Reserved));
+        assert_eq!(lib.load_catalog("archetypes/core").unwrap(), source);
+        assert!(resolve_collection_module("archetypes").unwrap().is_some());
+        let _ = fs::remove_dir_all(lib.root());
     }
 
     #[test]

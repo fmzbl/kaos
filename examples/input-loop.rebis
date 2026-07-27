@@ -1,0 +1,43 @@
+; A loop driven entirely by you, written with `&` directly.
+;
+; Two ports, because they do two different jobs:
+;
+;   `more`  a gate. `%` needs exactly 0 or 1, and the port delivers it — so the
+;           decision to go round again is yours and costs no model call.
+;   `note`  a value. Used where a value flows (here as the arrow's producer) a
+;           port hands over its text, so your instruction joins the work.
+;
+; This is the reason to write `&` yourself rather than use `std/seam`: that module
+; fixes one port named `seam`, and a program needing two distinct inputs has to
+; name them itself.
+;
+; Send `1` to keep working, then a note saying what to do next. Send `0` to stop
+; and take the thread as it stands.
+;
+; MEASURED, two rounds: five deliveries from you (1, note, 1, note, 0) and three
+; model calls. Note the ORDER — every delivery is taken before any model call
+; runs. `%` is lazy and the thread only appears in the stopping branch, so the
+; whole chain is assembled as source and evaluated once, at the end. That makes
+; this a shape for DIRECTING work, not for reviewing it: you are saying what to
+; do next, not judging what came back. To see each round before deciding, force
+; the work into the gate and pay for the re-run — `examples/input.rebis` does
+; exactly that, and costs nine calls for three rounds.
+;
+; With nothing wired, `more` is unbound, the gate sees neither 0 nor 1, and the
+; run stops on an InvalidCondition having made no model call at all.
+;
+; Simpler still, if you only want to choose how many passes to run, one port is
+; enough — drop `note` and let the prompt be fixed:
+;
+;   (~ keep-going (plan)
+;     (& more (% more (keep-going (-> plan "Add the next step.")) plan)))
+
+(~ session (thread)
+  (& more
+    (% more
+      (& note
+        (session
+          (-> thread note "Carry the work on, following this note.")))
+      thread)))
+
+(session "Open a plan for tidying this project.")

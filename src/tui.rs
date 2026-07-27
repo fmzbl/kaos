@@ -7,6 +7,7 @@
 //! ratatui owns the screen (the subprocess writes to a pipe, never the terminal), and
 //! long/agent commands stream live. The model is passed down via `KAOS_MODEL`.
 
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -41,7 +42,7 @@ use crate::rebis_workspace::{
 use crate::theme;
 
 // The terminal palette follows the configured mode (`/theme dark|light`).
-// Structure stays neutral grey; purple marks focus and blue marks flow.
+// Structure stays neutral grey; deep blue marks focus and red marks flow.
 fn tone(rgb: (u8, u8, u8)) -> Color {
     Color::Rgb(rgb.0, rgb.1, rgb.2)
 }
@@ -74,9 +75,14 @@ fn c_ground() -> Color {
 fn C_GOLD() -> Color {
     tone(crate::theme::current().accent)
 }
+/// Rebis symbols — the language's own words, in the main accent.
 #[allow(non_snake_case)]
-fn C_BLUE() -> Color {
-    tone(crate::theme::current().blue)
+fn C_SYMBOL() -> Color {
+    tone(crate::theme::current().accent)
+}
+#[allow(non_snake_case)]
+fn C_SECONDARY() -> Color {
+    tone(crate::theme::current().secondary)
 }
 /// A finished run. Formerly green; now simply the brightest tone.
 #[allow(non_snake_case)]
@@ -101,6 +107,12 @@ const fn command(display: &'static str, insert: &'static str) -> CommandSpec {
 const MAIN_SLASH_COMMANDS: &[CommandSpec] = &[
     command("rebis [FILE]", "rebis "),
     command("runs", "runs"),
+    command("chat run [ID] [QUESTION]", "chat run "),
+    command("auth", "auth"),
+    command("auth openrouter", "auth openrouter "),
+    command("auth anthropic", "auth anthropic "),
+    command("auth openai", "auth openai "),
+    command("auth forget", "auth forget "),
     command("config", "config"),
     command("config restore", "config restore"),
     command("sigils [QUERY]", "sigils "),
@@ -111,6 +123,10 @@ const MAIN_SLASH_COMMANDS: &[CommandSpec] = &[
     command("model [MODEL]", "model "),
     command("chaos [on|off]", "chaos"),
     command("mouse [on|off]", "mouse"),
+    command("panel", "panel"),
+    command("panel toggle", "panel toggle"),
+    command("panel hide", "panel hide"),
+    command("panel show", "panel show"),
     command("new", "new"),
     command("clear", "clear"),
     command("quit", "quit"),
@@ -119,6 +135,7 @@ const MODEL_SELECTIONS: &[CommandSpec] = &[
     command("model claude", "model claude"),
     command("model claude:sonnet", "model claude:sonnet"),
     command("model claude:opus", "model claude:opus"),
+    command("model claude:opus5", "model claude:opus5"),
     command("model claude:haiku", "model claude:haiku"),
     command("model claude:fable", "model claude:fable"),
     command("model anthropic", "model anthropic"),
@@ -129,6 +146,7 @@ const MODEL_SELECTIONS: &[CommandSpec] = &[
 ];
 const REBIS_SLASH_COMMANDS: &[CommandSpec] = &[
     command("chat", "chat"),
+    command("chat run [ID] [QUESTION]", "chat run "),
     command("config", "config"),
     command("config restore", "config restore"),
     command("model [MODEL]", "model "),
@@ -165,6 +183,7 @@ const REBIS_SLASH_COMMANDS: &[CommandSpec] = &[
     command("graph", "graph"),
     command("source", "source"),
     command("panel", "panel"),
+    command("panel toggle", "panel toggle"),
     command("panel hide", "panel hide"),
     command("panel show", "panel show"),
     command("format", "format"),
@@ -339,6 +358,8 @@ struct Job {
     /// Identity of a hosted Rebis run. Its stream is retained in the run tree
     /// as well as the workspace output pane and chat transcript.
     rebis_run_id: Option<u64>,
+    /// Identity of a parallel conversation bound to one retained run.
+    run_chat_id: Option<u64>,
     /// Hosted children lead their own process group, so pause/cancel includes
     /// model and command descendants instead of orphaning them.
     owns_process_group: bool,
@@ -394,6 +415,12 @@ struct SigilChatJob {
     /// The channel paused this run, so a completed turn should continue it.
     /// A run that was already paused remains paused for the user to inspect.
     resume_after: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RunChatTurn {
+    question: String,
+    answer: String,
 }
 
 const SAVED_REBIS_RUN_HEADER: &str = "KAOS_REBIS_SAVED_RUN_V1\n";
@@ -805,6 +832,14 @@ pub struct App {
     /// Source-bound god-agent turn running beside Rebis without occupying its
     /// serial FIFO or ordinary chat conversation.
     sigil_chat_job: Option<SigilChatJob>,
+    /// Per-run provider conversations. Run chat remains independent from the
+    /// ordinary session while retaining its own in-process history.
+    run_chat_sessions: BTreeMap<u64, String>,
+    run_chat_history: BTreeMap<u64, Vec<RunChatTurn>>,
+    run_chat_replies: BTreeMap<u64, String>,
+    /// Run ids whose retained snapshot has already been placed in the visible
+    /// terminal chat transcript for this app session.
+    run_chat_context_shown: std::collections::BTreeSet<u64>,
     /// When the current job started (for the spinner + elapsed clock).
     job_start: Option<Instant>,
     /// The agent's latest activity — the most recent non-empty output line — shown
@@ -936,6 +971,10 @@ impl App {
             job: None,
             parallel_jobs: Vec::new(),
             sigil_chat_job: None,
+            run_chat_sessions: BTreeMap::new(),
+            run_chat_history: BTreeMap::new(),
+            run_chat_replies: BTreeMap::new(),
+            run_chat_context_shown: std::collections::BTreeSet::new(),
             job_start: None,
             activity: String::new(),
             // Honour a pre-set env var; otherwise leave undecided so the first
@@ -1743,77 +1782,101 @@ impl App {
         }
     }
 
+    /// Drain every input event the terminal has already buffered, then draw
+    /// once.
+    ///
+    /// Auto-repeat outruns a full redraw: hold a scroll key and the terminal
+    /// queues repeats far faster than `draw` + `pump` can retire them. Handling
+    /// one event per frame turned that backlog into motion that continued after
+    /// the key was released — the scroll kept going on its own. Coalescing the
+    /// burst into a single frame makes a held key track the key and stop with
+    /// it, and costs nothing when events arrive one at a time.
+    ///
+    /// The drain is bounded so a paste storm or a stuck key cannot starve
+    /// rendering: past the cap we redraw and pick the rest up next frame.
     fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        /// Events retired per frame before rendering wins the argument.
+        const DRAIN_CAP: usize = 256;
         while !self.quit {
             terminal.draw(|f| self.draw(f))?;
             self.pump();
             if event::poll(Duration::from_millis(50))? {
-                match event::read()? {
-                    Event::Key(k) if k.kind == KeyEventKind::Press => {
-                        self.on_key(k.code, k.modifiers);
+                let mut drained = 0;
+                loop {
+                    self.handle_event(event::read()?);
+                    drained += 1;
+                    if self.quit || drained >= DRAIN_CAP || !event::poll(Duration::ZERO)? {
+                        break;
                     }
-                    Event::Paste(text) => self.on_paste(&text),
-                    Event::Mouse(m) => match m.kind {
-                        MouseEventKind::ScrollUp => self.on_mouse_scroll(
-                            -1,
-                            m.column,
-                            m.row,
-                            m.modifiers,
-                            crossterm::terminal::size().unwrap_or((80, 24)),
-                        ),
-                        MouseEventKind::ScrollDown => self.on_mouse_scroll(
-                            1,
-                            m.column,
-                            m.row,
-                            m.modifiers,
-                            crossterm::terminal::size().unwrap_or((80, 24)),
-                        ),
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            // The entry star remains a one-event veil. Once it
-                            // is gone, defer pane clicks until mouse-up so a drag
-                            // can become a clipped text selection instead.
-                            let star_visible = self
-                                .rebis
-                                .as_ref()
-                                .is_some_and(RebisWorkspace::chaos_star_visible);
-                            if star_visible
-                                || (!self.begin_pane_selection(m.column, m.row)
-                                    && self.rebis.is_some())
-                            {
-                                self.on_rebis_click(
-                                    m.column,
-                                    m.row,
-                                    crossterm::terminal::size().unwrap_or((80, 24)),
-                                );
-                            }
-                        }
-                        MouseEventKind::Drag(MouseButton::Left) => {
-                            self.drag_pane_selection(m.column, m.row);
-                        }
-                        MouseEventKind::Up(MouseButton::Left) => {
-                            if let Some((dragged, pane, text)) =
-                                self.finish_pane_selection(m.column, m.row)
-                            {
-                                if dragged {
-                                    let copied =
-                                        text.is_empty() || self.copy_to_clipboard(&text).is_ok();
-                                    self.announce_pane_copy(pane, &text, copied);
-                                } else if self.rebis.is_some() {
-                                    self.on_rebis_click(
-                                        m.column,
-                                        m.row,
-                                        crossterm::terminal::size().unwrap_or((80, 24)),
-                                    );
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    _ => {}
                 }
             }
         }
         Ok(())
+    }
+
+    /// Dispatch one terminal event. Split out of [`Self::run_loop`] so the
+    /// per-frame drain has a single place to send each event.
+    fn handle_event(&mut self, event: Event) {
+        match event {
+            Event::Key(k) if k.kind == KeyEventKind::Press => {
+                self.on_key(k.code, k.modifiers);
+            }
+            Event::Paste(text) => self.on_paste(&text),
+            Event::Mouse(m) => match m.kind {
+                MouseEventKind::ScrollUp => self.on_mouse_scroll(
+                    -1,
+                    m.column,
+                    m.row,
+                    m.modifiers,
+                    crossterm::terminal::size().unwrap_or((80, 24)),
+                ),
+                MouseEventKind::ScrollDown => self.on_mouse_scroll(
+                    1,
+                    m.column,
+                    m.row,
+                    m.modifiers,
+                    crossterm::terminal::size().unwrap_or((80, 24)),
+                ),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    // The entry star remains a one-event veil. Once it
+                    // is gone, defer pane clicks until mouse-up so a drag
+                    // can become a clipped text selection instead.
+                    let star_visible = self
+                        .rebis
+                        .as_ref()
+                        .is_some_and(RebisWorkspace::chaos_star_visible);
+                    if star_visible
+                        || (!self.begin_pane_selection(m.column, m.row) && self.rebis.is_some())
+                    {
+                        self.on_rebis_click(
+                            m.column,
+                            m.row,
+                            crossterm::terminal::size().unwrap_or((80, 24)),
+                        );
+                    }
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.drag_pane_selection(m.column, m.row);
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let Some((dragged, pane, text)) = self.finish_pane_selection(m.column, m.row)
+                    {
+                        if dragged {
+                            let copied = text.is_empty() || self.copy_to_clipboard(&text).is_ok();
+                            self.announce_pane_copy(pane, &text, copied);
+                        } else if self.rebis.is_some() {
+                            self.on_rebis_click(
+                                m.column,
+                                m.row,
+                                crossterm::terminal::size().unwrap_or((80, 24)),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
     }
 
     // ── rendering ──────────────────────────────────────────────────
@@ -1943,7 +2006,7 @@ impl App {
                         if index == selected {
                             Style::new()
                                 .fg(Color::Black)
-                                .bg(C_BLUE())
+                                .bg(C_SECONDARY())
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::new().fg(C_BONE())
@@ -2030,7 +2093,7 @@ impl App {
                     Span::styled(format!("{frame} "), red_bold()),
                     Span::styled(job.label.clone(), Style::new().fg(C_BONE())),
                     Span::styled(format!("  {secs}s"), Style::new().fg(C_OX())),
-                    Span::styled(parallel, Style::new().fg(C_BLUE())),
+                    Span::styled(parallel, Style::new().fg(C_SECONDARY())),
                     Span::styled(queued, Style::new().fg(C_ASH())),
                     Span::styled(
                         "  ".to_string() + &act,
@@ -2039,7 +2102,10 @@ impl App {
                 ])
             }
             _ if !self.parallel_jobs.is_empty() => Line::from(vec![
-                Span::styled("∥ ", Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "∥ ",
+                    Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     format!(
                         "{} parallel Rebis run{} active",
@@ -2165,12 +2231,20 @@ impl App {
             .parallel_jobs
             .iter()
             .enumerate()
-            .map(|(index, job)| (index, job.rebis_run_id, poll_job(job)))
+            .map(|(index, job)| (index, job.rebis_run_id, job.run_chat_id, poll_job(job)))
             .collect::<Vec<_>>();
         let mut completed = Vec::new();
-        for (index, run_id, poll) in parallel_polls {
+        for (index, run_id, run_chat_id, poll) in parallel_polls {
+            if run_chat_id.is_some() {
+                live_run_changed |= !poll.lines.is_empty() || poll.done.is_some();
+            }
             live_run_changed |= run_id.is_some() && (!poll.lines.is_empty() || poll.done.is_some());
             for line in poll.lines {
+                if let Some(chat_id) = run_chat_id {
+                    self.record_run_chat_line(chat_id, &line);
+                    self.push_run_chat_stream_line(chat_id, &line);
+                    continue;
+                }
                 if self.handle_rebis_pause_marker(run_id, &line) {
                     continue;
                 }
@@ -2185,6 +2259,22 @@ impl App {
         }
         for (index, code) in completed.into_iter().rev() {
             let job = self.parallel_jobs.remove(index);
+            if let Some(chat_id) = job.run_chat_id {
+                self.finish_run_chat(chat_id, code);
+                let note = if code == 0 {
+                    Span::styled(
+                        format!("  chat run #{chat_id} done"),
+                        Style::new().fg(C_DONE()),
+                    )
+                } else {
+                    Span::styled(
+                        format!("  chat run #{chat_id} exited ({code})"),
+                        Style::new().fg(C_RED()),
+                    )
+                };
+                self.push_line(Line::from(note));
+                continue;
+            }
             self.finish_rebis_subprocess(job.rebis_run_id, code, true);
             let id = job.rebis_run_id.unwrap_or_default();
             let note = if code == 0 {
@@ -2471,10 +2561,60 @@ impl App {
         self.push_line(Line::from(vec![
             Span::styled(
                 format!("∥ #{run_id}  "),
-                Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(text, Style::new().fg(C_ASH())),
         ]));
+    }
+
+    fn record_run_chat_line(&mut self, id: u64, line: &str) {
+        let text = match crate::fold::classify(line) {
+            crate::fold::Marker::Open(summary) => format!("▶ {}", strip_ansi(summary)),
+            crate::fold::Marker::Close => return,
+            crate::fold::Marker::Line(content) => strip_ansi(content),
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        self.run_chat_replies
+            .entry(id)
+            .or_default()
+            .push_str(&format!("{text}\n"));
+    }
+
+    fn push_run_chat_stream_line(&mut self, id: u64, line: &str) {
+        let text = match crate::fold::classify(line) {
+            crate::fold::Marker::Open(summary) => format!("▶ {}", strip_ansi(summary)),
+            crate::fold::Marker::Close => return,
+            crate::fold::Marker::Line(content) => strip_ansi(content),
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        self.push_line(Line::from(vec![
+            Span::styled(
+                format!("chat #{id}  "),
+                Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(text, Style::new().fg(C_ASH())),
+        ]));
+    }
+
+    fn finish_run_chat(&mut self, id: u64, code: i32) {
+        let answer = kaos_core::chat::clean_chat_reply(
+            &self.run_chat_replies.remove(&id).unwrap_or_default(),
+        );
+        if let Some(turn) = self
+            .run_chat_history
+            .get_mut(&id)
+            .and_then(|turns| turns.last_mut())
+        {
+            turn.answer = if answer.trim().is_empty() && code != 0 {
+                format!("chat subprocess exited with status {code}")
+            } else {
+                answer
+            };
+        }
     }
 
     /// Handle one streamed line from a running command, interpreting the fold
@@ -2665,12 +2805,26 @@ impl App {
         // The key still performs its normal action below.
         self.disarm_quit();
         if self.pending_rebis.is_some() {
+            let shift = mods.contains(KeyModifiers::SHIFT);
             match code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.approve_rebis_authority(false),
                 KeyCode::Char('a') | KeyCode::Char('A') => self.approve_rebis_authority(true),
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     self.deny_rebis_authority()
                 }
+                // Raising the authority question also opens the run browser and
+                // focuses it, so the question is read there — and the text it is
+                // asked about may not fit. Reading has no bearing on the answer,
+                // so scrolling stays live while the question stands. Only these
+                // keys: everything else waits, since no answer has been given.
+                KeyCode::Down if shift => self.rebis_run_top = self.rebis_run_max_top(),
+                KeyCode::Up if shift => self.rebis_run_top = 0,
+                KeyCode::Down => self.scroll_rebis_runs(1),
+                KeyCode::Up => self.scroll_rebis_runs(-1),
+                KeyCode::PageDown => self.scroll_rebis_runs(10),
+                KeyCode::PageUp => self.scroll_rebis_runs(-10),
+                KeyCode::Home => self.rebis_run_top = 0,
+                KeyCode::End => self.rebis_run_top = self.rebis_run_max_top(),
                 _ => {}
             }
             return;
@@ -3018,6 +3172,20 @@ impl App {
                 }
                 KeyCode::Char('p') if !ctrl => {
                     self.toggle_pause_selected_rebis_run();
+                    return;
+                }
+                KeyCode::Char('c') if !ctrl => {
+                    let id = self.rebis_runs[self.rebis_run_choice].id;
+                    self.show_run_chat_snapshot(id);
+                    let Some(workspace) = self.rebis.as_mut() else {
+                        return;
+                    };
+                    workspace.mode = RebisMode::KaosCommand;
+                    workspace.command = format!("chat run {id} ");
+                    workspace.command_choice = 0;
+                    workspace.message =
+                        "run chat · type a question and press Enter · source/output snapshot included"
+                            .to_string();
                     return;
                 }
                 KeyCode::Char('u') if !ctrl => {
@@ -3616,6 +3784,7 @@ impl App {
             }
             WorkspaceAction::OpenSigilChat => self.open_sigil_chat_channel(),
             WorkspaceAction::SigilChat(message) => self.submit_sigil_chat_message(message),
+            WorkspaceAction::RunChat { id, question } => self.submit_run_chat(id, &question),
             WorkspaceAction::Kaos(command) => {
                 self.dispatch(&format!("/{command}"));
                 let mouse_captured = self.mouse_captured;
@@ -3713,6 +3882,146 @@ impl App {
             ));
         }
         context
+    }
+
+    fn run_chat_context(&self, id: u64, question: &str) -> Option<String> {
+        let history = self
+            .run_chat_history
+            .get(&id)
+            .map(|turns| {
+                turns
+                    .iter()
+                    .map(|turn| (turn.question.clone(), turn.answer.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.with_run_snapshot(id, |snapshot| {
+            kaos_core::chat::render_run_chat(snapshot, &history, question)
+        })
+    }
+
+    fn with_run_snapshot<T>(
+        &self,
+        id: u64,
+        render: impl FnOnce(&kaos_core::chat::RunSnapshot<'_>) -> T,
+    ) -> Option<T> {
+        let child = self.job_for_run(id).is_some();
+        let run = self.rebis_runs.iter().find(|run| run.id == id)?;
+        let timer = rebis_run_timer(run);
+        let snapshot = kaos_core::chat::RunSnapshot {
+            id: run.id,
+            state: run.state.label(run.paused),
+            paused: run.paused,
+            pause_reason: run.pause_reason.as_deref().unwrap_or("none"),
+            scope: run.scope.label(),
+            mode: if run.chaos { "CHAOS" } else { "DIRECT" },
+            lane: if run.parallel { "parallel" } else { "serial" },
+            timer: &timer,
+            child: if child { "yes" } else { "no" },
+            source: &run.request.source,
+            input: &run.request.input,
+            output: &run.output,
+        };
+        Some(render(&snapshot))
+    }
+
+    fn show_run_chat_snapshot(&mut self, id: u64) {
+        if !self.run_chat_context_shown.insert(id) {
+            return;
+        }
+        let Some(snapshot) = self.with_run_snapshot(id, kaos_core::chat::render_run_snapshot)
+        else {
+            self.run_chat_context_shown.remove(&id);
+            return;
+        };
+        self.push_line(Line::from(Span::styled(
+            format!("run chat  #{id} · retained run content"),
+            Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD),
+        )));
+        for line in snapshot.lines() {
+            self.push_line(Line::from(vec![
+                Span::styled("  ", Style::new().fg(C_SECONDARY())),
+                Span::styled(line.to_string(), Style::new().fg(C_ASH())),
+            ]));
+        }
+        self.push_line(Line::raw(""));
+    }
+
+    fn session_history_text(&self, current: &str) -> String {
+        self.session
+            .turns
+            .iter()
+            .enumerate()
+            .filter(|(index, turn)| {
+                !(*index + 1 == self.session.turns.len()
+                    && turn.role == crate::sessions::Role::User
+                    && turn.text == current)
+            })
+            .map(|(_, turn)| turn)
+            .map(|turn| {
+                let role = match turn.role {
+                    crate::sessions::Role::User => "USER",
+                    crate::sessions::Role::Model => "ASSISTANT",
+                };
+                format!("{role}: {}", turn.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    fn submit_run_chat(&mut self, id: u64, question: &str) {
+        let question = question.trim();
+        if question.is_empty() {
+            self.note("usage: /chat run ID QUESTION");
+            return;
+        }
+        if self
+            .parallel_jobs
+            .iter()
+            .any(|job| job.run_chat_id == Some(id))
+        {
+            self.note(&format!("chat for run #{id} is already working"));
+            return;
+        }
+        let Some(task) = self.run_chat_context(id, question) else {
+            self.note(&format!("run #{id} is no longer retained"));
+            return;
+        };
+        let resume = self
+            .run_chat_history
+            .get(&id)
+            .is_some_and(|turns| !turns.is_empty());
+        let session_id = self
+            .run_chat_sessions
+            .entry(id)
+            .or_insert_with(gen_uuid)
+            .clone();
+        self.show_run_chat_snapshot(id);
+        let launched = self.spawn_job_with_session(
+            vec!["code".to_string(), RAW_CHAT_TASK_ARG.to_string(), task],
+            None,
+            None,
+            Some(false),
+            true,
+            None,
+            Some(session_id),
+            Some(resume),
+            Some(id),
+        );
+        if launched {
+            self.run_chat_history
+                .entry(id)
+                .or_default()
+                .push(RunChatTurn {
+                    question: question.to_string(),
+                    answer: String::new(),
+                });
+            self.run_chat_replies.insert(id, String::new());
+            self.push_line(Line::from(Span::styled(
+                format!("chat    run #{id} · live snapshot captured; answer streaming below"),
+                Style::new().fg(C_SECONDARY()),
+            )));
+        }
     }
 
     fn write_sigil_chat_control_bridge(&self, bridge_dir: &std::path::Path) -> Result<(), String> {
@@ -4059,8 +4368,9 @@ impl App {
             return;
         }
 
+        let chat_turn = kaos_core::chat::render_chat_prompt(&channel_history, &message);
         let task = format!(
-            "You are the GOD AGENT supervising the complete live Rebis bot field. The current editor program is ./sigil.rebis. ./run-context.txt is a live-refreshed snapshot containing the full source, record/input, prompt checkpoint, directive, state, and retained trace of EVERY running, paused, queued, or permission-gated Rebis bot. Read both before answering. Per-run inspection files live under ./runs/ID/. One run is marked BOUND and is the only run whose source may be revised through ./sigil.rebis; peer sources are read-only. Preserve unrelated source and comments. The host rejects invalid Rebis and editor conflicts. A valid bound-source edit reconstructs that run from its prompt journal, preserving identical completed prompts.\n\nYou may control individual live bots only when the USER TURN explicitly requests it. Write validated actions to ./run-control.txt, one per line: PAUSE ID, RESUME ID, APPLY_DIRECTIVE ID, or CLEAR_DIRECTIVE ID. For APPLY_DIRECTIVE, first write the requested guidance to ./runs/ID/directive.txt. Directives are attached to that bot's next unfinished model prompt and remain active until replaced or cleared. Never invent actions, never target a completed/cancelled run, and never request cancellation or deletion. Do not directly launch, kill, or signal processes. Never claim an edit or control action unless you actually wrote the corresponding bridge file. Explain what you changed or answer directly.\n\nUSER TURN:\n{message}"
+            "You are the GOD AGENT supervising the complete live Rebis bot field. The current editor program is ./sigil.rebis. ./run-context.txt is a live-refreshed snapshot containing the full source, record/input, prompt checkpoint, directive, state, and retained trace of EVERY running, paused, queued, or permission-gated Rebis bot. Read both before answering. Per-run inspection files live under ./runs/ID/. One run is marked BOUND and is the only run whose source may be revised through ./sigil.rebis; peer sources are read-only. Preserve unrelated source and comments. The host rejects invalid Rebis and editor conflicts. A valid bound-source edit reconstructs that run from its prompt journal, preserving identical completed prompts.\n\nYou may control individual live bots only when the USER TURN explicitly requests it. Write validated actions to ./run-control.txt, one per line: PAUSE ID, RESUME ID, APPLY_DIRECTIVE ID, or CLEAR_DIRECTIVE ID. For APPLY_DIRECTIVE, first write the requested guidance to ./runs/ID/directive.txt. Directives are attached to that bot's next unfinished model prompt and remain active until replaced or cleared. Never invent actions, never target a completed/cancelled run, and never request cancellation or deletion. Do not directly launch, kill, or signal processes. Never claim an edit or control action unless you actually wrote the corresponding bridge file. Explain what you changed or answer directly.\n\nUSER TURN:\n{chat_turn}"
         );
         let before = self.parallel_jobs.len();
         let launched = self.spawn_job_with_input(
@@ -4223,18 +4533,18 @@ impl App {
 
     /// Fold whatever the running job streamed into one model turn.
     fn flush_reply(&mut self) {
-        let reply = std::mem::take(&mut self.session_reply);
+        let reply = kaos_core::chat::clean_chat_reply(&std::mem::take(&mut self.session_reply));
         if !reply.trim().is_empty() {
-            self.session
-                .push(crate::sessions::Role::Model, reply.trim_end());
+            self.session.push(crate::sessions::Role::Model, reply);
         }
     }
 
     /// Record a line of model output for the session (plain text; the styling
     /// is presentation and is not persisted).
     fn record_reply_line(&mut self, text: &str) {
-        if self.session_reply.len() < 200_000 {
-            self.session_reply.push_str(text);
+        let text = kaos_core::chat::clean_chat_reply(text);
+        if !text.is_empty() && self.session_reply.len() < 200_000 {
+            self.session_reply.push_str(&text);
             self.session_reply.push('\n');
         }
     }
@@ -4370,11 +4680,9 @@ impl App {
         // directory with real tools. Only slash-lines are commands. This is the
         // difference between "do the task" (code) and "cast a one-shot" (/cast).
         let Some(body) = line.strip_prefix('/') else {
-            self.request_job(vec![
-                "code".into(),
-                RAW_CHAT_TASK_ARG.into(),
-                line.to_string(),
-            ]);
+            let task = kaos_core::chat::DEFAULT_CONTEXT
+                .render_chat(&self.session_history_text(line), line);
+            self.request_job(vec!["code".into(), RAW_CHAT_TASK_ARG.into(), task]);
             return;
         };
 
@@ -4393,6 +4701,52 @@ impl App {
             }
             "cd" => self.change_dir(args.get(1).map(|s| s.as_str()).unwrap_or("")),
             "model" | "bind" => self.set_model(&args[1..].join(" ")),
+            // Provider credentials, the same store `kaos auth` writes. This
+            // existed as a CLI subcommand and a visual action but not here,
+            // which left the TUI the one surface where a key could be needed
+            // and not set — you had to leave the app to bind a provider you
+            // were about to select from inside it.
+            //
+            // A key is never echoed back: `/auth` reports presence only, so a
+            // status check cannot put a secret into the transcript or a
+            // screen-share.
+            "auth" | "login" => match (args.get(1).map(String::as_str), args.get(2)) {
+                // Presence only — never the key, so a status check cannot put a
+                // secret into the transcript or a screen-share.
+                (None, _) => {
+                    let summary = kaos_agent::auth::status()
+                        .into_iter()
+                        .map(|(name, var, live, saved)| {
+                            let state = match (live, saved) {
+                                (true, true) => "set",
+                                (true, false) => "set (env only)",
+                                (false, true) => "saved, not in this env",
+                                (false, false) => "unset",
+                            };
+                            format!("{name} {state} ({var})")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    self.note(&summary);
+                }
+                (Some("forget"), Some(provider)) => {
+                    self.note(&match kaos_agent::auth::forget(provider) {
+                        Ok(var) => format!("forgot {provider} ({var})"),
+                        Err(error) => format!("could not forget: {error}"),
+                    });
+                }
+                (Some(provider), Some(key)) => {
+                    self.note(&match kaos_agent::auth::store(provider, key) {
+                        Ok((var, path)) => {
+                            format!("stored {provider} as {var} in {}", path.display())
+                        }
+                        Err(error) => format!("could not store: {error}"),
+                    });
+                }
+                (Some(_), None) => {
+                    self.note("usage: /auth · /auth <provider> <key> · /auth forget <provider>")
+                }
+            },
             "config" => match args.get(1).map(String::as_str) {
                 None => self.open_config(false),
                 Some("restore") if args.len() == 2 => self.open_config(true),
@@ -4459,6 +4813,30 @@ impl App {
             "runs" => {
                 self.open_rebis(None);
                 self.handle_rebis_action(WorkspaceAction::BrowseRuns);
+            }
+            "panel" | "panel toggle" => {
+                if self.rebis.is_none() {
+                    self.open_rebis(None);
+                }
+                let action = self.rebis.as_mut().map(|workspace| {
+                    workspace.command = "panel toggle".to_string();
+                    workspace.execute_kaos_command()
+                });
+                if let Some(action) = action {
+                    self.handle_rebis_action(action);
+                }
+            }
+            "chat" if args.get(1).map(String::as_str) == Some("run") => {
+                let Some(raw_id) = args.get(2) else {
+                    self.note("usage: /chat run ID QUESTION");
+                    return;
+                };
+                let Ok(id) = raw_id.parse::<u64>() else {
+                    self.note("chat run: ID must be a number");
+                    return;
+                };
+                let question = args.get(3..).map(|rest| rest.join(" ")).unwrap_or_default();
+                self.submit_run_chat(id, &question);
             }
             "sigils" => {
                 self.open_rebis(None);
@@ -4858,15 +5236,43 @@ impl App {
         parallel: bool,
         working_dir: Option<PathBuf>,
     ) -> bool {
+        self.spawn_job_with_session(
+            args,
+            input,
+            rebis_run_id,
+            authority_override,
+            parallel,
+            working_dir,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn spawn_job_with_session(
+        &mut self,
+        args: Vec<String>,
+        input: Option<String>,
+        rebis_run_id: Option<u64>,
+        authority_override: Option<bool>,
+        parallel: bool,
+        working_dir: Option<PathBuf>,
+        session_override: Option<String>,
+        resume_override: Option<bool>,
+        run_chat_id: Option<u64>,
+    ) -> bool {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kaos"));
         let mut cmd = Command::new(exe);
         let claude_session = self.job_creates_claude_session(&args);
         let transport = prepare_child_transport(args, input);
-        let session_id = if parallel {
-            gen_uuid()
-        } else {
-            self.session_id.clone()
-        };
+        let session_id = session_override.unwrap_or_else(|| {
+            if parallel {
+                gen_uuid()
+            } else {
+                self.session_id.clone()
+            }
+        });
+        let resume = resume_override.unwrap_or(!parallel && self.resumed);
         cmd.args(&transport.args)
             .current_dir(working_dir.as_deref().unwrap_or(&self.cwd))
             .env("KAOS_MODEL", &self.model)
@@ -4878,11 +5284,8 @@ impl App {
                     "0"
                 },
             )
-            .env("KAOS_SESSION", session_id)
-            .env(
-                "KAOS_RESUME",
-                if !parallel && self.resumed { "1" } else { "0" },
-            )
+            .env("KAOS_SESSION", &session_id)
+            .env("KAOS_RESUME", if resume { "1" } else { "0" })
             // Tell the child to emit fold markers so its detailed trace renders as
             // collapsible groups here instead of a flat wall of output.
             .env("KAOS_FOLD", "1")
@@ -4901,6 +5304,7 @@ impl App {
         }
         if transport.raw_chat_task {
             cmd.env(RAW_CHAT_TASK_ENV, "1");
+            cmd.env("KAOS_CHAT_OUTPUT", "1");
         }
         let owns_process_group = rebis_run_id.is_some() && cfg!(unix);
         if rebis_run_id.is_some() {
@@ -4981,6 +5385,7 @@ impl App {
                     label: transport.label,
                     claude_session,
                     rebis_run_id,
+                    run_chat_id,
                     owns_process_group,
                 };
                 if parallel {
@@ -5167,6 +5572,9 @@ impl App {
                 let _ = child.kill();
             }
             drop(child);
+            if let Some(chat_id) = job.run_chat_id {
+                self.finish_run_chat(chat_id, -1);
+            }
             if let Some(id) = job.rebis_run_id {
                 if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
                     finish_rebis_run_clock(run);
@@ -5195,6 +5603,28 @@ impl App {
                 run.state = RebisRunState::Cancelled;
                 run.output
                     .push(format!("permission  cancelled \u{2014} {reason}"));
+            }
+        }
+
+        // Every child is dead by now, so a run still claiming to be Running has
+        // nothing behind it — a paused run whose replacement child never
+        // launched, or one whose process vanished before it was reconciled.
+        // Those runs still read as active work, and nothing above can clear
+        // them: without this they would answer every later ^C with "run
+        // stopped", and Kaos could never be quit from the keyboard.
+        let stranded = self
+            .rebis_runs
+            .iter()
+            .filter(|run| run.state == RebisRunState::Running)
+            .map(|run| run.id)
+            .collect::<Vec<_>>();
+        for id in stranded {
+            cancelled_any = true;
+            if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == id) {
+                finish_rebis_run_clock(run);
+                run.state = RebisRunState::Cancelled;
+                run.output
+                    .push(format!("cancelled   {reason} \u{2014} no subprocess"));
             }
         }
 
@@ -5251,7 +5681,7 @@ impl App {
         if arg.is_empty() {
             let spec = crate::provider::Spec::parse(&self.model);
             let message = format!("model bound: {}", spec.label());
-            self.note(&format!("bound: {}   (claude[:sonnet|opus|haiku|fable] · openai[:model] · anthropic[:model] · openrouter[:vendor/model] · ollama:m · sim — /models lists all)", spec.label()));
+            self.note(&format!("bound: {}   (claude[:sonnet|opus|opus5|haiku|fable] · openai[:model] · anthropic[:model] · openrouter[:vendor/model] · ollama:m · sim — /models lists all)", spec.label()));
             if let Some(workspace) = self.rebis.as_mut().or(self.suspended_rebis.as_mut()) {
                 workspace.message = message;
             }
@@ -5444,7 +5874,7 @@ fn highlight_pane_selection(buffer: &mut Buffer, area: Rect, selection: &PaneSel
                 cell.set_style(
                     Style::new()
                         .fg(Color::Black)
-                        .bg(C_BLUE())
+                        .bg(C_SECONDARY())
                         .add_modifier(Modifier::BOLD),
                 );
             }
@@ -5708,7 +6138,7 @@ fn draw_rebis_workspace(
         let mut spans = vec![
             Span::styled(
                 "o-[]-o",
-                Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  REBIS", red_bold()),
             Span::raw("   "),
@@ -5782,7 +6212,10 @@ fn draw_rebis_workspace(
             } else {
                 C_OX()
             }))
-            .title(Span::styled(visualization_title, Style::new().fg(C_BLUE())));
+            .title(Span::styled(
+                visualization_title,
+                Style::new().fg(C_SECONDARY()),
+            ));
         let graph_inner = graph_block.inner(graph_area);
         selectable_panes.push(TextPaneRegion::full(TextPaneKind::RebisPanel, graph_inner));
         workspace.panel_inner = Some((
@@ -5803,7 +6236,7 @@ fn draw_rebis_workspace(
                     let style = if line.starts_with("you     ") {
                         Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD)
                     } else if line.starts_with("system  ") || line == "GOD CHANNEL" {
-                        Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD)
+                        Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
                     } else {
                         Style::new().fg(C_BONE())
                     };
@@ -5826,7 +6259,7 @@ fn draw_rebis_workspace(
             let input_block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(if workspace.sigil_chat_busy() {
-                    C_BLUE()
+                    C_SECONDARY()
                 } else {
                     C_GOLD()
                 }))
@@ -5853,13 +6286,13 @@ fn draw_rebis_workspace(
                 .into_iter()
                 .map(|line| {
                     let style = if line.starts_with("o-[]-o") {
-                        Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD)
+                        Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
                     } else if matches!(line.as_str(), "REGION TREE" | "DIRECTED FLOW") {
                         Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD)
                     } else if line.contains('→') || line.contains('←') {
-                        Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD)
+                        Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
                     } else if line.contains('[') {
-                        Style::new().fg(C_BLUE())
+                        Style::new().fg(C_SECONDARY())
                     } else {
                         Style::new().fg(C_BONE())
                     };
@@ -5946,7 +6379,7 @@ fn draw_rebis_workspace(
                             if *run == selected {
                                 Style::new()
                                     .fg(if *kind == RebisRunSectionKind::Agent {
-                                        C_BLUE()
+                                        C_SECONDARY()
                                     } else {
                                         C_GOLD()
                                     })
@@ -5977,7 +6410,7 @@ fn draw_rebis_workspace(
                         .borders(Borders::ALL)
                         .border_style(Style::new().fg(border))
                         .title(Span::styled(
-                            " RUNS · j/k RUN · ↑/↓ SCROLL · ⇧↓ TAIL · Pg SCROLL · Tab OPEN ",
+                            " RUNS · j/k RUN · c CHAT · ↑/↓ SCROLL · ⇧↓ TAIL · Pg SCROLL · Tab OPEN ",
                             Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD),
                         )),
                 ),
@@ -6013,7 +6446,7 @@ fn draw_rebis_workspace(
                         if index == selected {
                             Style::new()
                                 .fg(Color::Black)
-                                .bg(C_BLUE())
+                                .bg(C_SECONDARY())
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::new().fg(C_BONE())
@@ -6036,7 +6469,7 @@ fn draw_rebis_workspace(
         Line::from(vec![
             Span::styled(
                 "⚙ CONFIG  ",
-                Style::new().fg(C_BLUE()).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "plain key/value file · provider credentials remain separate",
@@ -6045,14 +6478,19 @@ fn draw_rebis_workspace(
         ])
     } else if workspace.chaos_star_visible() {
         Line::raw("")
-    } else if let Some(error) = workspace.diagnostic() {
+    } else if workspace.diagnostic().is_some() {
+        // Placed, not just described: a parser message on its own makes the
+        // reader hunt for the character it is talking about. Same value the
+        // visual editor shows, so the two frontends read alike.
+        let detail =
+            kaos_workspace::rebis_workspace::SourceState::of(workspace.editor.source()).detail();
         Line::from(vec![
             Span::styled(
                 "✗ INVALID  ",
                 Style::new().fg(C_RED()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                truncate(error, rows[2].width.saturating_sub(11) as usize),
+                truncate(&detail, rows[2].width.saturating_sub(11) as usize),
                 Style::new().fg(C_RED()),
             ),
         ])
@@ -6112,7 +6550,7 @@ fn draw_rebis_workspace(
                 if workspace.mode == RebisMode::Insert {
                     Style::new()
                         .fg(Color::Black)
-                        .bg(C_BLUE())
+                        .bg(C_SECONDARY())
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::new()
@@ -6233,13 +6671,13 @@ fn render_rebis_source(
                 style = style.fg(C_RED()).add_modifier(Modifier::UNDERLINED);
             }
             if visual.is_some_and(|(start, end)| index >= start && index <= end) {
-                style = style.bg(C_BLUE()).add_modifier(Modifier::BOLD);
+                style = style.bg(C_SECONDARY()).add_modifier(Modifier::BOLD);
             }
             if block.is_some_and(|(top, bottom, left, right)| {
                 let column = index - start;
                 row >= top && row <= bottom && column >= left && column <= right
             }) {
-                style = style.bg(C_BLUE()).add_modifier(Modifier::BOLD);
+                style = style.bg(C_SECONDARY()).add_modifier(Modifier::BOLD);
             }
             if workspace.mode == RebisMode::Normal && cursor == index {
                 style = style.add_modifier(Modifier::REVERSED);
@@ -6299,7 +6737,7 @@ fn render_chaos_star(f: &mut Frame, area: Rect) {
     }
 }
 
-/// Paint the compact purple Chaos Star only into otherwise blank cells.
+/// Paint the compact accent Chaos Star only into otherwise blank cells.
 ///
 /// This makes it terminal chrome rather than transcript/source content: it
 /// never covers text, and callers paint it after taking their selectable-pane
@@ -6337,8 +6775,12 @@ fn render_subtle_chaos_star(f: &mut Frame, area: Rect) {
 
 fn rebis_highlight_style(highlight: Highlight) -> Style {
     match highlight {
-        Highlight::Atom => Style::new().fg(C_BONE()),
-        Highlight::Prompt => Style::new().fg(C_BLUE()),
+        // Symbols are the language's own words — macro names, parameters,
+        // deterministic mediators — and they carry the blue. Prompt text is the
+        // content the program is *about*, so it stays plain ink: the eye should
+        // find the structure, not be dragged into the strings.
+        Highlight::Atom => Style::new().fg(C_SYMBOL()),
+        Highlight::Prompt => Style::new().fg(C_BONE()),
         Highlight::Forward
         | Highlight::Mediate
         | Highlight::Import
@@ -6347,12 +6789,16 @@ fn rebis_highlight_style(highlight: Highlight) -> Style {
         | Highlight::Parenthesis => rebis_operator_style(),
         Highlight::Whitespace => Style::new().fg(C_BONE()),
         Highlight::Comment => Style::new().fg(C_ASH()).add_modifier(Modifier::ITALIC),
-        Highlight::Invalid => Style::new().fg(C_RED()).add_modifier(Modifier::UNDERLINED),
+        Highlight::Invalid => Style::new()
+            .fg(C_SYMBOL())
+            .add_modifier(Modifier::UNDERLINED),
     }
 }
 
+/// Operators and delimiters share one colour — the red — as the language
+/// legend in the top bar does.
 fn rebis_operator_style() -> Style {
-    Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD)
+    Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
 }
 
 fn spawn_reader(r: impl Read + Send + 'static, tx: Sender<Msg>, is_err: bool) {
@@ -6523,6 +6969,7 @@ fn is_local_command(line: &str) -> bool {
             | "forget"
             | "rebis"
             | "runs"
+            | "chat"
             | "config"
             | "chaos"
     )
@@ -6719,6 +7166,7 @@ mod tests {
                 label: "parallel test job".to_string(),
                 claude_session: false,
                 rebis_run_id,
+                run_chat_id: None,
                 owns_process_group: false,
             },
             tx,
@@ -6734,6 +7182,10 @@ mod tests {
         assert_eq!(
             completions("panel h", REBIS_SLASH_COMMANDS),
             vec![command("panel hide", "panel hide")]
+        );
+        assert_eq!(
+            completions("panel t", REBIS_SLASH_COMMANDS),
+            vec![command("panel toggle", "panel toggle")]
         );
         assert!(completions("does-not-exist", REBIS_SLASH_COMMANDS).is_empty());
         assert_eq!(
@@ -6772,6 +7224,18 @@ mod tests {
     }
 
     #[test]
+    fn terminal_panel_toggle_opens_and_closes_the_rebis_panel() {
+        let mut app = App::new();
+        assert!(app.rebis.is_none());
+
+        app.dispatch("/panel toggle");
+        assert!(!app.rebis.as_ref().unwrap().panel_visible);
+
+        app.dispatch("/panel toggle");
+        assert!(app.rebis.as_ref().unwrap().panel_visible);
+    }
+
+    #[test]
     fn saved_rebis_run_codec_round_trips_multiline_context() {
         let saved = SavedRebisRun {
             source: "(-> \"α\" \"β\")\n".to_string(),
@@ -6787,6 +7251,46 @@ mod tests {
             decode_saved_rebis_run(&encode_saved_rebis_run(&saved)),
             Ok(saved)
         );
+    }
+
+    #[test]
+    fn opening_run_chat_prints_the_retained_run_content() {
+        let mut app = App::new();
+        app.open_rebis(None);
+        let request = RunRequest {
+            source: "(-> \"question\" \"answer\")".to_string(),
+            input: "captured record".to_string(),
+            scope: RunScope::Program,
+        };
+        let id = app.register_rebis_run(&request, RebisRunState::Complete);
+        app.rebis_runs[0].output = vec![
+            "prompt   question".to_string(),
+            "result   answer".to_string(),
+        ];
+
+        app.show_run_chat_snapshot(id);
+
+        let transcript = app
+            .rendered_lines()
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.into_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for retained in [
+            "retained run content",
+            "SOURCE",
+            "(-> \"question\" \"answer\")",
+            "captured record",
+            "prompt   question",
+            "result   answer",
+        ] {
+            assert!(transcript.contains(retained), "missing {retained:?}");
+        }
     }
 
     #[test]
@@ -7035,11 +7539,56 @@ mod tests {
         ));
     }
 
+    /// `/auth` reports presence, never the key.
+    ///
+    /// A status line that echoes a secret is how a key ends up in a
+    /// screen-share or a pasted bug report, and it is a one-word change to
+    /// introduce by accident.
+    #[test]
+    fn auth_status_never_renders_a_secret() {
+        let secret = "sk-or-v1-0000deadbeefcafe";
+        std::env::set_var("OPENROUTER_API_KEY", secret);
+        let rendered = kaos_agent::auth::status()
+            .into_iter()
+            .map(|(name, var, live, saved)| format!("{name} {var} {live} {saved}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !rendered.contains(secret),
+            "the key leaked into what /auth renders: {rendered}"
+        );
+        assert!(rendered.contains("openrouter"), "{rendered}");
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+
+    /// Every provider kaos can hold a key for is offered in the palette, so a
+    /// user never has to guess the spelling of one.
+    #[test]
+    fn the_palette_offers_auth_for_every_provider() {
+        for (provider, _) in kaos_agent::auth::PROVIDERS {
+            let typed = format!("/auth {provider}");
+            assert!(
+                !main_completions(&typed).is_empty(),
+                "`{provider}` is not reachable from the command palette"
+            );
+        }
+        assert!(!main_completions("/auth").is_empty(), "/auth must complete");
+    }
+
     #[test]
     fn model_command_autocompletes_provider_and_model_choices() {
+        // Both Opus bindings offer themselves: `claude:opus` follows the CLI's
+        // moving alias, `claude:opus5` pins the version.
         assert_eq!(
             main_completions("/model claude:o"),
-            vec![command("model claude:opus", "model claude:opus")]
+            vec![
+                command("model claude:opus", "model claude:opus"),
+                command("model claude:opus5", "model claude:opus5")
+            ]
+        );
+        assert_eq!(
+            main_completions("/model claude:opus5"),
+            vec![command("model claude:opus5", "model claude:opus5")]
         );
         assert_eq!(
             main_completions("/model open"),
@@ -7068,7 +7617,9 @@ mod tests {
 
         app.handle_rebis_action(action);
 
-        assert_eq!(app.model, "claude:opus");
+        // `claude:opus` canonicalizes to the pinned Opus 5 spelling: there is
+        // one Opus, and a bound model records which one it is.
+        assert_eq!(app.model, "claude:opus5");
         assert!(app.rebis.is_some());
         assert!(app.rebis.as_ref().unwrap().message.contains("model bound"));
     }
@@ -7115,7 +7666,7 @@ mod tests {
     }
 
     #[test]
-    fn subtle_terminal_star_is_purple_dim_and_never_overwrites_content() {
+    fn subtle_terminal_star_is_accent_dim_and_never_overwrites_content() {
         let backend = ratatui::backend::TestBackend::new(20, 10);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
@@ -7315,6 +7866,7 @@ mod tests {
             label: "Rebis background test".to_string(),
             claude_session: false,
             rebis_run_id: Some(id),
+            run_chat_id: None,
             owns_process_group: false,
         });
         app.job_start = Some(Instant::now());
@@ -7407,6 +7959,7 @@ mod tests {
             label: "pause test".to_string(),
             claude_session: false,
             rebis_run_id: Some(id),
+            run_chat_id: None,
             owns_process_group: false,
         });
         app.rebis_run_choice = 0;
@@ -7456,6 +8009,7 @@ mod tests {
             label: "sigil chat rewrite test".to_string(),
             claude_session: false,
             rebis_run_id: Some(id),
+            run_chat_id: None,
             owns_process_group: false,
         });
 
@@ -7547,6 +8101,7 @@ mod tests {
             label: "automatic pause test".to_string(),
             claude_session: false,
             rebis_run_id: Some(id),
+            run_chat_id: None,
             owns_process_group: false,
         });
         app.job_start = Some(Instant::now());
@@ -7854,7 +8409,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("( ) [ ] ~ # ' , $ ^ -> <- ; \""));
+        assert!(screen.contains("( ) [ ] ~ # ' , $ % ^ & -> <- ; \""));
 
         let operator_style = rebis_operator_style();
         for highlight in [
@@ -7867,6 +8422,16 @@ mod tests {
         ] {
             assert_eq!(rebis_highlight_style(highlight), operator_style);
         }
+    }
+
+    #[test]
+    fn symbols_are_blue_and_operators_red_in_the_terminal_editor() {
+        // The same scheme the visual editor pins: the two frontends must not
+        // colour the same program differently.
+        assert_eq!(rebis_highlight_style(Highlight::Atom).fg, Some(C_SYMBOL()));
+        assert_eq!(rebis_operator_style().fg, Some(C_SECONDARY()));
+        assert_eq!(rebis_highlight_style(Highlight::Prompt).fg, Some(C_BONE()));
+        assert_ne!(C_SYMBOL(), C_SECONDARY());
     }
 
     #[test]
@@ -8428,6 +8993,72 @@ mod tests {
             .contains("active run cannot be removed"));
     }
 
+    /// A focused run browser holding one long, expanded run.
+    fn app_browsing_a_long_run() -> (App, u64, RunRequest) {
+        let mut app = App::new();
+        app.open_rebis(None);
+        {
+            let workspace = app.rebis.as_mut().unwrap();
+            workspace.dismiss_chaos_star();
+            workspace.vim_enabled = true;
+            workspace.mode = RebisMode::Normal;
+            workspace.begin_run(RunScope::Program);
+        }
+        let request = RunRequest {
+            source: "\"working\"".to_string(),
+            input: String::new(),
+            scope: RunScope::Program,
+        };
+        let id = app.register_rebis_run(&request, RebisRunState::Running);
+        let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
+        run.expanded = true;
+        run.output = (0..40).map(|index| format!("line {index}")).collect();
+        assert!(app.rebis_run_max_top() > 1, "the run must be scrollable");
+        (app, id, request)
+    }
+
+    #[test]
+    fn arrows_scroll_the_run_browser_while_a_run_is_working() {
+        let (mut app, _, _) = app_browsing_a_long_run();
+        app.on_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.rebis_run_top, 1, "Down scrolls the run browser");
+        app.on_key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.rebis_run_top, 0, "Up scrolls back");
+    }
+
+    #[test]
+    fn arrows_still_scroll_the_run_browser_while_authority_is_pending() {
+        // The authority question is asked inside the run browser, over the very
+        // text being authorised. Swallowing every key but y/a/n left the reader
+        // unable to scroll to what they were being asked to approve.
+        let (mut app, id, request) = app_browsing_a_long_run();
+        app.pending_rebis = Some(PendingRebisRun {
+            id,
+            request,
+            parallel: false,
+        });
+
+        app.on_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(
+            app.rebis_run_top, 1,
+            "Down scrolls while the question stands"
+        );
+        app.on_key(KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(
+            app.rebis_run_top,
+            app.rebis_run_max_top(),
+            "End reaches the tail"
+        );
+        app.on_key(KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(app.rebis_run_top, 0, "Home returns to the head");
+
+        // Scrolling is not an answer: the question must still be standing.
+        assert!(app.pending_rebis.is_some(), "scrolling must not answer");
+
+        app.on_key(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(app.pending_rebis.is_none(), "n still denies");
+    }
+
     #[test]
     fn ctrl_w_moves_between_source_and_mandala_windows() {
         let mut app = App::new();
@@ -8682,6 +9313,7 @@ mod tests {
             label: "rebis run".to_string(),
             claude_session: false,
             rebis_run_id: None,
+            run_chat_id: None,
             owns_process_group: false,
         });
         app.job_start = Some(Instant::now());
@@ -8692,6 +9324,39 @@ mod tests {
         assert!(!app.quit, "^C stops the run, it does not quit the app");
         assert!(app.job.is_none(), "the run's child was cancelled");
         assert!(!app.confirm_quit);
+    }
+
+    #[test]
+    fn ctrl_c_quits_even_when_a_run_is_stranded_without_a_subprocess() {
+        // A run left paused with no live child — a replacement that failed to
+        // launch, say — still counts as active work. ^C used to hit the "stop
+        // the run" branch on every press, and nothing there could clear that
+        // state, so Kaos became unquittable from the keyboard.
+        let mut app = App::new();
+        app.open_rebis(None);
+        app.rebis.as_mut().unwrap().dismiss_chaos_star();
+        let request = RunRequest {
+            source: "\"stranded\"".to_string(),
+            input: String::new(),
+            scope: RunScope::Program,
+        };
+        let id = app.register_rebis_run(&request, RebisRunState::Running);
+        let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
+        pause_rebis_run_clock(run, "child launch failed");
+        assert!(app.job_for_run(id).is_none(), "no subprocess to stop");
+        assert!(app.has_active_jobs(), "yet it reads as active work");
+
+        // First ^C is STOP: it ends the stranded run rather than quitting.
+        app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(!app.quit);
+        assert_eq!(app.rebis_runs[0].state, RebisRunState::Cancelled);
+        assert!(!app.has_active_jobs(), "stopping must clear the work");
+
+        // Which means the next two reach the ordinary idle exit.
+        app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.confirm_quit, "now idle, ^C asks");
+        app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.quit, "and the next one quits");
     }
 
     #[test]
@@ -8741,6 +9406,7 @@ mod tests {
             label: "active test work".to_string(),
             claude_session: false,
             rebis_run_id: None,
+            run_chat_id: None,
             owns_process_group: false,
         });
         app.job_start = Some(Instant::now());

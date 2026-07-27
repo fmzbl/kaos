@@ -247,6 +247,8 @@ impl Desk {
         let input = self.with_attachments(&intent);
         let env = vec![
             ("KAOS_RAW_CHAT_TASK_STDIN".to_string(), "1".to_string()),
+            ("KAOS_CHAT_OUTPUT".to_string(), "1".to_string()),
+            ("KAOS_REBIS_CONTEXT".to_string(), "1".to_string()),
             ("KAOS_SESSION".to_string(), session.clone()),
             (
                 "KAOS_RESUME".to_string(),
@@ -666,6 +668,7 @@ impl Desk {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n");
+            let text = kaos_core::chat::clean_chat_reply(&text);
             replies.push((
                 session,
                 if text.trim().is_empty() {

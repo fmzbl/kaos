@@ -129,6 +129,33 @@ pub fn run_claude_agent_with_result(
     run_claude_agent_inner(root, task, model, true, None, emit)
 }
 
+/// Chat-only Claude entry point. The regular agent API streams a rich tool
+/// trace for terminal and visual work surfaces; a conversation needs only its
+/// final answer, with the Rebis reference attached at the system boundary.
+pub fn run_claude_chat_with_result(
+    root: &std::path::Path,
+    task: &str,
+    model: Option<&str>,
+) -> Result<String, String> {
+    run_claude_chat_with_result_stream(root, task, model, |_| {})
+}
+
+/// Chat-only Claude entry point with a live event callback.
+///
+/// The ordinary [`run_claude_chat_with_result`] boundary stays final-answer
+/// only for callers that embed chat as a request/response function. Console
+/// callers can use this variant to receive each `stream-json` event as soon as
+/// Claude writes it, while the returned string remains the canonical answer.
+pub fn run_claude_chat_with_result_stream(
+    root: &std::path::Path,
+    task: &str,
+    model: Option<&str>,
+    emit: impl FnMut(&str),
+) -> Result<String, String> {
+    let appendix = crate::conductor::claude_agent_rebis_appendix();
+    run_claude_agent_inner(root, task, model, true, Some(&appendix), emit)
+}
+
 /// One independent direct Claude agent with no conversation resume semantics.
 /// Rebis data flow supplies node context explicitly, so sharing a Claude
 /// session between nodes would leak sibling context and reuse one session id.
@@ -175,11 +202,22 @@ fn claude_session_uuid(raw: &str) -> String {
     let h = |b: u8| format!("{b:02x}");
     format!(
         "{}{}{}{}-{}{}-{}{}-{}{}-{}{}{}{}{}{}",
-        h(bytes[0]), h(bytes[1]), h(bytes[2]), h(bytes[3]),
-        h(bytes[4]), h(bytes[5]),
-        h(bytes[6]), h(bytes[7]),
-        h(bytes[8]), h(bytes[9]),
-        h(bytes[10]), h(bytes[11]), h(bytes[12]), h(bytes[13]), h(bytes[14]), h(bytes[15]),
+        h(bytes[0]),
+        h(bytes[1]),
+        h(bytes[2]),
+        h(bytes[3]),
+        h(bytes[4]),
+        h(bytes[5]),
+        h(bytes[6]),
+        h(bytes[7]),
+        h(bytes[8]),
+        h(bytes[9]),
+        h(bytes[10]),
+        h(bytes[11]),
+        h(bytes[12]),
+        h(bytes[13]),
+        h(bytes[14]),
+        h(bytes[15]),
     )
 }
 
@@ -285,9 +323,7 @@ fn run_claude_agent_inner(
                 result.map_err(|error| format!("could not send task to Claude: {error}"))
             })
     });
-    let stderr = err_reader
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
+    let stderr = err_reader.and_then(|h| h.join().ok()).unwrap_or_default();
     let status = child
         .wait()
         .map_err(|e| format!("the Work was interrupted: {e}"))?;
@@ -303,7 +339,10 @@ fn run_claude_agent_inner(
         let detail = format!("{} {}", final_result.trim(), stderr.trim());
         let detail = detail.trim();
         if detail.is_empty() {
-            Err(format!("claude exited with {}", status.code().unwrap_or(-1)))
+            Err(format!(
+                "claude exited with {}",
+                status.code().unwrap_or(-1)
+            ))
         } else {
             Err(format!(
                 "claude exited with {}: {detail}",
@@ -362,7 +401,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                             out.push(format!(
                                 "     {}",
                                 dim(
-                                    (150, 130, 200),
+                                    (74, 124, 240),
                                     &format!("\u{263d} {}", clip(line.trim(), 92))
                                 )
                             ));
@@ -415,7 +454,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                 let path = input["file_path"].as_str().unwrap_or("?");
                                 out.push(format!(
                                     "   {} {}",
-                                    fg((150, 130, 200), "\u{25cb} read"),
+                                    fg((74, 124, 240), "\u{25cb} read"),
                                     dim(ASH(), short(path))
                                 ));
                             }
@@ -423,7 +462,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                 let pat = input["pattern"].as_str().unwrap_or("?");
                                 out.push(format!(
                                     "   {} {}",
-                                    fg((150, 130, 200), "\u{2315} search"),
+                                    fg((74, 124, 240), "\u{2315} search"),
                                     dim(ASH(), &clip(pat, 80))
                                 ));
                             }
@@ -436,7 +475,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                             other => {
                                 out.push(format!(
                                     "   {} {}",
-                                    fg((150, 130, 200), "\u{2699}"),
+                                    fg((74, 124, 240), "\u{2699}"),
                                     dim(ASH(), other)
                                 ));
                             }
@@ -863,9 +902,7 @@ mod tests {
             parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
             vec![8, 4, 4, 4, 12]
         );
-        assert!(uuid
-            .chars()
-            .all(|c| c == '-' || c.is_ascii_hexdigit()));
+        assert!(uuid.chars().all(|c| c == '-' || c.is_ascii_hexdigit()));
         assert_eq!(parts[2].as_bytes()[0], b'4', "version 4");
         assert!(matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'));
         // Deterministic, and an already-UUID input is passed through.

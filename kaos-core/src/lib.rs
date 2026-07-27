@@ -7,6 +7,7 @@
 //! lives here once and is tested without either of them on screen.
 //!
 //! - [`config`] — the persistent, non-secret settings file.
+//! - [`chat`] — shared Rebis-aware conversation and run-context prompts.
 //! - [`theme`] — the monochrome palette and its two modes.
 //! - [`sessions`] — durable chat transcripts.
 //! - [`runs`] — deterministic, offline evaluation of a program.
@@ -14,6 +15,7 @@
 //! - [`tabs`] — an ordered set of tabs, generic over what they hold.
 //! - [`visual`] — the mandala model, Rebis code generation and loading.
 
+pub mod chat;
 pub mod config;
 pub mod run_model;
 pub mod runs;

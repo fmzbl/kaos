@@ -27,6 +27,7 @@ eframe = { version = "0.29", default-features = false, features = [
     "glow",
     "default_fonts",
 ] }
+rfd = "0.14.1"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 eframe = { version = "0.29", default-features = false, features = [

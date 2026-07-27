@@ -92,6 +92,27 @@ impl<T> Tabs<T> {
         }
     }
 
+    /// Move `id` so it sits at `to_index`, shifting the rest — drag-to-reorder.
+    /// The active *tab* is preserved (it stays selected wherever it lands), not
+    /// the active slot. Out-of-range indices clamp to the ends.
+    pub fn reorder(&mut self, id: TabId, to_index: usize) {
+        let Some(from) = self.items.iter().position(|t| t.id == id) else {
+            return;
+        };
+        let active_id = self.active_id();
+        let to = to_index.min(self.items.len().saturating_sub(1));
+        if from == to {
+            return;
+        }
+        let tab = self.items.remove(from);
+        self.items.insert(to, tab);
+        if let Some(active) = active_id {
+            if let Some(at) = self.items.iter().position(|t| t.id == active) {
+                self.active = at;
+            }
+        }
+    }
+
     pub fn rename(&mut self, id: TabId, title: impl Into<String>) {
         if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
             t.title = title.into();
@@ -211,6 +232,30 @@ mod tests {
         assert_eq!(t.active(), Some(&"C"));
         t.close(a);
         assert_eq!(t.active(), Some(&"C"), "the active tab must not shift");
+    }
+
+    #[test]
+    fn reorder_moves_a_tab_and_keeps_the_active_one_selected() {
+        let mut t = three(); // A, B, C — C active
+        let a = t.iter().next().unwrap().id;
+        // Drag A to the end.
+        t.reorder(a, 2);
+        let order: Vec<&str> = t.iter().map(|tab| tab.content).collect();
+        assert_eq!(order, vec!["B", "C", "A"]);
+        // The active tab (C) is still active wherever it landed.
+        assert_eq!(t.active(), Some(&"C"));
+    }
+
+    #[test]
+    fn reorder_clamps_and_no_ops_on_same_slot() {
+        let mut t = three();
+        let b = t.iter().nth(1).unwrap().id;
+        t.reorder(b, 99); // clamps to the last slot
+        let order: Vec<&str> = t.iter().map(|tab| tab.content).collect();
+        assert_eq!(order, vec!["A", "C", "B"]);
+        t.reorder(b, 2); // already there — no change
+        let order: Vec<&str> = t.iter().map(|tab| tab.content).collect();
+        assert_eq!(order, vec!["A", "C", "B"]);
     }
 
     #[test]

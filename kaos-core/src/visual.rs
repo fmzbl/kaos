@@ -19,6 +19,7 @@
 //! (-> a b)            Forward   —               2
 //! (<- a b)            Backflow  —               2
 //! ([m] a b …)         Square    —               mediator, then branches
+//! (% condition when-one when-zero) Binary gate —    3
 //! ($ a b …)           Concat    —               list
 //! (a b …)             Compose   —               list
 //! (f a b …)           Call      name            arguments
@@ -27,11 +28,11 @@
 //! ```
 //!
 //! So the whole language is one node type — [`Form`] plus text — and edges.
-//! A node's children are the nodes attached with the `father of` gesture, in
-//! the order the links were drawn. [`Mandala::to_rebis`] folds that into source and
-//! [`Mandala::from_rebis`] unfolds source back onto the canvas; every form
-//! round-trips one-to-one. Invalid or incomplete graphs are reported rather
-//! than repaired with invisible expressions.
+//! A node's children are numbered per father from `1` through `n`, where `n`
+//! is that father's child count. [`Mandala::to_rebis`] folds those positions
+//! into source and [`Mandala::from_rebis`] unfolds source back onto the canvas;
+//! every form round-trips one-to-one. Invalid or incomplete graphs are
+//! reported rather than repaired with invisible expressions.
 //!
 //! The whiteboard alphabet is a *rendering* of this, not a restriction on it:
 //! prompts, symbols, and combining forms use the `o-[]-o` outlines; source
@@ -71,6 +72,8 @@ pub enum Form {
     Backflow,
     /// `([m] a b …)` — the first child mediates the rest.
     Square,
+    /// `(% condition when-one when-zero)` — lazy binary control flow.
+    Conditional,
     /// `($ a b …)` — string interpolation.
     Concat,
     /// `(a b …)` — an abstraction boundary.
@@ -120,14 +123,16 @@ impl Form {
     /// Forms that are *placed* on the canvas, in palette order, with a default
     /// text payload.
     ///
-    /// `Forward` and `Backflow` are deliberately absent: they are created by
-    /// drawing an arrow between two shapes ([`Mandala::flow`]), because the
-    /// arrow and the node are the same idea. They remain full forms in every
-    /// other respect — loaded, rendered and generated like the rest.
+    /// Flow forms can be placed as incomplete arrow nodes and filled with the
+    /// `father of` link tool. The link palette also keeps the two-click
+    /// complete-flow shortcut for the common case.
     pub const ALL: &'static [FormSpec] = &[
         ("o prompt", || Form::Prompt, "prompt"),
         ("◇ symbol", || Form::Symbol, "x"),
+        ("→ forward", || Form::Forward, ""),
+        ("← backflow", || Form::Backflow, ""),
         ("[] square", || Form::Square, ""),
+        ("% binary gate", || Form::Conditional, ""),
         ("( ) compose", || Form::Compose, ""),
         ("$ concat", || Form::Concat, ""),
         ("call", || Form::Call, "f"),
@@ -165,7 +170,9 @@ impl Form {
             Form::Call => Shape::Parallelogram,
             // An input port is drawn as an inlet pointing into the graph.
             Form::Input => Shape::Amp,
-            Form::Square | Form::Program => Shape::Square,
+            Form::Square => Shape::Square,
+            Form::Program => Shape::Hexagon,
+            Form::Conditional => Shape::Percent,
         }
     }
 
@@ -177,6 +184,7 @@ impl Form {
             }
             Form::Forward | Form::Backflow => Arity::Exactly(2),
             Form::Square => Arity::AtLeast(2),
+            Form::Conditional => Arity::Exactly(3),
             Form::Program => Arity::AtLeast(2),
             Form::Concat | Form::Compose => Arity::AtLeast(1),
             Form::Call => Arity::Any,
@@ -207,6 +215,7 @@ impl Form {
             Form::Forward => "forward",
             Form::Backflow => "backflow",
             Form::Square => "square",
+            Form::Conditional => "binary gate",
             Form::Concat => "concat",
             Form::Compose => "compose",
             Form::Call => "call",
@@ -227,8 +236,13 @@ pub enum Shape {
     Circle,
     /// `◇` — a symbol: a name rather than a literal.
     Diamond,
-    /// `[]` — a form that combines children.
+    /// `[]` — the mediator square, and nothing else. The box belongs to the
+    /// one form whose notation is a box, so a square on the canvas always
+    /// means a mediation.
     Square,
+    /// The implicit top-level scope holding several forms. Drawn as a hexagon:
+    /// a container that is visibly not a mediator.
+    Hexagon,
     /// `( )` — an ordered composition boundary.
     Oval,
     /// `$` — string interpolation.
@@ -243,8 +257,10 @@ pub enum Shape {
     Comma,
     /// `^` — recursive syntax orientation inversion.
     Caret,
-    /// `->` / `<-` — drawn as the arrow between its two children, with a small
-    /// handle at the midpoint so it can still be selected and deleted.
+    /// `%` — a lazy binary gate.
+    Percent,
+    /// `->` / `<-` — drawn as the arrow between its two children. Incomplete
+    /// flow forms use the same shape as a small selectable arrow node.
     Arrow,
     /// A slanted box — a macro call, a square set in motion.
     Parallelogram,
@@ -306,12 +322,35 @@ impl Shape {
             ])],
             // A crisp caret, kept open so it remains legible at low zoom.
             Shape::Caret => &[Stroke::Poly(&[(-16.0, 10.0), (0.0, -12.0), (16.0, 10.0)])],
+            // A percent sign: diagonal slash with two compact open circles.
+            Shape::Percent => &[
+                Stroke::Poly(&[
+                    (-12.0, -12.0),
+                    (-15.0, -10.0),
+                    (-15.0, -6.0),
+                    (-12.0, -4.0),
+                    (-8.0, -6.0),
+                    (-8.0, -10.0),
+                    (-12.0, -12.0),
+                ]),
+                Stroke::Poly(&[
+                    (12.0, 4.0),
+                    (8.0, 6.0),
+                    (8.0, 10.0),
+                    (12.0, 12.0),
+                    (15.0, 10.0),
+                    (15.0, 6.0),
+                    (12.0, 4.0),
+                ]),
+                Stroke::Poly(&[(-11.0, 15.0), (11.0, -15.0)]),
+            ],
             Shape::Circle
             | Shape::Square
             | Shape::Oval
             | Shape::Diamond
             | Shape::Arrow
             | Shape::Parallelogram
+            | Shape::Hexagon
             | Shape::Amp => &[],
         }
     }
@@ -329,18 +368,27 @@ impl Shape {
         [(-r + s, -ry), (r + s, -ry), (r - s, ry), (-r - s, ry)]
     }
 
+    /// The six corners of the program hexagon: a box with both ends drawn to a
+    /// point, so a scope reads as a container without reading as a mediator.
+    pub fn hexagon_points() -> [(f32, f32); 6] {
+        let (r, ry) = (NODE_R as f32, NODE_RY as f32);
+        let cut = r * 0.42;
+        [
+            (-r, 0.0),
+            (-r + cut, -ry),
+            (r - cut, -ry),
+            (r, 0.0),
+            (r - cut, ry),
+            (-r + cut, ry),
+        ]
+    }
+
     /// The five corners of the input inlet: a box with a leftward point where
     /// the received value enters.
     pub fn inlet_points() -> [(f32, f32); 5] {
         let (r, ry) = (NODE_R as f32, NODE_RY as f32);
         let tip = ry * 0.85;
-        [
-            (-r - tip, 0.0),
-            (-r, -ry),
-            (r, -ry),
-            (r, ry),
-            (-r, ry),
-        ]
+        [(-r - tip, 0.0), (-r, -ry), (r, -ry), (r, ry), (-r, ry)]
     }
 
     /// Whether a point offset from the node's centre is inside the shape.
@@ -354,7 +402,7 @@ impl Shape {
         match self {
             // The slant and the inlet point extend a little past the box; a
             // box-sized target is close enough and keeps clicking predictable.
-            Shape::Square | Shape::Parallelogram | Shape::Amp => {
+            Shape::Square | Shape::Parallelogram | Shape::Amp | Shape::Hexagon => {
                 dx.abs() <= NODE_R && dy.abs() <= NODE_RY
             }
             Shape::Oval => {
@@ -382,6 +430,14 @@ pub struct Node {
     pub text: String,
     pub x: f64,
     pub y: f64,
+    /// Half-width and half-height a square's border was dragged to, when it has
+    /// been resized by hand. `None` means the box takes whatever size its
+    /// contents need.
+    ///
+    /// Presentation only, exactly like `x`/`y`: a hand-sized box and an
+    /// auto-sized one generate the same source. Read it through
+    /// [`Mandala::extent`], which never lets a stored size hide the contents.
+    pub size: Option<(f64, f64)>,
 }
 
 impl Node {
@@ -403,6 +459,7 @@ impl Node {
             Form::Forward => "->".into(),
             Form::Backflow => "<-".into(),
             Form::Square => "[ ]".into(),
+            Form::Conditional => String::new(),
             Form::Compose => "( )".into(),
             Form::Program => "program".into(),
             // Drawn as their own sigil; nothing to write on top.
@@ -410,6 +467,20 @@ impl Node {
             _ => self.form.name().into(),
         }
     }
+}
+
+/// A grab on a square's wall: which box, and which walls the point is on.
+///
+/// Both flags are set on a corner. The axes are carried because a drag on a
+/// side wall must change only that dimension — grabbing the left wall of a wide
+/// box and pulling down should not also make it short.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BorderGrab {
+    pub id: NodeId,
+    /// On a left or right wall: the drag sets the width.
+    pub wide: bool,
+    /// On a top or bottom wall: the drag sets the height.
+    pub tall: bool,
 }
 
 /// A directed arrow: `from` is a child of `to`. Drawing a `←` on the canvas is
@@ -635,6 +706,10 @@ impl std::error::Error for MandalaError {}
 pub const NODE_R: f64 = 34.0;
 /// The square's half-height. Squares are a little flatter than circles are tall.
 pub const NODE_RY: f64 = NODE_R * 0.72;
+/// Clearance between an inlined mediator and the wall of its square.
+pub const MEDIATOR_PAD: f64 = 13.0;
+/// How far inside a square's wall still counts as grabbing the wall.
+pub const BORDER_BAND: f64 = 8.0;
 /// Grab radius of the handle on a drawn arrow.
 pub const ARROW_HANDLE: f64 = 11.0;
 /// Selection tolerance around a rendered flow line.
@@ -722,12 +797,14 @@ impl Mandala {
             text: text.into(),
             x,
             y,
+            size: None,
         });
         id
     }
 
-    /// Make `father` the parent of `child`, appending `child` as its next
-    /// ordered operand.
+    /// Make `father` the parent of `child`, assigning `child` the next
+    /// one-based position among its ordered operands. Use
+    /// [`Self::set_child_number`] to change that position later.
     ///
     /// This is the canvas's `father of` relation. Geometry is deliberately
     /// ignored: overlap, containment, proximity, and screen order never create
@@ -811,6 +888,29 @@ impl Mandala {
 
     pub fn arrows(&self) -> &[Arrow] {
         &self.arrows
+    }
+
+    /// The result endpoint of a complete flow expression.
+    ///
+    /// A nested `->` is still one Rebis operand, but it has no independent
+    /// visual box. Its parent therefore connects to the nested flow's result
+    /// endpoint instead of to an invisible midpoint handle. Incomplete arrows
+    /// deliberately return `None`, so the editor can draw their real node.
+    #[must_use]
+    pub fn flow_result(&self, id: NodeId) -> Option<NodeId> {
+        let node = self.node(id)?;
+        if !matches!(node.form, Form::Forward | Form::Backflow) {
+            return None;
+        }
+        let children = self.children(id);
+        let [first, second] = children[..] else {
+            return None;
+        };
+        Some(if node.form == Form::Backflow {
+            first
+        } else {
+            second
+        })
     }
 
     /// Nodes touched by a world-space marquee.
@@ -1025,11 +1125,25 @@ impl Mandala {
     /// itself — which keeps pointer coordinates in one space and makes the
     /// interaction testable without a window.
     pub fn hit(&self, x: f64, y: f64) -> Option<NodeId> {
-        let shape = self
-            .nodes
-            .iter()
-            .rev()
-            .find_map(|n| n.shape().contains(x - n.x, y - n.y).then_some(n.id));
+        // A mediator drawn inside its square is on top of it: clicking the
+        // inner form must select the form, not the box around it.
+        let inside = self.nodes.iter().rev().find_map(|n| {
+            (self.is_inlined(n.id) && n.shape().contains(x - n.x, y - n.y)).then_some(n.id)
+        });
+        if inside.is_some() {
+            return inside;
+        }
+        let shape = self.nodes.iter().rev().find_map(|n| {
+            let (half_w, half_h) = self.extent(n.id);
+            let hit = if half_w > NODE_R || half_h > NODE_RY {
+                // A box grown past the base shape — by its contents or by a
+                // border drag — is a plain rectangle at its full extent.
+                (x - n.x).abs() <= half_w && (y - n.y).abs() <= half_h
+            } else {
+                n.shape().contains(x - n.x, y - n.y)
+            };
+            hit.then_some(n.id)
+        });
         if shape.is_some() {
             return shape;
         }
@@ -1060,6 +1174,274 @@ impl Mandala {
             .filter(|a| a.to == id)
             .map(|a| a.from)
             .collect()
+    }
+
+    /// The mediator of a square: its first child.
+    ///
+    /// `([m] a b)` writes the mediator INSIDE the brackets, so it is part of
+    /// the square's own notation rather than one of its arguments — even
+    /// though the AST holds it as a child expression, which is what lets a
+    /// whole program mediate.
+    #[must_use]
+    pub fn mediator(&self, id: NodeId) -> Option<NodeId> {
+        let node = self.node(id)?;
+        if node.form != Form::Square {
+            return None;
+        }
+        self.children(id).first().copied()
+    }
+
+    /// The mediator drawn INSIDE its square: the same node, named for where it
+    /// is rendered rather than for what it is.
+    ///
+    /// `([m] a b)` writes the mediator between the brackets, so it belongs in
+    /// the box however large it is — a bare symbol, a prompt, or a whole
+    /// drawing. The box grows to hold it.
+    #[must_use]
+    pub fn inlined_mediator(&self, id: NodeId) -> Option<NodeId> {
+        self.mediator(id)
+    }
+
+    /// The nodes of one paint pass, back to front.
+    ///
+    /// `inlined` picks the pass: `false` is everything on the open canvas,
+    /// `true` is what is drawn inside a box. Within a pass the squares come
+    /// first, because a box is a surface other forms sit on — paint it in
+    /// drawing order instead and a box added late, or dragged across the canvas,
+    /// hides whatever it covers.
+    ///
+    /// Order only. Which node is in front of which is presentation, exactly like
+    /// the coordinates it is derived from; no structure is implied and none is
+    /// read back out.
+    #[must_use]
+    pub fn paint_order(&self, inlined: bool) -> Vec<NodeId> {
+        let pass = self
+            .nodes
+            .iter()
+            .filter(|node| self.is_inlined(node.id) == inlined);
+        let (boxes, forms): (Vec<NodeId>, Vec<NodeId>) = pass
+            .map(|node| (node.id, node.form == Form::Square))
+            .fold((Vec::new(), Vec::new()), |mut acc, (id, square)| {
+                if square {
+                    acc.0.push(id);
+                } else {
+                    acc.1.push(id);
+                }
+                acc
+            });
+        boxes.into_iter().chain(forms).collect()
+    }
+
+    /// Every node drawn inside `id`'s box: its mediator and everything under it.
+    ///
+    /// This is a STRUCTURAL answer, never a geometric one. A node is inside the
+    /// box because the links put it there, so overlapping a box still means
+    /// nothing — which keeps coordinates presentation-only.
+    #[must_use]
+    pub fn interior(&self, id: NodeId) -> std::collections::BTreeSet<NodeId> {
+        self.mediator(id)
+            .map(|mediator| self.subtree(mediator))
+            .unwrap_or_default()
+    }
+
+    /// Whether this node is drawn inside some square.
+    #[must_use]
+    pub fn is_inlined(&self, id: NodeId) -> bool {
+        self.nodes
+            .iter()
+            .filter(|node| node.form == Form::Square && node.id != id)
+            .any(|node| self.interior(node.id).contains(&id))
+    }
+
+    /// The node's half-width and half-height in world units.
+    ///
+    /// Everything is one fixed size except a square, which grows to contain
+    /// whatever its mediator subtree needs — that is what makes room for more
+    /// than one block inside. A square whose border has been dragged also
+    /// honours that size, but only where it is the larger of the two: the
+    /// contents can never end up outside the walls drawn around them.
+    #[must_use]
+    pub fn extent(&self, id: NodeId) -> (f64, f64) {
+        let (fit_w, fit_h) = self.fit_extent(id);
+        match self.node(id).and_then(|node| node.size) {
+            Some((half_w, half_h)) => (half_w.max(fit_w), half_h.max(fit_h)),
+            None => (fit_w, fit_h),
+        }
+    }
+
+    /// The smallest the node may be drawn: one fixed size for every form, and
+    /// for a square whatever its contents occupy. This is the floor
+    /// [`Self::extent`] and [`Self::resize`] measure a hand-set size against.
+    #[must_use]
+    fn fit_extent(&self, id: NodeId) -> (f64, f64) {
+        let Some(node) = self.node(id) else {
+            return (NODE_R, NODE_RY);
+        };
+        if node.form != Form::Square {
+            return (NODE_R, NODE_RY);
+        }
+        let interior = self.interior(id);
+        if interior.is_empty() {
+            return (NODE_R, NODE_RY);
+        }
+        // Wide enough for the furthest thing inside, in either direction from
+        // the box's own centre, and never smaller than an empty box.
+        let mut half_w: f64 = NODE_R;
+        let mut half_h: f64 = NODE_RY;
+        for inner in interior {
+            let Some(child) = self.node(inner) else {
+                continue;
+            };
+            let (cw, ch) = if child.form == Form::Square {
+                self.extent(inner)
+            } else {
+                (NODE_R, NODE_RY)
+            };
+            half_w = half_w.max((child.x - node.x).abs() + cw + MEDIATOR_PAD);
+            half_h = half_h.max((child.y - node.y).abs() + ch + MEDIATOR_PAD);
+        }
+        (half_w, half_h)
+    }
+
+    /// Set a square's drawn size by hand, in half-extents from its centre.
+    ///
+    /// Clamped to what the contents need, so a border dragged inward stops at
+    /// the innermost block rather than swallowing it. Only squares have a box to
+    /// size; every other form is one fixed shape and is left alone.
+    ///
+    /// The centre does not move, which is what keeps the contents still while
+    /// the walls travel: they are placed in canvas coordinates, not relative to
+    /// the box.
+    pub fn resize(&mut self, id: NodeId, half_w: f64, half_h: f64) {
+        let (fit_w, fit_h) = self.fit_extent(id);
+        let square = self.node(id).is_some_and(|node| node.form == Form::Square);
+        if !square {
+            return;
+        }
+        if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
+            node.size = Some((half_w.max(fit_w), half_h.max(fit_h)));
+        }
+    }
+
+    /// The wall a pointer at `x`/`y` may drag to size a box, if any.
+    ///
+    /// A wall the pointer is on, minus any wall with something else drawn over
+    /// it: a block dropped on a border is still a block, and grabbing it must
+    /// move it rather than reshape the box underneath. That is the whole rule
+    /// for "the border resizes, the items do not", kept here so the canvas and
+    /// its cursor cannot read it two different ways.
+    #[must_use]
+    pub fn resize_grab(&self, x: f64, y: f64) -> Option<BorderGrab> {
+        let grab = self.border_hit(x, y)?;
+        match self.hit(x, y) {
+            // Something else is drawn over the wall, so that is what the gesture
+            // takes. Nothing there — which is the case just OUTSIDE the wall —
+            // leaves the wall itself, and must not fall through to a canvas pan.
+            Some(id) if id != grab.id => None,
+            _ => Some(grab),
+        }
+    }
+
+    /// The square whose wall the point rests on, and which walls those are.
+    ///
+    /// The band straddles the wall: [`BORDER_BAND`] world units either side of
+    /// it. A wall is drawn as a stroke with width, so the line a hand aims for
+    /// is partly outside the box — measuring only inwards means grabbing the
+    /// visible edge misses the box entirely.
+    ///
+    /// This is geometry only — see [`Self::resize_grab`] for the answer a pointer
+    /// gesture wants.
+    #[must_use]
+    pub fn border_hit(&self, x: f64, y: f64) -> Option<BorderGrab> {
+        self.nodes.iter().rev().find_map(|node| {
+            if node.form != Form::Square {
+                return None;
+            }
+            let (half_w, half_h) = self.extent(node.id);
+            let (dx, dy) = ((x - node.x).abs(), (y - node.y).abs());
+            // Outside the band around the box altogether: bare canvas.
+            if dx > half_w + BORDER_BAND || dy > half_h + BORDER_BAND {
+                return None;
+            }
+            let wide = dx >= half_w - BORDER_BAND;
+            let tall = dy >= half_h - BORDER_BAND;
+            (wide || tall).then_some(BorderGrab {
+                id: node.id,
+                wide,
+                tall,
+            })
+        })
+    }
+
+    /// Move a square and everything drawn inside it together.
+    ///
+    /// The box and its contents read as one object, so dragging the box by its
+    /// border or its empty space carries the interior along. Plain
+    /// [`Mandala::move_to`] still moves exactly one node, which is what layout
+    /// wants.
+    pub fn move_group_to(&mut self, id: NodeId, x: f64, y: f64) {
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        let (dx, dy) = (x - node.x, y - node.y);
+        let interior: Vec<NodeId> = self.interior(id).into_iter().collect();
+        self.move_to(id, x, y);
+        for inner in interior {
+            if let Some(child) = self.node(inner) {
+                let (cx, cy) = (child.x + dx, child.y + dy);
+                self.move_to(inner, cx, cy);
+            }
+        }
+    }
+
+    /// The one-based position of `child` under `father`.
+    #[must_use]
+    pub fn child_number(&self, father: NodeId, child: NodeId) -> Option<usize> {
+        self.children(father)
+            .iter()
+            .position(|id| *id == child)
+            .map(|index| index + 1)
+    }
+
+    /// Assign `child` a one-based position under `father`.
+    ///
+    /// Positions are always in `1..=n`, where `n` is the number of children
+    /// currently attached to `father`. Reordering changes only sibling order;
+    /// it does not move nodes, rewrite payloads, or alter any other parent.
+    /// Returns `false` when the relationship or position is invalid, or when
+    /// the child already occupies that position.
+    pub fn set_child_number(&mut self, father: NodeId, child: NodeId, number: usize) -> bool {
+        let sibling_indices = self
+            .arrows
+            .iter()
+            .enumerate()
+            .filter(|(_, arrow)| arrow.to == father)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if number == 0 || number > sibling_indices.len() {
+            return false;
+        }
+        let Some(current) = sibling_indices
+            .iter()
+            .position(|index| self.arrows[*index].from == child)
+        else {
+            return false;
+        };
+        let target = number - 1;
+        if current == target {
+            return false;
+        }
+
+        let mut ordered = sibling_indices
+            .iter()
+            .map(|index| self.arrows[*index].from)
+            .collect::<Vec<_>>();
+        let moved = ordered.remove(current);
+        ordered.insert(target, moved);
+        for (index, child) in sibling_indices.into_iter().zip(ordered) {
+            self.arrows[index].from = child;
+        }
+        true
     }
 
     /// Every node in the block rooted at `id`: the node itself plus all of its
@@ -1433,6 +1815,19 @@ impl Mandala {
                         .enumerate()
                         .all(|(index, branch)| child_matches(index + 1, branch))
             }
+            (
+                Form::Conditional,
+                Expr::Conditional {
+                    condition,
+                    when_yes,
+                    when_no,
+                },
+            ) => {
+                children.len() == 3
+                    && child_matches(0, condition)
+                    && child_matches(1, when_yes)
+                    && child_matches(2, when_no)
+            }
             (Form::Concat, Expr::Concat(items))
             | (Form::Compose, Expr::Compose(items))
             | (Form::Program, Expr::Program(items)) => {
@@ -1512,6 +1907,7 @@ impl Mandala {
             Form::Forward => format!("(-> {} {})", parts[0], parts[1]),
             Form::Backflow => format!("(<- {} {})", parts[0], parts[1]),
             Form::Square => format!("([{}] {})", parts[0], parts[1..].join(" ")),
+            Form::Conditional => format!("(% {} {} {})", parts[0], parts[1], parts[2]),
             Form::Concat => format!("($ {})", parts.join(" ")),
             Form::Compose => format!("({})", parts.join(" ")),
             Form::Call => format!("({text} {})", parts.join(" ")).replace(" )", ")"),
@@ -1611,6 +2007,15 @@ impl Mandala {
                 kids.extend(branches.iter());
                 (Form::Square, String::new(), kids)
             }
+            Expr::Conditional {
+                condition,
+                when_yes,
+                when_no,
+            } => (
+                Form::Conditional,
+                String::new(),
+                vec![condition.as_ref(), when_yes.as_ref(), when_no.as_ref()],
+            ),
             Expr::Concat(v) => (Form::Concat, String::new(), v.iter().collect()),
             Expr::Compose(v) => (Form::Compose, String::new(), v.iter().collect()),
             Expr::Call { name, args } => (Form::Call, name.clone(), args.iter().collect()),
@@ -1662,15 +2067,20 @@ impl Mandala {
                 return;
             }
             let depth = depth_of.get(&id).copied().unwrap_or(0);
+            let inlined = m.inlined_mediator(id);
             let kids: Vec<NodeId> = m
                 .children(id)
                 .into_iter()
+                .filter(|kid| Some(*kid) != inlined)
                 .filter(|kid| depth_of.get(kid).copied() == Some(depth + 1))
                 .collect();
             for kid in &kids {
                 pack(m, *kid, depth_of, rows, seen, next_leaf);
             }
-            let child_rows: Vec<f64> = kids.iter().filter_map(|kid| rows.get(kid).copied()).collect();
+            let child_rows: Vec<f64> = kids
+                .iter()
+                .filter_map(|kid| rows.get(kid).copied())
+                .collect();
             let row = if child_rows.is_empty() {
                 let row = *next_leaf;
                 *next_leaf += 1.0;
@@ -1697,8 +2107,24 @@ impl Mandala {
             }
         }
 
+        // Everything drawn inside a square claims no column and no row of its
+        // own out here: the box is laid out first, then its contents are placed
+        // within it. Otherwise the interior would leave holes in the circuit.
+        let boxes: Vec<(NodeId, Vec<NodeId>)> = depths
+            .iter()
+            .filter_map(|(id, _)| {
+                let interior: Vec<NodeId> = self.interior(*id).into_iter().collect();
+                (!interior.is_empty()).then_some((*id, interior))
+            })
+            .collect();
+        let inside: HashSet<NodeId> = boxes
+            .iter()
+            .flat_map(|(_, interior)| interior.iter().copied())
+            .collect();
+
         let placed: Vec<(NodeId, f64, f64)> = depths
             .iter()
+            .filter(|(id, _)| !inside.contains(id))
             .map(|(id, depth)| {
                 let x = CIRCUIT_ORIGIN.0 + *depth as f64 * COL_GAP;
                 let y = CIRCUIT_ORIGIN.1 + rows.get(id).copied().unwrap_or(0.0) * ROW_GAP;
@@ -1707,6 +2133,60 @@ impl Mandala {
             .collect();
         for (id, x, y) in placed {
             self.move_to(id, x, y);
+        }
+
+        // Lay each interior out as its own small circuit, centred on its box.
+        for (square, interior) in boxes {
+            let Some(node) = self.node(square) else {
+                continue;
+            };
+            let (ox, oy) = (node.x, node.y);
+            let mediator = match self.mediator(square) {
+                Some(mediator) => mediator,
+                None => continue,
+            };
+            // Depth and row within the interior only.
+            let inner_depth: HashMap<NodeId, usize> = {
+                let mut out = HashMap::new();
+                let mut frontier = vec![(mediator, 0usize)];
+                while let Some((id, depth)) = frontier.pop() {
+                    if out.insert(id, depth).is_some() {
+                        continue;
+                    }
+                    for kid in self.children(id) {
+                        frontier.push((kid, depth + 1));
+                    }
+                }
+                out
+            };
+            let mut inner_rows = HashMap::new();
+            let mut inner_seen = HashSet::new();
+            let mut inner_leaf = 0.0;
+            pack(
+                self,
+                mediator,
+                &inner_depth,
+                &mut inner_rows,
+                &mut inner_seen,
+                &mut inner_leaf,
+            );
+            let max_depth = inner_depth.values().copied().max().unwrap_or(0) as f64;
+            let max_row = inner_rows.values().copied().fold(0.0_f64, f64::max);
+            let spots: Vec<(NodeId, f64, f64)> = interior
+                .iter()
+                .map(|inner| {
+                    let depth = inner_depth.get(inner).copied().unwrap_or(0) as f64;
+                    let row = inner_rows.get(inner).copied().unwrap_or(0.0);
+                    (
+                        *inner,
+                        ox + (depth - max_depth / 2.0) * COL_GAP,
+                        oy + (row - max_row / 2.0) * ROW_GAP,
+                    )
+                })
+                .collect();
+            for (inner, x, y) in spots {
+                self.move_to(inner, x, y);
+            }
         }
     }
 }
@@ -1755,6 +2235,7 @@ mod tests {
         assert_round_trip("(-> \"a\" \"b\")"); // Forward
         assert_round_trip("(<- \"a\" \"b\")"); // Backflow
         assert_round_trip("([\"m\"] \"a\" \"b\")"); // Square
+        assert_round_trip("(% \"question\" \"yes\" \"no\")"); // Conditional
         assert_round_trip("($ \"x\" \"y\")"); // Concat
         assert_round_trip("((\"local\") \"sub\")"); // Compose
         assert_round_trip("(f \"a\" \"b\")"); // Call
@@ -1779,7 +2260,7 @@ mod tests {
             "((~ step (value) (-> value \"Improve once.\"))\n\
              (~ done (value) (-> value \"Is it finished?\"))\n\
              (~ loop (value work stop)\n\
-               ([(stop value)] value (loop (work value) work stop)))\n\
+               (% (stop value) value (loop (work value) work stop)))\n\
              (loop \"Initial implementation\" step done))",
         );
     }
@@ -1808,6 +2289,20 @@ mod tests {
         assert_eq!(mandala.children(inverter.id).len(), 1);
     }
 
+    #[test]
+    fn percent_conditionals_round_trip_as_three_ordered_children() {
+        let source = "(% (-> question decision) yes-branch no-branch)";
+        let mandala = Mandala::from_rebis(source).unwrap();
+        assert_eq!(mandala.to_rebis().unwrap(), source);
+        let conditional = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Conditional)
+            .expect("conditional node");
+        assert_eq!(conditional.shape(), Shape::Percent);
+        assert_eq!(mandala.children(conditional.id).len(), 3);
+    }
+
     // ── shapes are a rendering of the form ─────────────────────────────────
 
     #[test]
@@ -1818,6 +2313,7 @@ mod tests {
         assert_eq!(Form::Quote.shape(), Shape::Quote);
         assert_eq!(Form::Unquote.shape(), Shape::Comma);
         assert_eq!(Form::Invert.shape(), Shape::Caret);
+        assert_eq!(Form::Conditional.shape(), Shape::Percent);
     }
 
     #[test]
@@ -1875,8 +2371,7 @@ mod tests {
         // Two sibling subtrees under one square. In an extruded 2D layout the
         // siblings would share the drawing's plane; as a cone tree they fan
         // around their parent, so they differ on every axis.
-        let mandala =
-            Mandala::from_rebis("([\"m\"] (-> \"a\" \"b\") (-> \"c\" \"d\"))").unwrap();
+        let mandala = Mandala::from_rebis("([\"m\"] (-> \"a\" \"b\") (-> \"c\" \"d\"))").unwrap();
         let layout = mandala.spatial_layout();
         let root = mandala
             .nodes()
@@ -2173,12 +2668,98 @@ mod tests {
     }
 
     #[test]
+    fn a_simple_mediator_is_drawn_inside_its_square() {
+        let m = Mandala::from_rebis("([\"m\"] \"a\" \"b\")").unwrap();
+        let square = m.nodes().iter().find(|n| n.form == Form::Square).unwrap();
+
+        let inner = m
+            .inlined_mediator(square.id)
+            .expect("a prompt mediator fits");
+        assert!(m.is_inlined(inner));
+        assert_eq!(m.node(inner).map(|n| n.text.as_str()), Some("m"));
+
+        // The box grew to hold it, and the mediator sits at its centre.
+        let (half_w, half_h) = m.extent(square.id);
+        assert!(half_w > NODE_R && half_h > NODE_RY, "the box grew");
+        let node = m.node(inner).unwrap();
+        assert!((node.x - square.x).abs() < f64::EPSILON);
+        assert!((node.y - square.y).abs() < f64::EPSILON);
+
+        // Clicking the middle of the box selects the mediator, not the box.
+        assert_eq!(m.hit(square.x, square.y), Some(inner));
+        // Clicking the wall, past the inner form, still selects the square.
+        assert_eq!(m.hit(square.x + NODE_R + 6.0, square.y), Some(square.id));
+
+        // None of this changed the program.
+        assert_eq!(m.to_rebis().unwrap(), "([\"m\"] \"a\" \"b\")");
+    }
+
+    #[test]
+    fn a_program_mediator_is_held_inside_the_box_which_grows_for_it() {
+        // The mediator is a whole drawing: an arrow and its two prompts. All of
+        // it belongs between the brackets, so all of it is drawn inside.
+        let mut m = Mandala::from_rebis("([(-> \"x\" \"y\")] \"a\" \"b\")").unwrap();
+        let square = m
+            .nodes()
+            .iter()
+            .find(|n| n.form == Form::Square)
+            .unwrap()
+            .clone();
+
+        let interior = m.interior(square.id);
+        assert_eq!(interior.len(), 3, "the arrow and both of its prompts");
+        assert!(interior.iter().all(|id| m.is_inlined(*id)));
+
+        // The box grew past its empty size to hold them.
+        let (half_w, half_h) = m.extent(square.id);
+        assert!(half_w > NODE_R * 2.0, "the box widened: {half_w}");
+        assert!(half_h > NODE_RY, "the box heightened: {half_h}");
+
+        // Everything inside really is inside.
+        for id in &interior {
+            let node = m.node(*id).unwrap();
+            assert!(
+                (node.x - square.x).abs() <= half_w && (node.y - square.y).abs() <= half_h,
+                "{:?} escaped its box",
+                node.form
+            );
+        }
+
+        // Empty space inside the box selects the BOX, not whatever is nearest.
+        let corner = (
+            square.x + half_w - MEDIATOR_PAD / 2.0,
+            square.y + half_h - MEDIATOR_PAD / 2.0,
+        );
+        assert_eq!(m.hit(corner.0, corner.1), Some(square.id));
+
+        // Dragging the box carries its contents: offsets are preserved.
+        let before: Vec<(NodeId, f64, f64)> = interior
+            .iter()
+            .map(|id| {
+                let n = m.node(*id).unwrap();
+                (*id, n.x - square.x, n.y - square.y)
+            })
+            .collect();
+        m.move_group_to(square.id, square.x + 500.0, square.y - 250.0);
+        let moved = m.node(square.id).unwrap().clone();
+        for (id, dx, dy) in before {
+            let n = m.node(id).unwrap();
+            assert!((n.x - moved.x - dx).abs() < 1e-9, "interior x drifted");
+            assert!((n.y - moved.y - dy).abs() < 1e-9, "interior y drifted");
+        }
+
+        // And none of it changed the program.
+        assert_eq!(m.to_rebis().unwrap(), "([(-> \"x\" \"y\")] \"a\" \"b\")");
+    }
+
+    #[test]
     fn structural_forms_use_their_declared_outlines() {
         assert_eq!(Form::Prompt.shape(), Shape::Circle);
         assert_eq!(Form::Compose.shape(), Shape::Oval);
-        for f in [Form::Square, Form::Program] {
-            assert_eq!(f.shape(), Shape::Square, "{}", f.name());
-        }
+        // The box belongs to the mediator alone: a square on the canvas can
+        // only mean a mediation. The implicit top-level scope is a hexagon.
+        assert_eq!(Form::Square.shape(), Shape::Square);
+        assert_eq!(Form::Program.shape(), Shape::Hexagon);
         // A call is a box in motion; an input port is an inlet.
         assert_eq!(Form::Call.shape(), Shape::Parallelogram);
         assert_eq!(Form::Input.shape(), Shape::Amp);
@@ -2188,19 +2769,31 @@ mod tests {
     fn every_form_has_a_distinct_enough_drawing() {
         // A distinct shape is used by exactly one form, so the canvas is
         // unambiguous: seeing a `$` can only mean concat, a `◇` only a symbol.
+        // Forward and backflow intentionally share the directional arrow glyph;
+        // its head direction distinguishes them.
+        // Only the two flow forms may share a shape. Every other form owns its
+        // outline outright — including the square, which is why a box on the
+        // canvas is always a mediator and never a scope.
         let mut distinct = Vec::new();
+        let mut squares = 0;
         for (_, make, _) in Form::ALL {
-            let s = make().shape();
-            if !matches!(s, Shape::Circle | Shape::Square) {
-                assert!(!distinct.contains(&s), "two forms share the shape {s:?}");
-                distinct.push(s);
+            let form = make();
+            let shape = form.shape();
+            if shape == Shape::Square {
+                squares += 1;
             }
+            if shape == Shape::Arrow {
+                continue; // forward and backflow share the arrow by design
+            }
+            assert!(
+                !distinct.contains(&shape),
+                "two forms share the shape {shape:?}"
+            );
+            distinct.push(shape);
         }
-        assert_eq!(
-            distinct.len(),
-            10,
-            "expected ◇ oval $ ~ # ' , ^ plus the call parallelogram and & inlet"
-        );
+        assert_eq!(squares, 1, "the square belongs to the mediator alone");
+        assert!(distinct.contains(&Shape::Square));
+        assert!(distinct.contains(&Shape::Hexagon));
     }
 
     #[test]
@@ -2212,6 +2805,7 @@ mod tests {
             Shape::Quote,
             Shape::Comma,
             Shape::Caret,
+            Shape::Percent,
         ] {
             assert!(!s.strokes().is_empty(), "{s:?} draws nothing");
         }
@@ -2232,6 +2826,7 @@ mod tests {
             Shape::Quote,
             Shape::Comma,
             Shape::Caret,
+            Shape::Percent,
         ] {
             for stroke in s.strokes() {
                 let points: Vec<(f32, f32)> = match stroke {
@@ -2332,17 +2927,13 @@ mod tests {
     #[test]
     fn the_palette_covers_every_placeable_form() {
         // Guards against adding an Expr variant without a way to draw it.
-        // Forward and backflow are drawn as arrows, not placed, so they are the
-        // only two absent here.
         let names: HashSet<&str> = Form::ALL.iter().map(|(_, f, _)| f().name()).collect();
         for expected in [
             "prompt", "symbol", "import", "quote", "unquote", "invert", "square", "concat",
-            "compose", "call", "macro", "program", "input",
+            "compose", "call", "macro", "program", "input", "forward", "backflow",
         ] {
             assert!(names.contains(expected), "palette is missing {expected}");
         }
-        assert!(!names.contains("forward"), "forward is drawn, not placed");
-        assert!(!names.contains("backflow"), "backflow is drawn, not placed");
     }
 
     // ── arity ──────────────────────────────────────────────────────────────
@@ -2360,6 +2951,52 @@ mod tests {
             }
             other => panic!("expected an arity error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_incomplete_flow_has_a_selectable_arrow_handle() {
+        let mut m = Mandala::new();
+        let arrow = m.add(Form::Forward, "", 40.0, 50.0);
+
+        assert_eq!(m.hit(40.0, 50.0), Some(arrow));
+        assert_eq!(
+            m.nodes_in_rect(WorldRect::from_points((30.0, 40.0), (50.0, 60.0))),
+            vec![arrow]
+        );
+        assert!(m.flow_result(arrow).is_none());
+    }
+
+    #[test]
+    fn a_nested_flow_resolves_to_its_directional_result() {
+        let mut m = Mandala::new();
+        let first = m.add(Form::Prompt, "first", 0.0, 0.0);
+        let second = m.add(Form::Prompt, "second", 100.0, 0.0);
+        let flow = m.flow(first, second, Form::Forward).unwrap();
+        assert_eq!(m.flow_result(flow), Some(second));
+
+        let backflow = m.flow(first, second, Form::Backflow).unwrap();
+        assert_eq!(m.flow_result(backflow), Some(first));
+    }
+
+    #[test]
+    fn child_numbers_follow_link_order_and_can_be_changed() {
+        let mut m = Mandala::new();
+        let parent = m.add(Form::Compose, "", 0.0, 0.0);
+        let first = m.add(Form::Prompt, "first", 1.0, 0.0);
+        let second = m.add(Form::Prompt, "second", 2.0, 0.0);
+        let third = m.add(Form::Prompt, "third", 3.0, 0.0);
+        m.father_of(parent, first);
+        m.father_of(parent, second);
+        m.father_of(parent, third);
+
+        assert_eq!(m.children(parent), vec![first, second, third]);
+        assert_eq!(m.child_number(parent, first), Some(1));
+        assert_eq!(m.child_number(parent, third), Some(3));
+        assert!(!m.set_child_number(parent, third, 0));
+        assert!(!m.set_child_number(parent, third, 4));
+        assert!(m.set_child_number(parent, third, 1));
+        assert_eq!(m.children(parent), vec![third, first, second]);
+        assert_eq!(m.to_rebis().unwrap(), "(\"third\" \"first\" \"second\")");
     }
 
     #[test]
@@ -2535,17 +3172,30 @@ mod tests {
     #[test]
     fn loaded_nodes_get_distinct_positions() {
         let m = Mandala::from_rebis("([\"m\"] \"a\" \"b\")").unwrap();
+        // The mediator is drawn INSIDE its square and shares its centre by
+        // design, so it is the one node exempt from distinct placement.
         let mut seen = HashSet::new();
-        for n in m.nodes() {
+        for n in m.nodes().iter().filter(|n| !m.is_inlined(n.id)) {
             assert!(
                 seen.insert((n.x.to_bits(), n.y.to_bits())),
                 "two nodes share a position"
             );
         }
+        let sq = m.nodes().iter().find(|n| n.form == Form::Square).unwrap();
+        assert_eq!(
+            m.inlined_mediator(sq.id)
+                .and_then(|id| m.node(id))
+                .map(|n| (n.x, n.y)),
+            Some((sq.x, sq.y)),
+            "the mediator sits on its square"
+        );
         // The form sits one column left of the operands it drives, and those
         // operands share that next column, each on its own row.
-        let sq = m.nodes().iter().find(|n| n.form == Form::Square).unwrap();
-        let operands: Vec<&Node> = m.nodes().iter().filter(|n| n.id != sq.id).collect();
+        let operands: Vec<&Node> = m
+            .nodes()
+            .iter()
+            .filter(|n| n.id != sq.id && !m.is_inlined(n.id))
+            .collect();
         assert!(
             operands.iter().all(|n| n.x > sq.x),
             "operands wire rightward from their form"
@@ -2683,6 +3333,188 @@ mod tests {
         m.add(Form::Prompt, "under", 0.0, 0.0);
         let over = m.add(Form::Prompt, "over", 10.0, 0.0);
         assert_eq!(m.hit(5.0, 0.0), Some(over));
+    }
+
+    #[test]
+    fn a_squares_border_is_grabbable_and_its_middle_is_not() {
+        let mut m = Mandala::new();
+        let s = m.add(Form::Square, "", 0.0, 0.0);
+
+        // The band straddles the wall: a hand aiming at the drawn line lands on
+        // either side of it, and both sides must grab the wall. Reaching only
+        // inwards is what made grabbing the visible edge pan the canvas instead.
+        for x in [NODE_R - 1.0, NODE_R, NODE_R + 1.0] {
+            let wall = m
+                .border_hit(x, 0.0)
+                .unwrap_or_else(|| panic!("wall at {x}"));
+            assert_eq!(wall.id, s);
+            assert!(wall.wide && !wall.tall, "a side wall sizes only the width");
+            assert_eq!(
+                m.resize_grab(x, 0.0).map(|grab| grab.id),
+                Some(s),
+                "grabbing the wall at {x} must resize, never fall through to a pan"
+            );
+        }
+
+        // Far enough out is bare canvas again.
+        assert!(
+            m.border_hit(NODE_R + BORDER_BAND + 1.0, 0.0).is_none(),
+            "past the band is canvas"
+        );
+
+        // The middle of the box is for moving it, so it is not a wall.
+        assert!(m.border_hit(0.0, 0.0).is_none(), "the middle is not a wall");
+
+        // A corner is on both walls at once, inside or out.
+        for (x, y) in [(NODE_R - 1.0, NODE_RY - 1.0), (NODE_R + 1.0, NODE_RY + 1.0)] {
+            let corner = m
+                .border_hit(x, y)
+                .unwrap_or_else(|| panic!("corner at {x},{y}"));
+            assert!(corner.wide && corner.tall, "a corner sizes both");
+        }
+
+        // Only squares have a box to size.
+        let mut other = Mandala::new();
+        other.add(Form::Prompt, "a", 0.0, 0.0);
+        assert!(other.border_hit(NODE_R - 1.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn dragging_a_border_sizes_the_box_without_moving_it_or_the_source() {
+        let mut m = Mandala::from_rebis("([\"m\"] \"a\" \"b\")").unwrap();
+        let square = m
+            .nodes()
+            .iter()
+            .find(|n| n.form == Form::Square)
+            .unwrap()
+            .clone();
+        let (fit_w, fit_h) = m.extent(square.id);
+        let inner = m.inlined_mediator(square.id).unwrap();
+        let before = m.node(inner).map(|n| (n.x, n.y)).unwrap();
+
+        m.resize(square.id, fit_w + 60.0, fit_h + 40.0);
+
+        let (half_w, half_h) = m.extent(square.id);
+        assert_eq!((half_w, half_h), (fit_w + 60.0, fit_h + 40.0));
+        // The centre stays put, so nothing drawn inside moves with the walls.
+        let after = m.node(square.id).map(|n| (n.x, n.y)).unwrap();
+        assert_eq!(after, (square.x, square.y));
+        assert_eq!(m.node(inner).map(|n| (n.x, n.y)), Some(before));
+        // The wider box is hit out to its new wall.
+        assert_eq!(m.hit(square.x + half_w - 1.0, square.y), Some(square.id));
+        assert_eq!(m.hit(square.x + half_w + 1.0, square.y), None);
+
+        // A size is presentation, exactly like a coordinate.
+        assert_eq!(m.to_rebis().unwrap(), "([\"m\"] \"a\" \"b\")");
+    }
+
+    #[test]
+    fn a_box_is_painted_behind_the_forms_it_covers() {
+        // Drawing order alone put a late square over its neighbours, and a box
+        // dragged across the canvas hid them. A box is a surface, so it goes
+        // behind the other forms of its pass — and its own contents, which are a
+        // separate pass, stay in front of it.
+        // The box is drawn LAST, which is exactly the case drawing order gets
+        // wrong: a square placed after its neighbours, or dragged over them.
+        let mut m = Mandala::new();
+        let under = m.add(Form::Prompt, "under", 0.0, 0.0);
+        let square = m.add(Form::Square, "", 0.0, 0.0);
+
+        let open = m.paint_order(false);
+        let box_at = open.iter().position(|id| *id == square).expect("on canvas");
+        let under_at = open.iter().position(|id| *id == under).expect("on canvas");
+        assert!(
+            box_at < under_at,
+            "the box paints first so it cannot cover the form: {open:?}"
+        );
+
+        // A box's own contents are the other pass, so they stay in front of it.
+        let held = Mandala::from_rebis("([\"m\"] \"a\" \"b\")").unwrap();
+        let holder = held
+            .nodes()
+            .iter()
+            .find(|n| n.form == Form::Square)
+            .unwrap()
+            .id;
+        let inner = held
+            .inlined_mediator(holder)
+            .expect("the box holds its mediator");
+        let canvas = held.paint_order(false);
+        let inside = held.paint_order(true);
+        assert!(canvas.contains(&holder));
+        assert!(
+            !canvas.contains(&inner),
+            "the mediator is not on the canvas"
+        );
+        assert!(inside.contains(&inner), "it is painted inside the box");
+
+        // Every node is painted exactly once, across both passes.
+        let mut all = canvas;
+        all.extend(inside);
+        all.sort();
+        let mut expected = held.nodes().iter().map(|n| n.id).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(all, expected, "no node painted twice or dropped");
+    }
+
+    #[test]
+    fn a_block_dropped_on_a_border_is_grabbed_instead_of_the_wall() {
+        // Overlap never means structure, so a block may be dropped anywhere —
+        // including across a box's wall. Dragging it must move the block, which
+        // means the wall under it stops offering a resize.
+        let mut m = Mandala::new();
+        let square = m.add(Form::Square, "", 0.0, 0.0);
+        let wall = (NODE_R - 1.0, 0.0);
+        assert_eq!(m.resize_grab(wall.0, wall.1).map(|g| g.id), Some(square));
+
+        let block = m.add(Form::Prompt, "loose", NODE_R, 0.0);
+        assert_eq!(m.hit(wall.0, wall.1), Some(block), "the block is on top");
+        assert!(
+            m.border_hit(wall.0, wall.1).is_some(),
+            "the wall is still there underneath"
+        );
+        assert!(
+            m.resize_grab(wall.0, wall.1).is_none(),
+            "but the gesture belongs to the block"
+        );
+
+        // The far wall, clear of the block, still resizes.
+        assert_eq!(
+            m.resize_grab(-NODE_R + 1.0, 0.0).map(|g| g.id),
+            Some(square)
+        );
+    }
+
+    #[test]
+    fn a_border_dragged_inward_stops_at_the_contents() {
+        let mut m = Mandala::from_rebis("([(-> \"x\" \"y\")] \"a\" \"b\")").unwrap();
+        let square = m
+            .nodes()
+            .iter()
+            .find(|n| n.form == Form::Square)
+            .unwrap()
+            .id;
+        let (fit_w, fit_h) = m.extent(square);
+
+        // Ask for a box far smaller than what it holds.
+        m.resize(square, 1.0, 1.0);
+        assert_eq!(
+            m.extent(square),
+            (fit_w, fit_h),
+            "the contents are the floor: the walls cannot pass them"
+        );
+
+        // Everything inside is still inside.
+        let (half_w, half_h) = m.extent(square);
+        let centre = m.node(square).map(|n| (n.x, n.y)).unwrap();
+        for id in m.interior(square) {
+            let node = m.node(id).unwrap();
+            assert!(
+                (node.x - centre.0).abs() <= half_w && (node.y - centre.1).abs() <= half_h,
+                "{:?} escaped its box",
+                node.form
+            );
+        }
     }
 
     #[test]
