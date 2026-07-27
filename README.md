@@ -374,13 +374,24 @@ namespace is read-only, has no delete action, and saves edited copies only
 under a personal name.
 
 The source-only Rebis Collection is discovered through the same catalog and
-resolver. Kaos looks at `REBIS_COLLECTION_PATH` first, then at the sibling
-`../rebis-collection/modules` in development. Every `.rebis` file below that
-directory becomes a read-only sigil and a module automatically; adding a file
-does not require a Kaos change. The current collection includes
-`archetypes/*` composition protocols, the `git/workflow` repository-workflow
-module, `forge/repair` (the coding repair loop wired onto `std/spiral`), and
-`science/method` (claims that have to survive something).
+resolver. It is its own repository, carried here as the `rebis-collection`
+submodule, so it keeps its own history and is pinned to an exact commit:
+
+```sh
+git clone --recurse-submodules https://github.com/fmzbl/kaos
+# already cloned without it:
+git submodule update --init
+```
+
+Kaos looks at `REBIS_COLLECTION_PATH` first, then at `../rebis-collection` and
+the `rebis-collection` submodule, then beside the executable. Every `.rebis`
+file below that directory becomes a read-only sigil and a module automatically;
+adding a file does not require a Kaos change. An installed binary with no
+checkout beside it needs `REBIS_COLLECTION_PATH` set, or it simply runs without
+the collection — nothing depends on it being present. The current collection
+includes `archetypes/*` composition protocols, the `git/workflow`
+repository-workflow module, `forge/repair` (the coding repair loop wired onto
+`std/spiral`), and `science/method` (claims that have to survive something).
 
 ## Non-interactive Rebis CLI
 

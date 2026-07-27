@@ -1,0 +1,3 @@
+[submodule "rebis-collection"]
+	path = rebis-collection
+	url = git@github.com:fmzbl/rebis-collection.git
