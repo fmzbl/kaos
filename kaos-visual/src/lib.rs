@@ -693,7 +693,10 @@ enum Pane {
     /// A run as the cellular automaton it generates: the program's geometry
     /// supplies the lattice, the model's own bytes supply the rule. See the
     /// `automata` module for why this is a generation and not a diagram.
-    Automata(AutomataPane),
+    /// Boxed: the lattice it carries is an order of magnitude larger than any
+    /// other pane, and an unboxed variant would set that size as the cost of
+    /// every tab in the editor.
+    Automata(Box<AutomataPane>),
     /// Retained Rebis executions shared by every drawing and source tab.
     Runs,
     /// Kaos rites and inspection commands that are not a document surface.
@@ -786,6 +789,16 @@ impl Drag {
             None => Drag::Pan,
         }
     }
+}
+
+/// One chat turn the pane has accepted, ready to be dispatched once the
+/// borrow on the active tab ends.
+struct ChatSubmission {
+    said: String,
+    session: String,
+    resume: bool,
+    run_id: Option<u64>,
+    history: Vec<(String, String)>,
 }
 
 /// Exact in-app graph clipboard plus the text mirrored to the system
@@ -1585,8 +1598,10 @@ impl Editor {
         match AutomataPane::from_source(&source, origin.clone()) {
             Ok(mut pane) => {
                 pane.run = run;
-                self.tabs
-                    .open(format!("generation · {origin}"), Pane::Automata(pane));
+                self.tabs.open(
+                    format!("generation · {origin}"),
+                    Pane::Automata(Box::new(pane)),
+                );
             }
             Err(error) => {
                 self.notice = Some(format!(
@@ -2278,8 +2293,7 @@ impl Editor {
     /// be picked up in the other.
     fn chat(&mut self, ui: &mut egui::Ui) {
         let k = self.ink;
-        let mut submission: Option<(String, String, bool, Option<u64>, Vec<(String, String)>)> =
-            None;
+        let mut submission: Option<ChatSubmission> = None;
         let session_id = match self.tabs.active() {
             Some(Pane::Chat(chat)) => Some(chat.session.id.clone()),
             _ => None,
@@ -2436,11 +2450,24 @@ impl Editor {
                 // Persist immediately: the terminal app saves on every turn for
                 // the same reason, so a crash loses nothing already said.
                 let _ = kaos_core::sessions::Store::default_store().save(&chat.session);
-                submission = Some((said, chat.session.id.clone(), resume, run_id, history));
+                submission = Some(ChatSubmission {
+                    said,
+                    session: chat.session.id.clone(),
+                    resume,
+                    run_id,
+                    history,
+                });
             }
         });
         let _ = chat;
-        if let Some((said, session, resume, run_id, history)) = submission {
+        if let Some(ChatSubmission {
+            said,
+            session,
+            resume,
+            run_id,
+            history,
+        }) = submission
+        {
             let history_text = history
                 .iter()
                 .map(|(user, assistant)| format!("USER: {user}\nASSISTANT: {assistant}"))
@@ -2507,13 +2534,15 @@ impl Editor {
             self.tabs.select(tab_id);
             return;
         }
-        let mut chat = ChatPane::default();
-        chat.browsing = false;
-        chat.run_id = Some(id);
-        chat.notice = Some(
-            "each message refreshes source, state, and the complete retained run output"
-                .to_string(),
-        );
+        let chat = ChatPane {
+            browsing: false,
+            run_id: Some(id),
+            notice: Some(
+                "each message refreshes source, state, and the complete retained run output"
+                    .to_string(),
+            ),
+            ..ChatPane::default()
+        };
         self.tabs.open(format!("run #{id} chat"), Pane::Chat(chat));
     }
 
@@ -6236,11 +6265,13 @@ mod tests {
     fn header_height(width: f32) -> f32 {
         let mut editor = Editor::new(Mandala::new());
         let ctx = egui::Context::default();
-        let mut input = egui::RawInput::default();
-        input.screen_rect = Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(width, 900.0),
-        ));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 900.0),
+            )),
+            ..Default::default()
+        };
         // egui sizes a panel from the previous frame's content, so settle it.
         let mut top = 0.0;
         for _ in 0..3 {

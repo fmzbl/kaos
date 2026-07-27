@@ -5249,6 +5249,11 @@ impl App {
         )
     }
 
+    /// Every option one spawned child can carry. The arguments are independent
+    /// of each other and each has exactly one meaning, so bundling them into a
+    /// struct would move the same list somewhere else rather than remove it.
+    /// The three callers above pass the defaults they do not need.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_job_with_session(
         &mut self,
         args: Vec<String>,

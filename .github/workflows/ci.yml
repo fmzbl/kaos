@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    # Kaos depends on rebis-lang through `path = "../rebis"`, so the two are
+    # checked out as siblings and cargo is run from `kaos`. Keeping the path
+    # dependency is deliberate: it is what lets an edit in rebis take effect in
+    # kaos immediately, which a pinned git dependency would not.
+    defaults:
+      run:
+        working-directory: kaos
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: kaos
+          # rebis-collection is a submodule: source-only Rebis modules the
+          # sigil catalog reads at runtime.
+          submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          repository: fmzbl/rebis
+          path: rebis
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      # `--all-features` builds kaos-visual, which links eframe/egui, GTK
+      # through rfd, and X11 through the clipboard. None of it is needed to run
+      # the tests, but all of it is needed to compile them.
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+      - name: Format
+        run: cargo fmt --all -- --check
+      # `--workspace` throughout: without it cargo sees only the root crate and
+      # runs 88 of the 555 tests, silently.
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --all-features
