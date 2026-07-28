@@ -17,6 +17,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod retained;
 pub mod run_model;
 pub mod runs;
 pub mod sessions;

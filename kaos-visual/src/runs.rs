@@ -7,9 +7,13 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use kaos_core::retained::RetainedLog;
+
 use crate::process::{Event, Job, Launch};
 
 pub(crate) use kaos_core::run_model::{Authority, Lane, Mode, Scope, State};
+
+const MAX_RUN_HISTORY: usize = 128;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Run {
@@ -20,7 +24,7 @@ pub(crate) struct Run {
     pub(crate) lane: Lane,
     pub(crate) mode: Mode,
     pub(crate) state: State,
-    pub(crate) output: Vec<String>,
+    pub(crate) output: RetainedLog,
     pub(crate) expanded: bool,
     pub(crate) queued_at: Instant,
     pub(crate) started_at: Option<Instant>,
@@ -107,7 +111,7 @@ impl Run {
             lane: Lane::Serial,
             mode: Mode::Dry,
             state: State::Complete,
-            output,
+            output: output.into(),
             expanded: false,
             queued_at: now,
             started_at: Some(now),
@@ -185,6 +189,7 @@ impl Desk {
         lane_override: Option<Lane>,
         cwd: &Path,
     ) -> u64 {
+        self.prune_history();
         self.draft_source.clone_from(&source);
         let id = self.next_id;
         self.next_id += 1;
@@ -204,7 +209,7 @@ impl Desk {
             lane,
             mode: self.mode,
             state,
-            output: Vec::new(),
+            output: RetainedLog::default(),
             expanded: true,
             queued_at: Instant::now(),
             started_at: None,
@@ -455,9 +460,6 @@ impl Desk {
                 if let Some(path) = run.inlet_path.take() {
                     let _ = std::fs::remove_file(path);
                 }
-                if let Some(path) = run.inlet_path.take() {
-                    let _ = std::fs::remove_file(path);
-                }
                 if let Some(path) = run.temp_source.take() {
                     let _ = std::fs::remove_file(path);
                 }
@@ -613,6 +615,21 @@ impl Desk {
     pub(crate) fn selected_run_mut(&mut self) -> Option<&mut Run> {
         let id = self.selected?;
         self.runs.iter_mut().find(|run| run.id == id)
+    }
+
+    fn prune_history(&mut self) {
+        while self.runs.len() >= MAX_RUN_HISTORY {
+            let Some(index) = self.runs.iter().position(|run| run.state.terminal()) else {
+                break;
+            };
+            let mut run = self.runs.remove(index);
+            for path in [run.temp_source.take(), run.inlet_path.take()]
+                .into_iter()
+                .flatten()
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 
     pub(crate) fn has_live_process(&self, id: u64) -> bool {

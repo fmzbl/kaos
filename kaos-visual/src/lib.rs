@@ -801,6 +801,49 @@ struct ChatSubmission {
     history: Vec<(String, String)>,
 }
 
+fn recent_chat_history(turns: &[kaos_core::sessions::Turn]) -> Vec<(String, String)> {
+    let limit = kaos_core::chat::MAX_CHAT_HISTORY_BYTES;
+    let mut answer: Option<&str> = None;
+    let mut bytes = 0usize;
+    let mut recent = Vec::new();
+    for turn in turns.iter().rev() {
+        match turn.role {
+            kaos_core::sessions::Role::Model => {
+                answer.get_or_insert(&turn.text);
+            }
+            kaos_core::sessions::Role::User => {
+                let answer = answer.take().unwrap_or_default();
+                let turn_bytes = turn.text.len().saturating_add(answer.len());
+                if !recent.is_empty() && bytes.saturating_add(turn_bytes) > limit {
+                    break;
+                }
+                recent.push((
+                    bounded_context_copy(&turn.text, limit / 2),
+                    bounded_context_copy(answer, limit / 2),
+                ));
+                bytes = bytes.saturating_add(turn_bytes);
+                if bytes >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    recent.reverse();
+    recent
+}
+
+fn bounded_context_copy(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    const MARKER: &str = "[... earlier text omitted ...]\n";
+    let mut start = text.len() - max_bytes.saturating_sub(MARKER.len());
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("{MARKER}{}", &text[start..])
+}
+
 /// Exact in-app graph clipboard plus the text mirrored to the system
 /// clipboard. The text lets a valid Rebis block cross process boundaries;
 /// the graph preserves incomplete selections and canvas placement in-process.
@@ -2302,7 +2345,7 @@ impl Editor {
             Pane::Chat(chat) if !chat.browsing => chat.run_id,
             _ => None,
         });
-        let run_snapshot = run_id.and_then(|id| self.run_chat_snapshot(id));
+        let retained_run = run_id.and_then(|id| self.runs.runs.iter().find(|run| run.id == id));
         let chat_busy = session_id
             .as_deref()
             .is_some_and(|id| self.actions.session_active(id));
@@ -2387,15 +2430,56 @@ impl Editor {
                 .stick_to_bottom(true)
                 .max_height(ui.available_height() - 60.0)
                 .show(ui, |ui| {
-                    if let Some(snapshot) = run_snapshot.as_deref() {
+                    if let Some(run) = retained_run {
                         ui.horizontal_top(|ui| {
                             ui.colored_label(k.accent, "run");
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(snapshot).monospace().color(k.faint),
-                                )
-                                .wrap(),
-                            );
+                            ui.vertical(|ui| {
+                                ui.monospace(format!(
+                                    "#{} · {} · {} · {} · {}",
+                                    run.id,
+                                    run.state.label(run.paused),
+                                    run.scope.label(),
+                                    run.mode.label(),
+                                    run.timer()
+                                ));
+                                egui::CollapsingHeader::new("source")
+                                    .id_salt(("chat_run_source", run.id))
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&run.source).monospace(),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
+                                if !run.input.is_empty() {
+                                    egui::CollapsingHeader::new("record / input")
+                                        .id_salt(("chat_run_input", run.id))
+                                        .show(ui, |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&run.input).monospace(),
+                                                )
+                                                .wrap(),
+                                            );
+                                        });
+                                }
+                                let hidden = run.output.len().saturating_sub(500);
+                                if hidden > 0 {
+                                    ui.colored_label(
+                                        k.faint,
+                                        format!("… {hidden} older retained output lines hidden"),
+                                    );
+                                }
+                                for line in run.output.iter().skip(hidden) {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(line).monospace().color(k.faint),
+                                        )
+                                        .wrap(),
+                                    );
+                                }
+                            });
                         });
                         ui.separator();
                     }
@@ -2432,20 +2516,8 @@ impl Editor {
                     .any(|turn| turn.role == kaos_core::sessions::Role::Model);
                 chat.session
                     .push(kaos_core::sessions::Role::User, said.clone());
-                let mut history = Vec::new();
                 let prior_turns = chat.session.turns.len().saturating_sub(1);
-                for turn in chat.session.turns.iter().take(prior_turns) {
-                    match turn.role {
-                        kaos_core::sessions::Role::User => {
-                            history.push((turn.text.clone(), String::new()));
-                        }
-                        kaos_core::sessions::Role::Model => {
-                            if let Some((_, answer)) = history.last_mut() {
-                                *answer = turn.text.clone();
-                            }
-                        }
-                    }
-                }
+                let history = recent_chat_history(&chat.session.turns[..prior_turns]);
                 let run_id = chat.run_id;
                 // Persist immediately: the terminal app saves on every turn for
                 // the same reason, so a crash loses nothing already said.
@@ -2513,11 +2585,12 @@ impl Editor {
             child: if child { "yes" } else { "no" },
             source: &run.source,
             input: &run.input,
-            output: &run.output,
+            output: run.output.as_slice(),
         };
         Some(render(&snapshot))
     }
 
+    #[cfg(test)]
     fn run_chat_snapshot(&self, id: u64) -> Option<String> {
         self.with_run_snapshot(id, kaos_core::chat::render_run_snapshot)
     }
@@ -3871,7 +3944,14 @@ impl Editor {
                                     },
                                 );
                             }
-                            for line in &run.output {
+                            let hidden = run.output.len().saturating_sub(2_000);
+                            if hidden > 0 {
+                                ui.colored_label(
+                                    k.faint,
+                                    format!("… {hidden} older retained lines hidden in this view"),
+                                );
+                            }
+                            for line in run.output.iter().skip(hidden) {
                                 let tone =
                                     if line.starts_with("result") || line.starts_with("complete") {
                                         k.ink
@@ -4223,7 +4303,14 @@ impl Editor {
                         if output.is_empty() {
                             ui.colored_label(k.faint, "(waiting for output)");
                         }
-                        for line in output {
+                        let hidden = output.len().saturating_sub(2_000);
+                        if hidden > 0 {
+                            ui.colored_label(
+                                k.faint,
+                                format!("… {hidden} older retained lines hidden in this view"),
+                            );
+                        }
+                        for line in output.iter().skip(hidden) {
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(line).monospace().color(k.faint),
@@ -4816,7 +4903,9 @@ impl Editor {
                     if father != id {
                         self.doc_mut().checkpoint();
                     }
-                    self.doc_mut().mandala.father_of(father, id);
+                    if self.doc_mut().mandala.father_of(father, id) {
+                        self.doc_mut().mandala.make_room_for_square(father);
+                    }
                     // The father-of link is keyed by its child node.
                     if angle {
                         self.doc_mut().angled.insert(id);

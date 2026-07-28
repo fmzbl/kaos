@@ -5,13 +5,20 @@
 //! conclave, inspection, models, help, and credentials—uses this one streamed
 //! task desk and the shared process supervisor.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use kaos_core::retained::RetainedLog;
 use kaos_core::run_model::{Lane, State};
 
 use crate::process::{Event, Job, Launch};
 use crate::runs::kaos_executable;
+
+const MAX_TASK_HISTORY: usize = 256;
+const MAX_ATTACHMENTS: usize = 16;
+const MAX_ATTACHMENT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 
 /// Capabilities represented by native visual documents rather than a command
 /// subprocess.
@@ -138,7 +145,7 @@ pub(crate) struct Task {
     pub(crate) label: String,
     pub(crate) state: State,
     pub(crate) lane: Lane,
-    pub(crate) output: Vec<String>,
+    pub(crate) output: RetainedLog,
     pub(crate) queued_at: Instant,
     pub(crate) started_at: Option<Instant>,
     pub(crate) elapsed: Option<Duration>,
@@ -273,7 +280,7 @@ impl Desk {
     }
 
     pub(crate) fn submit_auth(&mut self, kind: Kind) -> Option<u64> {
-        let output = match kind {
+        let output: RetainedLog = match kind {
             Kind::AuthStatus => kaos_agent::auth::status()
                 .into_iter()
                 .map(|(provider, variable, live, saved)| {
@@ -310,7 +317,9 @@ impl Desk {
                 return None;
             }
             _ => return None,
-        };
+        }
+        .into();
+        self.prune_history();
         let id = self.next_id;
         self.next_id += 1;
         self.tasks.push(Task {
@@ -344,6 +353,7 @@ impl Desk {
         needs_permission: bool,
         cwd: &Path,
     ) -> u64 {
+        self.prune_history();
         let id = self.next_id;
         self.next_id += 1;
         env.push((
@@ -371,7 +381,7 @@ impl Desk {
             label,
             state,
             lane: self.lane,
-            output: Vec::new(),
+            output: RetainedLog::default(),
             queued_at: Instant::now(),
             started_at: None,
             elapsed: None,
@@ -445,17 +455,35 @@ impl Desk {
         } else {
             cwd.join(raw)
         };
-        match std::fs::read_to_string(&path) {
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            if metadata.len() > MAX_ATTACHMENT_BYTES as u64 {
+                self.notice = Some(format!(
+                    "could not attach {}: {} byte per-file limit",
+                    path.display(),
+                    MAX_ATTACHMENT_BYTES
+                ));
+                return;
+            }
+        }
+        let read = std::fs::File::open(&path).and_then(|file| {
+            let mut text = String::new();
+            file.take((MAX_ATTACHMENT_BYTES + 1) as u64)
+                .read_to_string(&mut text)?;
+            Ok(text)
+        });
+        match read {
             Ok(text) => {
-                let bytes = text.len();
-                self.attachments.retain(|item| item.path != path);
-                self.attachments.push(Attachment {
-                    path: path.clone(),
-                    bytes,
-                    text,
-                });
-                self.attachment_path.clear();
-                self.notice = Some(format!("attached {} ({bytes} bytes)", path.display()));
+                if let Err(message) = self.store_attachment(path.clone(), text) {
+                    self.notice = Some(message);
+                } else {
+                    let bytes = self
+                        .attachments
+                        .iter()
+                        .find(|attachment| attachment.path == path)
+                        .map_or(0, |attachment| attachment.bytes);
+                    self.attachment_path.clear();
+                    self.notice = Some(format!("attached {} ({bytes} bytes)", path.display()));
+                }
             }
             Err(error) => {
                 self.notice = Some(format!("could not attach {}: {error}", path.display()));
@@ -465,9 +493,48 @@ impl Desk {
 
     pub(crate) fn attach_text(&mut self, label: impl Into<PathBuf>, text: String) {
         let path = label.into();
+        if let Err(message) = self.store_attachment(path, text) {
+            self.notice = Some(message);
+        }
+    }
+
+    fn store_attachment(&mut self, path: PathBuf, text: String) -> Result<(), String> {
         let bytes = text.len();
+        if bytes > MAX_ATTACHMENT_BYTES {
+            return Err(format!(
+                "could not attach {}: {} byte per-file limit",
+                path.display(),
+                MAX_ATTACHMENT_BYTES
+            ));
+        }
+        let existing = self
+            .attachments
+            .iter()
+            .find(|item| item.path == path)
+            .map_or(0, |item| item.bytes);
+        if existing == 0 && self.attachments.len() >= MAX_ATTACHMENTS {
+            return Err(format!(
+                "could not attach {}: {MAX_ATTACHMENTS} file limit",
+                path.display()
+            ));
+        }
+        let total = self
+            .attachments
+            .iter()
+            .map(|item| item.bytes)
+            .sum::<usize>()
+            .saturating_sub(existing)
+            .saturating_add(bytes);
+        if total > MAX_ATTACHMENT_TOTAL_BYTES {
+            return Err(format!(
+                "could not attach {}: {} byte attachment budget",
+                path.display(),
+                MAX_ATTACHMENT_TOTAL_BYTES
+            ));
+        }
         self.attachments.retain(|item| item.path != path);
         self.attachments.push(Attachment { path, bytes, text });
+        Ok(())
     }
 
     pub(crate) fn grant_selected(&mut self, access: ToolAccess, cwd: &Path) {
@@ -518,18 +585,28 @@ impl Desk {
         let Some(index) = self.tasks.iter().position(|task| task.id == id) else {
             return;
         };
-        let task = &self.tasks[index];
-        if task.command.is_empty() {
+        if self.tasks[index].command.is_empty() {
             self.tasks[index].state = State::Cancelled;
             self.tasks[index].output.push("empty command".to_string());
             return;
         }
+        // A launched child owns these values now. Keeping a second copy in the
+        // completed task made chat history quadratic because stdin already
+        // contains the preceding conversation.
+        let (args, env, stdin) = {
+            let task = &mut self.tasks[index];
+            (
+                std::mem::take(&mut task.command),
+                std::mem::take(&mut task.env),
+                task.stdin.take(),
+            )
+        };
         let launch = Launch {
             program: kaos_executable(),
-            args: task.command.clone(),
+            args,
             cwd: cwd.to_path_buf(),
-            env: task.env.clone(),
-            stdin: task.stdin.clone(),
+            env,
+            stdin,
             process_group: true,
         };
         match Job::spawn(id, launch) {
@@ -669,6 +746,9 @@ impl Desk {
                 .collect::<Vec<_>>()
                 .join("\n");
             let text = kaos_core::chat::clean_chat_reply(&text);
+            task.output.clear();
+            task.output
+                .push("reply       delivered to durable session".to_string());
             replies.push((
                 session,
                 if text.trim().is_empty() {
@@ -679,6 +759,17 @@ impl Desk {
             ));
         }
         replies
+    }
+
+    fn prune_history(&mut self) {
+        while self.tasks.len() >= MAX_TASK_HISTORY {
+            let Some(index) = self.tasks.iter().position(|task| {
+                task.state.terminal() && (task.session.is_none() || task.delivered)
+            }) else {
+                break;
+            };
+            self.tasks.remove(index);
+        }
     }
 }
 

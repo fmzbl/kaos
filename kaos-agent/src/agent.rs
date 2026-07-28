@@ -22,6 +22,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -86,6 +88,7 @@ static WS_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// — a context, banished when the working ends.
 pub struct Workspace {
     pub root: PathBuf,
+    cleanup_on_drop: bool,
 }
 
 impl Workspace {
@@ -100,7 +103,18 @@ impl Workspace {
         let root = std::env::temp_dir().join(format!("kaos-ws-{}-{nanos}-{n}", std::process::id()));
         fs::create_dir_all(&root)?;
         copy_tree(src, &root)?;
-        Ok(Workspace { root })
+        Ok(Workspace {
+            root,
+            cleanup_on_drop: true,
+        })
+    }
+
+    /// Operate on an existing directory without taking ownership of it.
+    fn attached(root: &Path) -> Workspace {
+        Workspace {
+            root: root.to_path_buf(),
+            cleanup_on_drop: false,
+        }
     }
 
     /// Read the named files (relative paths) into a map; missing files are skipped.
@@ -197,29 +211,82 @@ impl Workspace {
     /// (a full build, a benchmark) can widen the wait past [`Workspace::verify`]'s
     /// default (`KAOS_GATE_TIMEOUT_S` drives this in the agentic myth).
     pub fn verify_within(&self, cmd: &str, timeout_s: u64) -> (bool, String) {
-        let mut child = match Command::new("sh")
+        let mut command = Command::new("sh");
+        command
             .arg("-c")
             .arg(cmd)
             .current_dir(&self.root)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => return (false, format!("verifier failed to launch: {e}")),
         };
+        let process_group = child.id();
 
         fn drain<R: std::io::Read + Send + 'static>(
             src: Option<R>,
-        ) -> std::thread::JoinHandle<String> {
+        ) -> std::sync::mpsc::Receiver<String> {
+            const MAX_GATE_STREAM_BYTES: usize = 2 * 1024 * 1024;
+            let (sender, receiver) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let mut s = String::new();
+                let mut retained = Vec::with_capacity(16 * 1024);
+                let mut discarded = 0usize;
                 if let Some(mut r) = src {
-                    let _ = std::io::Read::read_to_string(&mut r, &mut s);
+                    let mut chunk = [0u8; 8192];
+                    loop {
+                        let count = match std::io::Read::read(&mut r, &mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(count) => count,
+                        };
+                        let room = MAX_GATE_STREAM_BYTES.saturating_sub(retained.len());
+                        let keep = count.min(room);
+                        retained.extend_from_slice(&chunk[..keep]);
+                        discarded += count - keep;
+                    }
                 }
-                s
-            })
+                let mut output = String::from_utf8_lossy(&retained).into_owned();
+                if discarded > 0 {
+                    output.push_str(&format!(
+                        "\n[... {discarded} verifier output bytes omitted ...]\n"
+                    ));
+                }
+                let _ = sender.send(output);
+            });
+            receiver
+        }
+
+        fn kill_process_tree(child: &mut std::process::Child, process_group: u32) {
+            #[cfg(unix)]
+            {
+                let _ = Command::new("kill")
+                    .arg("-KILL")
+                    .arg("--")
+                    .arg(format!("-{process_group}"))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            #[cfg(not(unix))]
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        fn collect(
+            output: std::sync::mpsc::Receiver<String>,
+            errors: std::sync::mpsc::Receiver<String>,
+        ) -> String {
+            let wait = std::time::Duration::from_secs(1);
+            let mut log = output.recv_timeout(wait).unwrap_or_else(|_| {
+                "[... verifier stdout remained open after its process exited ...]\n".to_string()
+            });
+            log.push_str(&errors.recv_timeout(wait).unwrap_or_else(|_| {
+                "[... verifier stderr remained open after its process exited ...]\n".to_string()
+            }));
+            log
         }
         let out_reader = drain(child.stdout.take());
         let err_reader = drain(child.stderr.take());
@@ -228,26 +295,28 @@ impl Workspace {
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let mut log = out_reader.join().unwrap_or_default();
-                    log.push_str(&err_reader.join().unwrap_or_default());
+                    // A verifier is a bounded job, not a daemon launcher. Clear
+                    // background descendants that inherited its pipes before
+                    // collecting output, even when the shell itself exited.
+                    kill_process_tree(&mut child, process_group);
+                    let log = collect(out_reader, err_reader);
                     return (status.success(), log);
                 }
                 Ok(None) => {
                     if start.elapsed() > std::time::Duration::from_secs(timeout_s) {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        // Do NOT join the drain threads here: a grandchild (e.g. the
-                        // `sleep` under `sh -c`) can outlive the killed shell and keep
-                        // the pipe open, so joining would block until it exits — the
-                        // exact wall-time stall the timeout exists to prevent. Detach
-                        // them; they end on their own when the pipe finally closes.
-                        drop(out_reader);
-                        drop(err_reader);
-                        return (false, format!("gate timed out after {timeout_s}s"));
+                        kill_process_tree(&mut child, process_group);
+                        let mut log = collect(out_reader, err_reader);
+                        log.push_str(&format!("gate timed out after {timeout_s}s"));
+                        return (false, log);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-                Err(e) => return (false, format!("verifier wait failed: {e}")),
+                Err(e) => {
+                    kill_process_tree(&mut child, process_group);
+                    let mut log = collect(out_reader, err_reader);
+                    log.push_str(&format!("verifier wait failed: {e}"));
+                    return (false, log);
+                }
             }
         }
     }
@@ -255,7 +324,9 @@ impl Workspace {
 
 impl Drop for Workspace {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        if self.cleanup_on_drop {
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 }
 
@@ -564,12 +635,7 @@ pub fn solve(
     let shipped = winner.is_some();
     if let Some(p) = &winner {
         // Apply the winning, verified patch to the real target.
-        let real = Workspace {
-            root: target.to_path_buf(),
-        };
-        let res = real.apply(p);
-        std::mem::forget(real); // do NOT delete the user's target on drop
-        res?;
+        Workspace::attached(target).apply(p)?;
     }
 
     Ok(Verdict {
@@ -703,6 +769,20 @@ mod tests {
             ws.root.clone()
         };
         assert!(!root.exists(), "workspace should be removed on drop");
+        let _ = fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn attached_workspace_never_owns_the_real_target() {
+        let target = make_target("X");
+        {
+            let workspace = Workspace::attached(&target);
+            assert_eq!(workspace.root, target);
+        }
+        assert!(
+            target.exists(),
+            "dropping an attached view deleted real work"
+        );
         let _ = fs::remove_dir_all(&target);
     }
 
@@ -883,11 +963,8 @@ mod tests {
         let mut rng = Rng::new(4);
         let v = solve(&target, "fix add", &foi_refs, &verify, &agents, &mut rng).unwrap();
         assert!(v.shipped, "fix should verify and ship");
-        let after = Workspace {
-            root: target.clone(),
-        };
+        let after = Workspace::attached(&target);
         let ok = after.verify(&verify).0;
-        std::mem::forget(after);
         assert!(ok, "target should pass after the fix is shipped");
         let _ = fs::remove_dir_all(&target);
     }

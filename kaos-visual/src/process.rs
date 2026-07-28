@@ -5,12 +5,12 @@
 //! ownership, cancellation, and Unix pause/resume. Keeping that here prevents
 //! each UI surface from growing its own subtly different subprocess wrapper.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -71,7 +71,7 @@ impl Job {
             let _ = child.kill();
             return Err("could not capture child stderr".to_string());
         };
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         // One token per reader, so the waiter can tell when both have finished
         // without joining them — see the settle loop below for why a join is
         // the wrong tool here.
@@ -163,6 +163,9 @@ impl Drop for Job {
 /// announces `Done`. Long enough for any burst a reader is mid-flush on, short
 /// enough that a stranded descendant cannot wedge a run row open.
 const SETTLE: Duration = Duration::from_millis(750);
+/// Backpressure budget per child. Together with the bounded-line reader this
+/// puts a hard ceiling on output waiting between a subprocess and the UI.
+const EVENT_QUEUE_CAPACITY: usize = 64;
 
 /// Stream one pipe into the shared channel, a line at a time.
 ///
@@ -170,23 +173,32 @@ const SETTLE: Duration = Duration::from_millis(750);
 /// EOF, and dropping it is what tells the waiter the stream is finished.
 fn spawn_reader(
     reader: impl std::io::Read + Send + 'static,
-    sender: mpsc::Sender<Event>,
+    sender: SyncSender<Event>,
     reading: Arc<()>,
 ) {
     thread::spawn(move || {
         let _reading = reading;
-        for line in BufReader::new(reader).lines() {
-            match line {
-                Ok(line) => {
+        let mut reader = BufReader::new(reader);
+        loop {
+            match kaos_core::retained::read_bounded_line(
+                &mut reader,
+                kaos_core::retained::DEFAULT_MAX_LINE_BYTES,
+            ) {
+                Ok(Some(line)) => {
                     // The child writes for a terminal: colours, hyperlinks,
                     // carriage returns. Nothing in this editor renders an escape
                     // sequence, so an unstripped line reaches the reader as the
                     // literal digits of its own colour codes. Cleaned once here,
                     // at the only place child output enters, rather than at each
                     // pane that shows it.
-                    let _ =
-                        sender.send(Event::Line(kaos_core::chat::strip_terminal_escapes(&line)));
+                    if sender
+                        .send(Event::Line(kaos_core::chat::strip_terminal_escapes(&line)))
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
+                Ok(None) => break,
                 Err(error) => {
                     let _ = sender.send(Event::Line(format!("stream error: {error}")));
                     break;
@@ -329,6 +341,22 @@ mod tests {
         let (lines, code) = collect(&job, Duration::from_secs(10));
         assert_eq!(code, Some(0));
         assert_eq!(lines, vec!["a program on stdin".to_string()]);
+    }
+
+    #[test]
+    fn one_newline_free_record_is_capped_before_it_reaches_the_event_queue() {
+        let mut launch = shell("cat");
+        launch.stdin = Some(format!(
+            "{}\nnext\n",
+            "x".repeat(kaos_core::retained::DEFAULT_MAX_LINE_BYTES * 4)
+        ));
+        let job = Job::spawn(6, launch).expect("spawn");
+        let (lines, code) = collect(&job, Duration::from_secs(10));
+
+        assert_eq!(code, Some(0));
+        assert!(lines[0].len() <= kaos_core::retained::DEFAULT_MAX_LINE_BYTES);
+        assert!(lines[0].ends_with("[line truncated]"));
+        assert_eq!(lines[1], "next");
     }
 
     #[test]

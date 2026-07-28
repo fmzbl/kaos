@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use kaos_core::retained::RetainedLog;
 use rebis_lang::{Expr, ModuleName, ModuleResolver, Record};
 
 /// Vim-compatible editing modes supported by the workspace.
@@ -2652,7 +2653,7 @@ pub struct Workspace {
     /// Complete stream for the current/most recent hosted run. Panel
     /// navigation only changes the projection flags below; it never clears
     /// this retained execution state.
-    run_output: Vec<String>,
+    run_output: RetainedLog,
     run_output_visible: bool,
     result_only_visible: bool,
     final_output: Option<String>,
@@ -2733,7 +2734,7 @@ impl Workspace {
             canonical: None,
             record: None,
             record_text: None,
-            run_output: Vec::new(),
+            run_output: RetainedLog::default(),
             run_output_visible: false,
             result_only_visible: false,
             final_output: None,

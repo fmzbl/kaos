@@ -8,12 +8,12 @@
 //! long/agent commands stream live. The model is passed down via `KAOS_MODEL`.
 
 use std::collections::BTreeMap;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -34,6 +34,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
+
+use kaos_core::retained::RetainedLog;
 
 use crate::rebis_workspace::{
     self, handle_edit_key, EditKey, EditModifiers, Highlight, Mode as RebisMode, RunRequest,
@@ -365,6 +367,20 @@ struct Job {
     owns_process_group: bool,
 }
 
+impl Drop for Job {
+    fn drop(&mut self) {
+        let mut child = self
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.owns_process_group {
+            let _ = signal_process(child.id(), true, "-KILL");
+        } else {
+            let _ = child.kill();
+        }
+    }
+}
+
 struct ChildTransport {
     args: Vec<String>,
     stdin: Option<String>,
@@ -421,6 +437,40 @@ struct SigilChatJob {
 struct RunChatTurn {
     question: String,
     answer: String,
+}
+
+fn recent_run_chat_history(turns: &[RunChatTurn]) -> Vec<(String, String)> {
+    let limit = kaos_core::chat::MAX_CHAT_HISTORY_BYTES;
+    let mut bytes = 0usize;
+    let mut recent = Vec::new();
+    for turn in turns.iter().rev() {
+        let turn_bytes = turn.question.len().saturating_add(turn.answer.len());
+        if !recent.is_empty() && bytes.saturating_add(turn_bytes) > limit {
+            break;
+        }
+        recent.push((
+            bounded_context_copy(&turn.question, limit / 2),
+            bounded_context_copy(&turn.answer, limit / 2),
+        ));
+        bytes = bytes.saturating_add(turn_bytes);
+        if bytes >= limit {
+            break;
+        }
+    }
+    recent.reverse();
+    recent
+}
+
+fn bounded_context_copy(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    const MARKER: &str = "[... earlier text omitted ...]\n";
+    let mut start = text.len() - max_bytes.saturating_sub(MARKER.len());
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("{MARKER}{}", &text[start..])
 }
 
 const SAVED_REBIS_RUN_HEADER: &str = "KAOS_REBIS_SAVED_RUN_V1\n";
@@ -612,6 +662,10 @@ enum QueuedWork {
 /// Shared lifecycle vocabulary; this frontend adds process/timer state but
 /// does not invent another meaning for queued, running, or complete.
 type RebisRunState = kaos_core::run_model::State;
+const MAX_REBIS_RUN_HISTORY: usize = 128;
+const MAX_REBIS_RUN_DISPLAY_LINES: usize = 2_000;
+const MAX_RUN_CHAT_REPLY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RUN_CHAT_TURNS: usize = 128;
 
 /// Durable UI history for one submitted run. Queued requests begin empty,
 /// receive their text stream once active, and remain explorable after exit.
@@ -639,7 +693,7 @@ struct RebisRunEntry {
     scope: RunScope,
     preview: String,
     state: RebisRunState,
-    output: Vec<String>,
+    output: RetainedLog,
     expanded: bool,
     /// Submission time lets queued and permission-gated runs expose how long
     /// they have waited before the model process actually starts.
@@ -659,9 +713,9 @@ struct RebisRunEntry {
     paused_total: Duration,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RebisRunView {
-    entry: RebisRunEntry,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RebisRunView<'a> {
+    entry: &'a RebisRunEntry,
     /// One-based position in the shared FIFO, including queued chat work.
     queue_position: Option<usize>,
 }
@@ -1218,6 +1272,7 @@ impl App {
         state: RebisRunState,
         parallel: bool,
     ) -> u64 {
+        self.prune_rebis_run_history();
         let id = self.next_rebis_run_id;
         self.next_rebis_run_id += 1;
         let now = Instant::now();
@@ -1254,7 +1309,7 @@ impl App {
             scope: request.scope,
             preview: rebis_source_preview(&request.source),
             state,
-            output: Vec::new(),
+            output: RetainedLog::default(),
             expanded: state == RebisRunState::Running,
             queued_at: now,
             started_at: already_started.then_some(now),
@@ -1270,6 +1325,25 @@ impl App {
         id
     }
 
+    fn prune_rebis_run_history(&mut self) {
+        while self.rebis_runs.len() >= MAX_REBIS_RUN_HISTORY {
+            let Some(index) = self.rebis_runs.iter().position(|run| run.state.terminal()) else {
+                break;
+            };
+            let run = self.rebis_runs.remove(index);
+            if run.saved_checkpoint_path.as_ref() != Some(&run.checkpoint_path) {
+                let _ = std::fs::remove_file(&run.checkpoint_path);
+            }
+            let _ = std::fs::remove_file(&run.directive_path);
+            let _ = std::fs::remove_file(&run.inlet_path);
+            self.run_chat_sessions.remove(&run.id);
+            self.run_chat_history.remove(&run.id);
+            self.run_chat_replies.remove(&run.id);
+            self.run_chat_context_shown.remove(&run.id);
+        }
+        self.clamp_rebis_run_choice();
+    }
+
     fn has_active_jobs(&self) -> bool {
         self.job.is_some()
             || !self.parallel_jobs.is_empty()
@@ -1281,31 +1355,8 @@ impl App {
             })
     }
 
-    fn rebis_run_views(&self) -> Vec<RebisRunView> {
-        self.rebis_runs
-            .iter()
-            .cloned()
-            .map(|entry| {
-                let queue_position = self
-                    .queue
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, work)| {
-                        matches!(work, QueuedWork::Rebis { id, .. } if *id == entry.id)
-                            .then_some(index + 1)
-                    })
-                    .or_else(|| {
-                        self.parallel_gate_queue
-                            .iter()
-                            .position(|pending| pending.id == entry.id)
-                            .map(|index| index + 1)
-                    });
-                RebisRunView {
-                    entry,
-                    queue_position,
-                }
-            })
-            .collect()
+    fn rebis_run_views(&self) -> Vec<RebisRunView<'_>> {
+        rebis_run_views_for(&self.rebis_runs, &self.queue, &self.parallel_gate_queue)
     }
 
     fn rebis_run_max_top(&self) -> usize {
@@ -1891,7 +1942,8 @@ impl App {
         );
         let queue_len = self.queue.len();
         self.clamp_rebis_run_choice();
-        let rebis_runs = self.rebis_run_views();
+        let rebis_runs =
+            rebis_run_views_for(&self.rebis_runs, &self.queue, &self.parallel_gate_queue);
         let selected_model = self.model.clone();
         let config_editor = self.config_editor;
         if let Some(workspace) = &mut self.rebis {
@@ -2576,10 +2628,20 @@ impl App {
         if text.trim().is_empty() {
             return;
         }
-        self.run_chat_replies
-            .entry(id)
-            .or_default()
-            .push_str(&format!("{text}\n"));
+        let reply = self.run_chat_replies.entry(id).or_default();
+        if reply.len() >= MAX_RUN_CHAT_REPLY_BYTES {
+            return;
+        }
+        let room = MAX_RUN_CHAT_REPLY_BYTES.saturating_sub(reply.len());
+        let mut keep = text.len().min(room.saturating_sub(1));
+        while !text.is_char_boundary(keep) {
+            keep -= 1;
+        }
+        reply.push_str(&text[..keep]);
+        reply.push('\n');
+        if keep < text.len() {
+            reply.push_str("[... chat reply truncated ...]\n");
+        }
     }
 
     fn push_run_chat_stream_line(&mut self, id: u64, line: &str) {
@@ -2614,6 +2676,17 @@ impl App {
             } else {
                 answer
             };
+        }
+        if let Some(turns) = self.run_chat_history.get_mut(&id) {
+            while turns.len() > MAX_RUN_CHAT_TURNS
+                || turns
+                    .iter()
+                    .map(|turn| turn.question.len() + turn.answer.len())
+                    .sum::<usize>()
+                    > MAX_RUN_CHAT_REPLY_BYTES
+            {
+                turns.remove(0);
+            }
         }
     }
 
@@ -2655,10 +2728,10 @@ impl App {
                 self.push_ansi_as_lines(content);
             }
         }
-        // Keep the transcript bounded, but generously — trimming deletes old
-        // commands, so only do it far beyond a normal session, and only when NOT
-        // scrolled up (so what you're reading never shifts under you).
-        if self.follow && self.transcript.len() > 50_000 {
+        // Keep the transcript bounded even while the reader is scrolled up.
+        // A paused viewport must not turn an endless subprocess into an endless
+        // allocation; the generous low-water trim keeps shifts very rare.
+        if self.transcript.len() > 50_000 {
             self.transcript.drain(0..10_000);
             // Indices shifted by 10_000 — rebase or drop the open-fold pointer.
             self.open_fold = self.open_fold.and_then(|i| i.checked_sub(10_000));
@@ -2997,7 +3070,8 @@ impl App {
     /// A left click focuses the Rebis pane under the pointer — the mouse
     /// counterpart of Ctrl-W h/l, and the only focus path without vim.
     fn on_rebis_click(&mut self, column: u16, row: u16, size: (u16, u16)) {
-        let rebis_runs = self.rebis_run_views();
+        let rebis_runs =
+            rebis_run_views_for(&self.rebis_runs, &self.queue, &self.parallel_gate_queue);
         let Some(workspace) = &mut self.rebis else {
             return;
         };
@@ -3611,7 +3685,7 @@ impl App {
             scope: run.scope,
             parallel: run.parallel,
             chaos: run.chaos,
-            output: run.output.clone(),
+            output: run.output.to_vec(),
             elapsed: active_rebis_run_elapsed(run),
             pause_reason: run
                 .pause_reason
@@ -3714,7 +3788,7 @@ impl App {
             run.saved_checkpoint_path = Some(checkpoint_path.clone());
             run.checkpoint_path = checkpoint_path;
             run.chaos = saved.chaos;
-            run.output = saved.output;
+            run.output = saved.output.into();
             run.output.push(
                 "restored    Ⅱ saved sigil checkpoint · p reconstructs the unfinished prompt"
                     .to_string(),
@@ -3888,12 +3962,7 @@ impl App {
         let history = self
             .run_chat_history
             .get(&id)
-            .map(|turns| {
-                turns
-                    .iter()
-                    .map(|turn| (turn.question.clone(), turn.answer.clone()))
-                    .collect::<Vec<_>>()
-            })
+            .map(|turns| recent_run_chat_history(turns))
             .unwrap_or_default();
         self.with_run_snapshot(id, |snapshot| {
             kaos_core::chat::render_run_chat(snapshot, &history, question)
@@ -3920,7 +3989,7 @@ impl App {
             child: if child { "yes" } else { "no" },
             source: &run.request.source,
             input: &run.request.input,
-            output: &run.output,
+            output: run.output.as_slice(),
         };
         Some(render(&snapshot))
     }
@@ -3948,25 +4017,43 @@ impl App {
     }
 
     fn session_history_text(&self, current: &str) -> String {
-        self.session
+        let mut end = self.session.turns.len();
+        if self
+            .session
             .turns
+            .last()
+            .is_some_and(|turn| turn.role == crate::sessions::Role::User && turn.text == current)
+        {
+            end -= 1;
+        }
+        let limit = kaos_core::chat::MAX_CHAT_HISTORY_BYTES;
+        let mut bytes = 0usize;
+        let mut start = end;
+        for (index, turn) in self.session.turns[..end].iter().enumerate().rev() {
+            if start < end && bytes.saturating_add(turn.text.len()) > limit {
+                break;
+            }
+            start = index;
+            bytes = bytes.saturating_add(turn.text.len());
+            if bytes >= limit {
+                break;
+            }
+        }
+        let mut history = self.session.turns[start..end]
             .iter()
-            .enumerate()
-            .filter(|(index, turn)| {
-                !(*index + 1 == self.session.turns.len()
-                    && turn.role == crate::sessions::Role::User
-                    && turn.text == current)
-            })
-            .map(|(_, turn)| turn)
             .map(|turn| {
                 let role = match turn.role {
                     crate::sessions::Role::User => "USER",
                     crate::sessions::Role::Model => "ASSISTANT",
                 };
-                format!("{role}: {}", turn.text)
+                format!("{role}: {}", bounded_context_copy(&turn.text, limit / 2))
             })
             .collect::<Vec<_>>()
-            .join("\n\n")
+            .join("\n\n");
+        if start > 0 {
+            history.insert_str(0, "[... earlier conversation omitted ...]\n\n");
+        }
+        history
     }
 
     fn submit_run_chat(&mut self, id: u64, question: &str) {
@@ -4899,7 +4986,8 @@ impl App {
                 run.expanded = true;
                 run.output = vec![
                     "permission  waiting behind an earlier Rebis authority decision".to_string(),
-                ];
+                ]
+                .into();
             }
             self.parallel_gate_queue.push(PendingRebisRun {
                 id,
@@ -4930,7 +5018,8 @@ impl App {
                 ),
                 "permission  agree to these changes? [y] once · [a] remember for this sigil · [n/Esc] deny"
                     .to_string(),
-            ];
+            ]
+            .into();
         }
         self.pending_rebis = Some(PendingRebisRun {
             id,
@@ -5363,9 +5452,10 @@ impl App {
                     self.note("could not capture child stderr");
                     return false;
                 };
-                let (tx, rx) = mpsc::channel();
-                spawn_reader(stdout, tx.clone(), false);
-                spawn_reader(stderr, tx.clone(), true);
+                let (tx, rx) = mpsc::sync_channel(PROCESS_EVENT_QUEUE_CAPACITY);
+                let reading = Arc::new(());
+                spawn_reader(stdout, tx.clone(), false, Arc::clone(&reading));
+                spawn_reader(stderr, tx.clone(), true, Arc::clone(&reading));
                 let child = Arc::new(Mutex::new(child));
                 {
                     let child = child.clone();
@@ -5381,6 +5471,10 @@ impl App {
                             }
                             thread::sleep(Duration::from_millis(30));
                         };
+                        let settle = Instant::now() + PROCESS_STREAM_SETTLE;
+                        while Arc::strong_count(&reading) > 1 && Instant::now() < settle {
+                            thread::sleep(Duration::from_millis(5));
+                        }
                         let _ = tx.send(Msg::Done(code));
                     });
                 }
@@ -5912,6 +6006,8 @@ fn signal_process(pid: u32, process_group: bool, signal: &str) -> bool {
         .arg(signal)
         .arg("--")
         .arg(target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -5981,7 +6077,35 @@ fn rebis_run_timer(run: &RebisRunEntry) -> String {
     }
 }
 
-fn rebis_run_tree_rows(runs: &[RebisRunView]) -> Vec<RebisRunTreeRow> {
+fn rebis_run_views_for<'a>(
+    runs: &'a [RebisRunEntry],
+    queue: &[QueuedWork],
+    parallel_gate_queue: &[PendingRebisRun],
+) -> Vec<RebisRunView<'a>> {
+    runs.iter()
+        .map(|entry| {
+            let queue_position = queue
+                .iter()
+                .enumerate()
+                .find_map(|(index, work)| {
+                    matches!(work, QueuedWork::Rebis { id, .. } if *id == entry.id)
+                        .then_some(index + 1)
+                })
+                .or_else(|| {
+                    parallel_gate_queue
+                        .iter()
+                        .position(|pending| pending.id == entry.id)
+                        .map(|index| index + 1)
+                });
+            RebisRunView {
+                entry,
+                queue_position,
+            }
+        })
+        .collect()
+}
+
+fn rebis_run_tree_rows(runs: &[RebisRunView<'_>]) -> Vec<RebisRunTreeRow> {
     let mut rows = Vec::new();
     for (index, run) in runs.iter().enumerate() {
         rows.push(RebisRunTreeRow::Header(index));
@@ -6000,7 +6124,19 @@ fn rebis_run_tree_rows(runs: &[RebisRunView]) -> Vec<RebisRunTreeRow> {
                 });
             } else {
                 let mut depth = 0usize;
-                for line in &run.entry.output {
+                let hidden = run
+                    .entry
+                    .output
+                    .len()
+                    .saturating_sub(MAX_REBIS_RUN_DISPLAY_LINES);
+                if hidden > 0 {
+                    rows.push(RebisRunTreeRow::Output {
+                        run: index,
+                        depth,
+                        text: format!("… {hidden} older retained lines hidden"),
+                    });
+                }
+                for line in run.entry.output.iter().skip(hidden) {
                     match crate::fold::classify(line) {
                         crate::fold::Marker::Open(title) => {
                             let title = title.trim();
@@ -6038,7 +6174,7 @@ fn rebis_run_tree_rows(runs: &[RebisRunView]) -> Vec<RebisRunTreeRow> {
 /// Expand logical run-output lines into pane-width display rows. The durable
 /// history remains byte-for-byte intact; only this projection wraps it, so code
 /// and model text continue below the right edge instead of disappearing there.
-fn rebis_run_display_rows(runs: &[RebisRunView], panel_width: usize) -> Vec<RebisRunTreeRow> {
+fn rebis_run_display_rows(runs: &[RebisRunView<'_>], panel_width: usize) -> Vec<RebisRunTreeRow> {
     let content_width = panel_width.saturating_sub(2).max(1); // inner RUNS border
     let mut display = Vec::new();
     for row in rebis_run_tree_rows(runs) {
@@ -6113,7 +6249,7 @@ fn rebis_run_browser_layout(
 fn draw_rebis_workspace(
     workspace: &mut RebisWorkspace,
     queue_len: usize,
-    rebis_runs: &[RebisRunView],
+    rebis_runs: &[RebisRunView<'_>],
     run_choice: usize,
     run_top: usize,
     chrome: RebisWorkspaceChrome<'_>,
@@ -6336,7 +6472,7 @@ fn draw_rebis_workspace(
                             RebisRunState::Complete => "✓ DONE".to_string(),
                             RebisRunState::Cancelled => "× CANCELLED".to_string(),
                         };
-                        let timer = rebis_run_timer(&run.entry);
+                        let timer = rebis_run_timer(run.entry);
                         let duration = timer
                             .split_once(' ')
                             .map_or(timer.as_str(), |(_, duration)| duration);
@@ -6806,19 +6942,27 @@ fn rebis_operator_style() -> Style {
     Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
 }
 
-fn spawn_reader(r: impl Read + Send + 'static, tx: Sender<Msg>, is_err: bool) {
+const PROCESS_EVENT_QUEUE_CAPACITY: usize = 64;
+const PROCESS_STREAM_SETTLE: Duration = Duration::from_millis(750);
+
+fn spawn_reader(
+    r: impl Read + Send + 'static,
+    tx: SyncSender<Msg>,
+    is_err: bool,
+    reading: Arc<()>,
+) {
     thread::spawn(move || {
+        let _reading = reading;
         let mut br = BufReader::new(r);
-        let mut buf = Vec::new();
         loop {
-            buf.clear();
-            match br.read_until(b'\n', &mut buf) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let s = String::from_utf8_lossy(&buf);
-                    let line = s.trim_end_matches(['\n', '\r']);
+            match kaos_core::retained::read_bounded_line(
+                &mut br,
+                kaos_core::retained::DEFAULT_MAX_LINE_BYTES,
+            ) {
+                Ok(None) => break,
+                Ok(Some(line)) => {
                     // \r progress: show only what a terminal would (after the last \r).
-                    let line = line.rsplit('\r').next().unwrap_or(line);
+                    let line = line.rsplit('\r').next().unwrap_or(&line);
                     let payload = if is_err {
                         format!("\x1b[2;38;2;150;140;140m{line}\x1b[0m")
                     } else {
@@ -7271,7 +7415,8 @@ mod tests {
         app.rebis_runs[0].output = vec![
             "prompt   question".to_string(),
             "result   answer".to_string(),
-        ];
+        ]
+        .into();
 
         app.show_run_chat_snapshot(id);
 
@@ -8667,7 +8812,7 @@ mod tests {
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
         run.state = RebisRunState::Complete;
         run.expanded = false;
-        run.output = vec!["first streamed line".to_string(), "final value".to_string()];
+        run.output = vec!["first streamed line".to_string(), "final value".to_string()].into();
 
         app.on_rebis_key(KeyCode::Tab, KeyModifiers::NONE);
         assert!(app.rebis_runs[0].expanded);
@@ -8719,7 +8864,8 @@ mod tests {
             "   2 $ cargo test".to_string(),
             "model    parser repaired and verified".to_string(),
             "\u{1e}FOLD_CLOSE".to_string(),
-        ];
+        ]
+        .into();
 
         let rows = rebis_run_tree_rows(&app.rebis_run_views());
         assert!(rows.iter().any(|row| matches!(
@@ -8824,7 +8970,7 @@ mod tests {
         let output = format!("BEGIN-{}-END-UNTRUNCATED", "x".repeat(160));
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
         run.expanded = true;
-        run.output = vec![output.clone()];
+        run.output = vec![output.clone()].into();
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
@@ -8865,7 +9011,7 @@ mod tests {
         let title = "Rebis agent 1 · Design a falsifiable ritual whose complete instruction must remain visible";
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
         run.expanded = true;
-        run.output = vec![format!("\u{1e}FOLD_OPEN\u{1f}{title}")];
+        run.output = vec![format!("\u{1e}FOLD_OPEN\u{1f}{title}")].into();
 
         let rows = rebis_run_display_rows(&app.rebis_run_views(), 34);
         let chunks = rows
@@ -8893,7 +9039,7 @@ mod tests {
         let title = "model turn 123 · complete response that wraps across several narrow rows";
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
         run.expanded = true;
-        run.output = vec![format!("\u{1e}FOLD_OPEN\u{1f}{title}")];
+        run.output = vec![format!("\u{1e}FOLD_OPEN\u{1f}{title}")].into();
 
         let rows = rebis_run_display_rows(&app.rebis_run_views(), 32);
         let model_chunks = rows

@@ -42,8 +42,9 @@
 //! This module is pure and std-only — no UI, no rendering, no I/O — so the
 //! editor front-end is a thin shell over it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::sync::OnceLock;
 
 /// Stable handle for a node. Ids are never reused, so a handle held by the UI
 /// stays valid (or stays dangling) across edits rather than silently retargeting.
@@ -775,11 +776,255 @@ impl View {
 }
 
 /// A drawn mandala: forms plus the arrows between them.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 pub struct Mandala {
     nodes: Vec<Node>,
     arrows: Vec<Arrow>,
     next_id: u32,
+    /// Derived presentation geometry. It is deliberately absent from clones:
+    /// document history stores the drawing, not another copy of its cache.
+    geometry: OnceLock<MandalaGeometry>,
+}
+
+#[derive(Debug, Default)]
+struct MandalaGeometry {
+    fits: HashMap<NodeId, (f64, f64)>,
+    extents: HashMap<NodeId, (f64, f64)>,
+    inlined: HashSet<NodeId>,
+}
+
+impl Clone for Mandala {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: self.nodes.clone(),
+            arrows: self.arrows.clone(),
+            next_id: self.next_id,
+            geometry: OnceLock::new(),
+        }
+    }
+}
+
+impl Default for Mandala {
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            arrows: Vec::new(),
+            next_id: 0,
+            geometry: OnceLock::new(),
+        }
+    }
+}
+
+impl MandalaGeometry {
+    fn from_mandala(mandala: &Mandala) -> Self {
+        let squares = mandala
+            .nodes
+            .iter()
+            .filter(|node| node.form == Form::Square)
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        let square_indices = squares
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect::<HashMap<_, _>>();
+
+        // `interior` is structural and iterative. Compute it exactly once per
+        // square: re-walking it from every extent query was the source of the
+        // exponential behaviour in deeply nested drawings.
+        let mut inlined = HashSet::new();
+        let interiors = squares
+            .iter()
+            .map(|id| {
+                let mut interior = mandala.interior(*id);
+                // A recursive father-of path can lead back to its square. A
+                // box is never its own contents, even when source validation
+                // will later report that structural cycle.
+                interior.remove(id);
+                inlined.extend(interior.iter().copied());
+                interior.into_iter().collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        // A square depends on the extent of every nested square. Collapse
+        // strongly connected components before sizing: a recursive component
+        // has no finite padded fixed point, so internal references use the
+        // member's hand/base size while all acyclic dependencies retain their
+        // exact computed extent.
+        let dependencies = interiors
+            .iter()
+            .map(|interior| {
+                interior
+                    .iter()
+                    .filter_map(|id| square_indices.get(id).copied())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let components = strongly_connected_components(&dependencies);
+        let component_count = components
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |largest| largest + 1);
+        let mut members = vec![Vec::new(); component_count];
+        for (square, component) in components.iter().copied().enumerate() {
+            members[component].push(square);
+        }
+
+        let mut component_dependencies = vec![Vec::new(); component_count];
+        for (square, nested) in dependencies.iter().enumerate() {
+            let component = components[square];
+            for nested in nested {
+                let nested_component = components[*nested];
+                if nested_component != component {
+                    component_dependencies[component].push(nested_component);
+                }
+            }
+        }
+        for dependencies in &mut component_dependencies {
+            dependencies.sort_unstable();
+            dependencies.dedup();
+        }
+        let mut dependents = vec![Vec::new(); component_count];
+        for (component, dependencies) in component_dependencies.iter().enumerate() {
+            for dependency in dependencies {
+                dependents[*dependency].push(component);
+            }
+        }
+        let mut pending = component_dependencies
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>();
+        let mut ready = pending
+            .iter()
+            .enumerate()
+            .filter_map(|(component, count)| (*count == 0).then_some(component))
+            .collect::<VecDeque<_>>();
+
+        let mut fits = mandala
+            .nodes
+            .iter()
+            .map(|node| (node.id, (NODE_R, NODE_RY)))
+            .collect::<HashMap<_, _>>();
+        let mut extents = mandala
+            .nodes
+            .iter()
+            .map(|node| (node.id, base_extent(node)))
+            .collect::<HashMap<_, _>>();
+
+        while let Some(component) = ready.pop_front() {
+            for square_index in &members[component] {
+                let square_id = squares[*square_index];
+                let Some(square) = mandala.node(square_id) else {
+                    continue;
+                };
+                let mut fit = (NODE_R, NODE_RY);
+                for inner_id in &interiors[*square_index] {
+                    let Some(inner) = mandala.node(*inner_id) else {
+                        continue;
+                    };
+                    let child_extent = square_indices.get(inner_id).map_or_else(
+                        || base_extent(inner),
+                        |inner_index| {
+                            if components[*inner_index] == component {
+                                base_extent(inner)
+                            } else {
+                                extents
+                                    .get(inner_id)
+                                    .copied()
+                                    .unwrap_or_else(|| base_extent(inner))
+                            }
+                        },
+                    );
+                    fit.0 = fit
+                        .0
+                        .max((inner.x - square.x).abs() + child_extent.0 + MEDIATOR_PAD);
+                    fit.1 = fit
+                        .1
+                        .max((inner.y - square.y).abs() + child_extent.1 + MEDIATOR_PAD);
+                }
+                fits.insert(square_id, fit);
+                let base = base_extent(square);
+                extents.insert(square_id, (fit.0.max(base.0), fit.1.max(base.1)));
+            }
+
+            for dependent in &dependents[component] {
+                pending[*dependent] -= 1;
+                if pending[*dependent] == 0 {
+                    ready.push_back(*dependent);
+                }
+            }
+        }
+
+        Self {
+            fits,
+            extents,
+            inlined,
+        }
+    }
+}
+
+fn base_extent(node: &Node) -> (f64, f64) {
+    node.size.map_or((NODE_R, NODE_RY), |(half_w, half_h)| {
+        (half_w.max(NODE_R), half_h.max(NODE_RY))
+    })
+}
+
+/// Component labels for a directed graph, without recursive traversal.
+///
+/// Visual graphs are user-authored and can be arbitrarily deep, so even the
+/// cycle detector used to protect sizing must not consume call-stack depth.
+fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
+    let mut visited = vec![false; edges.len()];
+    let mut finish = Vec::with_capacity(edges.len());
+    for start in 0..edges.len() {
+        if visited[start] {
+            continue;
+        }
+        let mut stack = vec![(start, false)];
+        while let Some((node, expanded)) = stack.pop() {
+            if expanded {
+                finish.push(node);
+                continue;
+            }
+            if std::mem::replace(&mut visited[node], true) {
+                continue;
+            }
+            stack.push((node, true));
+            for next in edges[node].iter().rev() {
+                if !visited[*next] {
+                    stack.push((*next, false));
+                }
+            }
+        }
+    }
+
+    let mut reverse = vec![Vec::new(); edges.len()];
+    for (node, next) in edges.iter().enumerate() {
+        for next in next {
+            reverse[*next].push(node);
+        }
+    }
+
+    let mut components = vec![usize::MAX; edges.len()];
+    let mut component = 0;
+    while let Some(start) = finish.pop() {
+        if components[start] != usize::MAX {
+            continue;
+        }
+        components[start] = component;
+        let mut stack = vec![start];
+        while let Some(node) = stack.pop() {
+            for next in &reverse[node] {
+                if components[*next] == usize::MAX {
+                    components[*next] = component;
+                    stack.push(*next);
+                }
+            }
+        }
+        component += 1;
+    }
+    components
 }
 
 impl Mandala {
@@ -789,6 +1034,7 @@ impl Mandala {
 
     /// Place a form and return its handle.
     pub fn add(&mut self, form: Form, text: impl Into<String>, x: f64, y: f64) -> NodeId {
+        self.invalidate_geometry();
         let id = NodeId(self.next_id);
         self.next_id += 1;
         self.nodes.push(Node {
@@ -810,16 +1056,105 @@ impl Mandala {
     /// ignored: overlap, containment, proximity, and screen order never create
     /// composition. Duplicates and self-links are ignored. Storage remains
     /// child-to-parent because that is the direction source generation walks.
-    pub fn father_of(&mut self, father: NodeId, child: NodeId) {
+    pub fn father_of(&mut self, father: NodeId, child: NodeId) -> bool {
         if father == child || !self.has(father) || !self.has(child) {
-            return;
+            return false;
         }
         let arrow = Arrow {
             from: child,
             to: father,
         };
-        if !self.arrows.contains(&arrow) {
-            self.arrows.push(arrow);
+        if self.arrows.contains(&arrow) {
+            return false;
+        }
+        self.arrows.push(arrow);
+        self.invalidate_geometry();
+        true
+    }
+
+    /// Push unrelated forms out of a square after its structural contents make
+    /// the border grow.
+    ///
+    /// Containment is never inferred from overlap: only the mediator subtree is
+    /// inside a square. Consequently, a loose form caught by a newly expanded
+    /// border must remain on the canvas rather than appearing to become part of
+    /// the square. It takes the shortest route beyond one wall. Other squares
+    /// move with their own contents, preserving their visual grouping.
+    pub fn make_room_for_square(&mut self, id: NodeId) {
+        let Some(square) = self.node(id).cloned() else {
+            return;
+        };
+        if square.form != Form::Square {
+            return;
+        }
+        let square_extent = self.extent(id);
+        let interior = self.interior(id);
+
+        // Never displace a structural ancestor that contains this square.
+        let mut ancestors = HashSet::new();
+        let mut stack = vec![id];
+        while let Some(child) = stack.pop() {
+            for father in self
+                .arrows
+                .iter()
+                .filter(|arrow| arrow.from == child)
+                .map(|arrow| arrow.to)
+            {
+                if ancestors.insert(father) {
+                    stack.push(father);
+                }
+            }
+        }
+
+        let inlined_pass = self.is_inlined(id);
+        let mut candidates = self
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.id != id
+                    && !interior.contains(&node.id)
+                    && !ancestors.contains(&node.id)
+                    && self.is_inlined(node.id) == inlined_pass
+            })
+            .map(|node| {
+                let extent = self.extent(node.id);
+                (node.clone(), extent)
+            })
+            .filter(|(node, extent)| {
+                (node.x - square.x).abs() < square_extent.0 + extent.0
+                    && (node.y - square.y).abs() < square_extent.1 + extent.1
+            })
+            .collect::<Vec<_>>();
+        // Move a nested box before any of its contents, then mark that whole
+        // group as handled so its internal arrangement is not torn apart.
+        candidates.sort_by_key(|(node, _)| node.form != Form::Square);
+
+        let mut moved = HashSet::new();
+        for (node, extent) in candidates {
+            if moved.contains(&node.id) {
+                continue;
+            }
+            let destinations = [
+                (square.x - square_extent.0 - extent.0 - MEDIATOR_PAD, node.y),
+                (square.x + square_extent.0 + extent.0 + MEDIATOR_PAD, node.y),
+                (node.x, square.y - square_extent.1 - extent.1 - MEDIATOR_PAD),
+                (node.x, square.y + square_extent.1 + extent.1 + MEDIATOR_PAD),
+            ];
+            let destination = destinations
+                .into_iter()
+                .min_by(|left, right| {
+                    let left_distance = (left.0 - node.x).abs() + (left.1 - node.y).abs();
+                    let right_distance = (right.0 - node.x).abs() + (right.1 - node.y).abs();
+                    left_distance.total_cmp(&right_distance)
+                })
+                .unwrap_or((node.x, node.y));
+            if node.form == Form::Square {
+                moved.extend(self.interior(node.id));
+                self.move_group_to(node.id, destination.0, destination.1);
+            } else {
+                self.move_to(node.id, destination.0, destination.1);
+            }
+            moved.insert(node.id);
         }
     }
 
@@ -828,7 +1163,7 @@ impl Mandala {
     /// New UI code should say [`Self::father_of`], because that is the visible
     /// relation. A flow arrow has the distinct semantics in [`Self::flow`].
     pub fn connect(&mut self, from: NodeId, to: NodeId) {
-        self.father_of(to, from);
+        let _ = self.father_of(to, from);
     }
 
     /// Link two shapes with a flow node, creating the `->` or `<-` behind the
@@ -848,19 +1183,28 @@ impl Mandala {
         // Sit the flow node between its endpoints, nudged clear of the line.
         let (mx, my) = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
         let id = self.add(form, "", mx, my - NODE_R * 1.6);
-        self.father_of(id, from);
-        self.father_of(id, to);
+        let _ = self.father_of(id, from);
+        let _ = self.father_of(id, to);
         Some(id)
     }
 
     pub fn disconnect(&mut self, from: NodeId, to: NodeId) {
+        let before = self.arrows.len();
         self.arrows.retain(|a| a.from != from || a.to != to);
+        if self.arrows.len() != before {
+            self.invalidate_geometry();
+        }
     }
 
     /// Remove a node and every arrow touching it.
     pub fn remove(&mut self, id: NodeId) {
+        let nodes_before = self.nodes.len();
+        let arrows_before = self.arrows.len();
         self.nodes.retain(|n| n.id != id);
         self.arrows.retain(|a| a.from != id && a.to != id);
+        if self.nodes.len() != nodes_before || self.arrows.len() != arrows_before {
+            self.invalidate_geometry();
+        }
     }
 
     pub fn set_text(&mut self, id: NodeId, text: impl Into<String>) {
@@ -871,14 +1215,20 @@ impl Mandala {
 
     pub fn set_form(&mut self, id: NodeId, form: Form) {
         if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
-            n.form = form;
+            if n.form != form {
+                n.form = form;
+                self.invalidate_geometry();
+            }
         }
     }
 
     pub fn move_to(&mut self, id: NodeId, x: f64, y: f64) {
         if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
-            n.x = x;
-            n.y = y;
+            if n.x != x || n.y != y {
+                n.x = x;
+                n.y = y;
+                self.invalidate_geometry();
+            }
         }
     }
 
@@ -962,6 +1312,7 @@ impl Mandala {
                 .copied()
                 .collect(),
             next_id: self.next_id,
+            geometry: OnceLock::new(),
         }
     }
 
@@ -989,7 +1340,7 @@ impl Mandala {
             else {
                 continue;
             };
-            self.father_of(father, child);
+            let _ = self.father_of(father, child);
         }
         pasted
     }
@@ -1096,7 +1447,7 @@ impl Mandala {
             );
         }
         for root in roots {
-            self.father_of(folded, root);
+            let _ = self.father_of(folded, root);
         }
         let folded_block = self.induced_subgraph(ids.iter().copied().chain([folded]));
         if let Err(error) = folded_block.to_rebis() {
@@ -1247,10 +1598,7 @@ impl Mandala {
     /// Whether this node is drawn inside some square.
     #[must_use]
     pub fn is_inlined(&self, id: NodeId) -> bool {
-        self.nodes
-            .iter()
-            .filter(|node| node.form == Form::Square && node.id != id)
-            .any(|node| self.interior(node.id).contains(&id))
+        self.geometry().inlined.contains(&id)
     }
 
     /// The node's half-width and half-height in world units.
@@ -1262,11 +1610,11 @@ impl Mandala {
     /// contents can never end up outside the walls drawn around them.
     #[must_use]
     pub fn extent(&self, id: NodeId) -> (f64, f64) {
-        let (fit_w, fit_h) = self.fit_extent(id);
-        match self.node(id).and_then(|node| node.size) {
-            Some((half_w, half_h)) => (half_w.max(fit_w), half_h.max(fit_h)),
-            None => (fit_w, fit_h),
-        }
+        self.geometry()
+            .extents
+            .get(&id)
+            .copied()
+            .unwrap_or((NODE_R, NODE_RY))
     }
 
     /// The smallest the node may be drawn: one fixed size for every form, and
@@ -1274,33 +1622,11 @@ impl Mandala {
     /// [`Self::extent`] and [`Self::resize`] measure a hand-set size against.
     #[must_use]
     fn fit_extent(&self, id: NodeId) -> (f64, f64) {
-        let Some(node) = self.node(id) else {
-            return (NODE_R, NODE_RY);
-        };
-        if node.form != Form::Square {
-            return (NODE_R, NODE_RY);
-        }
-        let interior = self.interior(id);
-        if interior.is_empty() {
-            return (NODE_R, NODE_RY);
-        }
-        // Wide enough for the furthest thing inside, in either direction from
-        // the box's own centre, and never smaller than an empty box.
-        let mut half_w: f64 = NODE_R;
-        let mut half_h: f64 = NODE_RY;
-        for inner in interior {
-            let Some(child) = self.node(inner) else {
-                continue;
-            };
-            let (cw, ch) = if child.form == Form::Square {
-                self.extent(inner)
-            } else {
-                (NODE_R, NODE_RY)
-            };
-            half_w = half_w.max((child.x - node.x).abs() + cw + MEDIATOR_PAD);
-            half_h = half_h.max((child.y - node.y).abs() + ch + MEDIATOR_PAD);
-        }
-        (half_w, half_h)
+        self.geometry()
+            .fits
+            .get(&id)
+            .copied()
+            .unwrap_or((NODE_R, NODE_RY))
     }
 
     /// Set a square's drawn size by hand, in half-extents from its centre.
@@ -1320,6 +1646,7 @@ impl Mandala {
         }
         if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
             node.size = Some((half_w.max(fit_w), half_h.max(fit_h)));
+            self.invalidate_geometry();
         }
     }
 
@@ -1441,7 +1768,17 @@ impl Mandala {
         for (index, child) in sibling_indices.into_iter().zip(ordered) {
             self.arrows[index].from = child;
         }
+        self.invalidate_geometry();
         true
+    }
+
+    fn geometry(&self) -> &MandalaGeometry {
+        self.geometry
+            .get_or_init(|| MandalaGeometry::from_mandala(self))
+    }
+
+    fn invalidate_geometry(&mut self) {
+        self.geometry.take();
     }
 
     /// Every node in the block rooted at `id`: the node itself plus all of its
@@ -2032,7 +2369,7 @@ impl Mandala {
         depths.push((id, depth));
         for kid in kids {
             let child = self.build(kid, depth + 1, depths);
-            self.father_of(id, child);
+            let _ = self.father_of(id, child);
         }
         id
     }
@@ -3515,6 +3852,84 @@ mod tests {
                 node.form
             );
         }
+    }
+
+    #[test]
+    fn recursive_square_geometry_is_finite_and_hit_testable() {
+        let mut m = Mandala::new();
+        let first = m.add(Form::Square, "", 0.0, 0.0);
+        let second = m.add(Form::Square, "", 90.0, 0.0);
+        m.father_of(first, second);
+        m.father_of(second, first);
+
+        for square in [first, second] {
+            let extent = m.extent(square);
+            assert!(extent.0.is_finite() && extent.1.is_finite());
+            assert!(extent.0 >= NODE_R && extent.1 >= NODE_RY);
+            assert!(m
+                .border_hit(
+                    m.node(square).unwrap().x + extent.0,
+                    m.node(square).unwrap().y
+                )
+                .is_some());
+        }
+        assert!(m.hit(0.0, 0.0).is_some());
+    }
+
+    #[test]
+    fn deeply_nested_square_extents_are_computed_without_recursive_growth() {
+        let mut m = Mandala::new();
+        let squares = (0..256)
+            .map(|depth| m.add(Form::Square, "", depth as f64, 0.0))
+            .collect::<Vec<_>>();
+        for pair in squares.windows(2) {
+            m.father_of(pair[0], pair[1]);
+        }
+
+        let outer = m.extent(squares[0]);
+        assert!(outer.0.is_finite() && outer.1.is_finite());
+        assert!(outer.0 > NODE_R && outer.1 > NODE_RY);
+        // A second read comes directly from the immutable derived cache.
+        assert_eq!(m.extent(squares[0]), outer);
+    }
+
+    #[test]
+    fn geometry_cache_is_invalidated_by_presentation_and_structure_edits() {
+        let mut m = Mandala::new();
+        let square = m.add(Form::Square, "", 0.0, 0.0);
+        let mediator = m.add(Form::Prompt, "m", 0.0, 0.0);
+        m.father_of(square, mediator);
+        let initial = m.extent(square);
+
+        m.move_to(mediator, 200.0, 0.0);
+        let moved = m.extent(square);
+        assert!(moved.0 > initial.0);
+
+        m.disconnect(mediator, square);
+        assert_eq!(m.extent(square), (NODE_R, NODE_RY));
+    }
+
+    #[test]
+    fn square_expansion_pushes_unrelated_forms_beyond_its_border() {
+        let mut m = Mandala::new();
+        let square = m.add(Form::Square, "", 0.0, 0.0);
+        let loose = m.add(Form::Prompt, "loose", 100.0, 0.0);
+        let mediator = m.add(Form::Prompt, "mediator", 200.0, 0.0);
+        m.father_of(square, mediator);
+
+        m.make_room_for_square(square);
+
+        let square_node = m.node(square).unwrap();
+        let loose_node = m.node(loose).unwrap();
+        let square_extent = m.extent(square);
+        let loose_extent = m.extent(loose);
+        assert!(
+            (loose_node.x - square_node.x).abs() > square_extent.0 + loose_extent.0
+                || (loose_node.y - square_node.y).abs() > square_extent.1 + loose_extent.1,
+            "the loose form must remain visibly outside the structural box"
+        );
+        assert!(m.is_inlined(mediator));
+        assert!(!m.is_inlined(loose));
     }
 
     #[test]
