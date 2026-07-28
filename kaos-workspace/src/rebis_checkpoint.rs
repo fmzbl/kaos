@@ -6,14 +6,16 @@
 //! evaluating from the captured source, then call the model at the first prompt
 //! that has no checkpoint.
 
-use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// Passed by the TUI to every hosted Rebis child.
 pub const PATH_ENV: &str = "KAOS_REBIS_CHECKPOINT";
 
 const HEADER: &str = "KAOS_REBIS_PROMPTS_V1";
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PromptCheckpoint {
@@ -33,7 +35,7 @@ pub enum Replay {
 /// A prompt journal shared by all calls in one child.
 pub struct PromptJournal {
     path: Option<PathBuf>,
-    entries: RefCell<Vec<PromptCheckpoint>>,
+    entries: Mutex<Vec<PromptCheckpoint>>,
 }
 
 impl PromptJournal {
@@ -48,7 +50,7 @@ impl PromptJournal {
             .unwrap_or_default();
         Self {
             path,
-            entries: RefCell::new(entries),
+            entries: Mutex::new(entries),
         }
     }
 
@@ -57,7 +59,10 @@ impl PromptJournal {
     /// completed calls remain safe to replay.
     #[must_use]
     pub fn replay(&self, index: usize, prompt: &str) -> Replay {
-        let mut entries = self.entries.borrow_mut();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(entry) = entries.get(index) else {
             return Replay::Miss;
         };
@@ -76,7 +81,10 @@ impl PromptJournal {
         let Some(_) = self.path else {
             return Ok(());
         };
-        let mut entries = self.entries.borrow_mut();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if entries.len() > index {
             entries.truncate(index);
         }
@@ -93,35 +101,101 @@ impl PromptJournal {
         self.persist(&entries)
     }
 
+    /// Replay a prompt at a deterministic branch-local position.
+    ///
+    /// Root calls retain the original linear journal. Concurrent branch calls
+    /// use separate sidecar entries keyed by structural scope, so completion
+    /// order cannot change checkpoint identity.
+    #[must_use]
+    pub fn replay_scoped(
+        &self,
+        scope: &rebis_lang::ExecutionScope,
+        index: usize,
+        prompt: &str,
+    ) -> Replay {
+        if scope.is_root() {
+            return self.replay(index, prompt);
+        }
+        let Some(path) = self.scoped_path(scope, index) else {
+            return Replay::Miss;
+        };
+        match load(&path) {
+            Ok(entries) if entries.first().is_some_and(|entry| entry.prompt == prompt) => {
+                Replay::Hit(entries[0].answer.clone())
+            }
+            _ => Replay::Miss,
+        }
+    }
+
+    /// Commit one deterministic branch-local prompt boundary.
+    pub fn record_scoped(
+        &self,
+        scope: &rebis_lang::ExecutionScope,
+        index: usize,
+        prompt: &str,
+        answer: Option<&str>,
+    ) -> Result<(), String> {
+        if scope.is_root() {
+            return self.record(index, prompt, answer);
+        }
+        let Some(path) = self.scoped_path(scope, index) else {
+            return Ok(());
+        };
+        persist_path(
+            &path,
+            &[PromptCheckpoint {
+                prompt: prompt.to_string(),
+                answer: answer.map(str::to_string),
+            }],
+        )
+    }
+
+    fn scoped_path(&self, scope: &rebis_lang::ExecutionScope, index: usize) -> Option<PathBuf> {
+        let base = self.path.as_ref()?;
+        let directory = PathBuf::from(format!("{}.branches", base.display()));
+        Some(directory.join(format!(
+            "{}-{index}.checkpoint",
+            hex_encode(scope.to_string().as_bytes())
+        )))
+    }
+
     fn persist(&self, entries: &[PromptCheckpoint]) -> Result<(), String> {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                format!("could not create prompt checkpoint directory: {error}")
-            })?;
-        }
-        let mut encoded = String::from(HEADER);
-        encoded.push('\n');
-        for entry in entries {
-            encoded.push_str(&hex_encode(entry.prompt.as_bytes()));
-            encoded.push('\t');
-            match &entry.answer {
-                Some(answer) => {
-                    encoded.push('S');
-                    encoded.push_str(&hex_encode(answer.as_bytes()));
-                }
-                None => encoded.push('N'),
-            }
-            encoded.push('\n');
-        }
-        let temporary = path.with_extension(format!("checkpoint.tmp.{}", std::process::id()));
-        std::fs::write(&temporary, encoded)
-            .map_err(|error| format!("could not write prompt checkpoint: {error}"))?;
-        std::fs::rename(&temporary, path)
-            .map_err(|error| format!("could not commit prompt checkpoint: {error}"))
+        persist_path(path, entries)
     }
+}
+
+fn persist_path(path: &Path, entries: &[PromptCheckpoint]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create prompt checkpoint directory: {error}"))?;
+    }
+    let mut encoded = String::from(HEADER);
+    encoded.push('\n');
+    for entry in entries {
+        encoded.push_str(&hex_encode(entry.prompt.as_bytes()));
+        encoded.push('\t');
+        match &entry.answer {
+            Some(answer) => {
+                encoded.push('S');
+                encoded.push_str(&hex_encode(answer.as_bytes()));
+            }
+            None => encoded.push('N'),
+        }
+        encoded.push('\n');
+    }
+    let temporary = PathBuf::from(format!(
+        "{}.tmp.{}.{}",
+        path.display(),
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&temporary, encoded)
+        .map_err(|error| format!("could not write prompt checkpoint: {error}"))?;
+    std::fs::rename(&temporary, path)
+        .map_err(|error| format!("could not commit prompt checkpoint: {error}"))
 }
 
 fn load(path: &Path) -> Result<Vec<PromptCheckpoint>, String> {
@@ -196,7 +270,7 @@ mod tests {
         let path = test_path("restart");
         let journal = PromptJournal {
             path: Some(path.clone()),
-            entries: RefCell::new(Vec::new()),
+            entries: Mutex::new(Vec::new()),
         };
         journal
             .record(0, "first\nprompt", Some("first\nanswer"))
@@ -204,7 +278,7 @@ mod tests {
         journal.record(1, "second", None).unwrap();
 
         let reopened = PromptJournal {
-            entries: RefCell::new(load(&path).unwrap()),
+            entries: Mutex::new(load(&path).unwrap()),
             path: Some(path.clone()),
         };
         assert_eq!(
@@ -221,7 +295,7 @@ mod tests {
         let path = test_path("diverge");
         let journal = PromptJournal {
             path: Some(path.clone()),
-            entries: RefCell::new(Vec::new()),
+            entries: Mutex::new(Vec::new()),
         };
         journal.record(0, "stable", Some("kept")).unwrap();
         journal.record(1, "old path", Some("discarded")).unwrap();
@@ -237,5 +311,39 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].prompt, "new path");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parallel_scopes_checkpoint_independently_of_completion_order() {
+        let path = test_path("scoped");
+        let journal = PromptJournal {
+            path: Some(path.clone()),
+            entries: Mutex::new(Vec::new()),
+        };
+        let root = rebis_lang::ExecutionScope::root();
+        let scopes = [root.branch(0, 0), root.branch(0, 1)];
+        std::thread::scope(|threads| {
+            for (index, scope) in scopes.iter().enumerate().rev() {
+                let journal = &journal;
+                threads.spawn(move || {
+                    journal
+                        .record_scoped(
+                            scope,
+                            0,
+                            &format!("prompt-{index}"),
+                            Some(&format!("answer-{index}")),
+                        )
+                        .unwrap();
+                });
+            }
+        });
+
+        for (index, scope) in scopes.iter().enumerate() {
+            assert_eq!(
+                journal.replay_scoped(scope, 0, &format!("prompt-{index}")),
+                Replay::Hit(Some(format!("answer-{index}")))
+            );
+        }
+        let _ = std::fs::remove_dir_all(format!("{}.branches", path.display()));
     }
 }

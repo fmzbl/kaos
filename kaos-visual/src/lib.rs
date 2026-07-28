@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 use kaos_core::tabs::{TabId, Tabs};
 use kaos_core::visual::{
     Arrow, BorderGrab, Form, Mandala, Node, NodeId, Shape, SpatialLayout, Stroke, View, WorldRect,
-    NODE_R, NODE_RY,
+    NODE_R,
 };
 use kaos_workspace::rebis_workspace::{
     handle_edit_key, highlights, EditKey, EditModifiers, Editor as SourceEditor,
@@ -205,6 +205,13 @@ fn visible_edges(mandala: &Mandala) -> Vec<VisibleEdge> {
     edges
 }
 
+fn is_containment_edge(mandala: &Mandala, edge: &VisibleEdge) -> bool {
+    edge.kind == VisibleEdgeKind::Father
+        && edge
+            .source
+            .is_some_and(|source| mandala.contains_child(source.to, source.from))
+}
+
 #[derive(Clone, Copy)]
 struct NodePaint {
     position: Pos2,
@@ -225,7 +232,7 @@ struct GlyphPaint {
 const fn node_outline_width(shape: Shape, emphasized: bool) -> f32 {
     if matches!(
         shape,
-        Shape::Square | Shape::Oval | Shape::Parallelogram | Shape::Amp | Shape::Hexagon
+        Shape::Circle | Shape::Square | Shape::Parallelogram | Shape::Amp | Shape::Hexagon
     ) {
         if emphasized {
             5.5
@@ -755,8 +762,8 @@ enum Drag {
         id: NodeId,
         grab: (f64, f64),
     },
-    /// Dragging a square's wall to size its box. The centre stays put and the
-    /// grabbed walls follow the pointer, so the blocks inside do not move.
+    /// Dragging a container boundary to resize it. The centre stays put, so
+    /// the blocks inside do not move.
     Resize(BorderGrab),
     /// Panning the canvas.
     Pan,
@@ -4589,7 +4596,7 @@ impl Editor {
                 let (sx, sy) = local(p);
                 let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
                 let drag = Drag::beginning_at(&self.doc().mandala, wx, wy);
-                // Moving a shape and sizing a box both change the drawing;
+                // Moving a shape and sizing a container both change the drawing;
                 // panning only changes where it is looked at.
                 if !matches!(drag, Drag::Pan) {
                     self.doc_mut().checkpoint();
@@ -4605,11 +4612,17 @@ impl Editor {
                         let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
                         let (mut half_w, mut half_h) = self.doc().mandala.extent(grab.id);
                         if let Some(node) = self.doc().mandala.node(grab.id) {
-                            if grab.wide {
-                                half_w = (wx - node.x).abs();
-                            }
-                            if grab.tall {
-                                half_h = (wy - node.y).abs();
+                            if node.form == Form::Compose {
+                                let radius = (wx - node.x).hypot(wy - node.y);
+                                half_w = radius;
+                                half_h = radius;
+                            } else {
+                                if grab.wide {
+                                    half_w = (wx - node.x).abs();
+                                }
+                                if grab.tall {
+                                    half_h = (wy - node.y).abs();
+                                }
                             }
                         }
                         self.doc_mut().mandala.resize(grab.id, half_w, half_h);
@@ -4619,8 +4632,8 @@ impl Editor {
                     if let Some(p) = response.interact_pointer_pos() {
                         let (sx, sy) = local(p);
                         let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
-                        // A box and what it holds read as one object, so
-                        // dragging the box carries its interior along.
+                        // A container and what it holds read as one object, so
+                        // dragging it carries its interior along.
                         self.doc_mut()
                             .mandala
                             .move_group_to(id, wx - grab.0, wy - grab.1);
@@ -4904,7 +4917,7 @@ impl Editor {
                         self.doc_mut().checkpoint();
                     }
                     if self.doc_mut().mandala.father_of(father, id) {
-                        self.doc_mut().mandala.make_room_for_square(father);
+                        self.doc_mut().mandala.make_room_for_container(father);
                     }
                     // The father-of link is keyed by its child node.
                     if angle {
@@ -5017,7 +5030,15 @@ impl Editor {
         let shape = node.shape();
         match shape {
             Shape::Circle => {
-                painter.circle(centre, NODE_R as f32 * zoom, k.fill, outline);
+                let radius = self.doc().mandala.extent(node.id).0 as f32 * zoom;
+                painter.circle(centre, radius, k.fill, outline);
+            }
+            Shape::Triangle => {
+                let points = Shape::triangle_points()
+                    .iter()
+                    .map(|(x, y)| Pos2::new(centre.x + x * zoom, centre.y + y * zoom))
+                    .collect();
+                painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
             }
             Shape::Square => {
                 // `[m]` writes its mediator inside the brackets, so the box
@@ -5032,11 +5053,6 @@ impl Editor {
                     k.fill,
                     outline,
                 );
-            }
-            Shape::Oval => {
-                let radius = Vec2::new(NODE_R as f32, NODE_RY as f32) * zoom;
-                painter.add(egui::Shape::ellipse_filled(centre, radius, k.fill));
-                painter.add(egui::Shape::ellipse_stroke(centre, radius, outline));
             }
             Shape::Diamond => {
                 let points = Shape::diamond_points()
@@ -5066,29 +5082,20 @@ impl Editor {
                 painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
             }
             Shape::Arrow => {
-                let radius = 18.0 * zoom;
-                painter.circle(centre, radius, k.fill, outline);
-                painter.text(
-                    centre,
-                    Align2::CENTER_CENTER,
-                    if node.form == Form::Backflow {
-                        "←"
-                    } else {
-                        "→"
-                    },
-                    FontId::monospace(18.0 * zoom),
-                    k.secondary,
-                );
+                let reverse = node.form == Form::Backflow;
+                let points = Shape::arrow_points()
+                    .iter()
+                    .map(|(x, y)| {
+                        let x = if reverse { -*x } else { *x };
+                        Pos2::new(centre.x + x * zoom, centre.y + y * zoom)
+                    })
+                    .collect();
+                painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
             }
-            // A sigil is the shape; the disc behind it is the click target
-            // (see Shape::contains), drawn faintly so it reads as one mark.
+            // A sigil is its own visible shape. Its generous round click target
+            // remains model-only (see Shape::contains), so compose alone owns
+            // a circular outline.
             _ => {
-                painter.circle(
-                    centre,
-                    NODE_R as f32 * zoom,
-                    k.fill,
-                    UiStroke::new(1.0 * zoom, if hot { k.accent } else { k.chrome }),
-                );
                 let pen = UiStroke::new(5.0 * zoom, if hot { k.accent } else { k.ink });
                 for stroke in shape.strokes() {
                     match stroke {
@@ -5191,8 +5198,8 @@ impl Editor {
         let font = FontId::monospace(11.0 * zoom);
         match shape {
             Shape::Circle
+            | Shape::Triangle
             | Shape::Square
-            | Shape::Oval
             | Shape::Diamond
             | Shape::Parallelogram
             | Shape::Amp => {
@@ -5388,12 +5395,9 @@ impl Editor {
                 if interior != want_interior {
                     continue;
                 }
-                // A mediator drawn inside its square needs no link to it: the
-                // containment already says what the grey arrow would have said.
-                if edge.kind == VisibleEdgeKind::Father
-                    && (self.doc().mandala.inlined_mediator(edge.from) == Some(edge.to)
-                        || self.doc().mandala.inlined_mediator(edge.to) == Some(edge.from))
-                {
+                // A child drawn within its structural boundary needs no link
+                // to it: containment already says what that grey arrow would.
+                if is_containment_edge(&self.doc().mandala, &edge) {
                     continue;
                 }
                 let (Some(from), Some(to)) = (
@@ -6777,6 +6781,30 @@ mod tests {
     }
 
     #[test]
+    fn a_compose_drag_resizes_from_its_circular_border() {
+        let mut doc = Doc::default();
+        let compose = doc.mandala.add(Form::Compose, "", 40.0, -20.0);
+        let radius = doc.mandala.extent(compose).0;
+
+        for angle in [
+            0.0,
+            std::f64::consts::FRAC_PI_4,
+            std::f64::consts::FRAC_PI_2,
+        ] {
+            let drag = Drag::beginning_at(
+                &doc.mandala,
+                40.0 + radius * angle.cos(),
+                -20.0 + radius * angle.sin(),
+            );
+            let Drag::Resize(grab) = drag else {
+                panic!("the circumference must begin a radial resize");
+            };
+            assert_eq!(grab.id, compose);
+            assert!(grab.wide && grab.tall);
+        }
+    }
+
+    #[test]
     fn drawing_history_undoes_and_redoes_one_semantic_edit() {
         let mut doc = prompt_doc();
         doc.checkpoint();
@@ -6871,6 +6899,14 @@ mod tests {
         assert_eq!(
             (flow_edge.from, flow_edge.to, flow_edge.owner),
             (left, right, flow)
+        );
+        let father_edge = edges
+            .iter()
+            .find(|edge| edge.kind == VisibleEdgeKind::Father)
+            .unwrap();
+        assert!(
+            is_containment_edge(&mandala, father_edge),
+            "the compose boundary replaces its direct father edge"
         );
     }
 
@@ -6990,8 +7026,8 @@ mod tests {
 
     #[test]
     fn brackets_and_parentheses_use_symbol_weight_outlines() {
-        let ordinary = node_outline_width(Shape::Circle, false);
-        for shape in [Shape::Square, Shape::Oval] {
+        let ordinary = node_outline_width(Shape::Triangle, false);
+        for shape in [Shape::Square, Shape::Circle] {
             assert!(node_outline_width(shape, false) > ordinary);
             assert!(node_outline_width(shape, true) > node_outline_width(shape, false));
         }

@@ -17,6 +17,7 @@ pub mod hand;
 pub mod myth;
 pub mod pause;
 pub mod provider;
+pub mod rebis_worktree;
 pub mod scry;
 pub mod solve;
 pub mod spiral;

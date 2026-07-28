@@ -128,7 +128,7 @@ impl Form {
     /// `father of` link tool. The link palette also keeps the two-click
     /// complete-flow shortcut for the common case.
     pub const ALL: &'static [FormSpec] = &[
-        ("o prompt", || Form::Prompt, "prompt"),
+        ("△ prompt", || Form::Prompt, "prompt"),
         ("◇ symbol", || Form::Symbol, "x"),
         ("→ forward", || Form::Forward, ""),
         ("← backflow", || Form::Backflow, ""),
@@ -151,10 +151,11 @@ impl Form {
     /// Forms whose source syntax *is* a sigil are drawn as that sigil, so the
     /// canvas reads like the language: `$`, `~`, `#`, `'`, `,`, and `^` are their own
     /// shapes rather than boxes with a caption. The rest fall back to the
-    /// whiteboard alphabet — terminals are `o`, combining forms are `[]`.
+    /// whiteboard alphabet — prompts are triangles and structural containers
+    /// use the outline written by their source notation.
     pub fn shape(&self) -> Shape {
         match self {
-            Form::Prompt => Shape::Circle,
+            Form::Prompt => Shape::Triangle,
             Form::Symbol => Shape::Diamond,
             Form::Concat => Shape::Dollar,
             Form::Function(_) => Shape::Tilde,
@@ -165,7 +166,7 @@ impl Form {
             // Flow is drawn as the connecting arrow itself, never as a box
             // sitting between two arrows.
             Form::Forward | Form::Backflow => Shape::Arrow,
-            Form::Compose => Shape::Oval,
+            Form::Compose => Shape::Circle,
             // A call is a parallelogram — a box in motion, distinct from the
             // square that combines its own children.
             Form::Call => Shape::Parallelogram,
@@ -233,8 +234,11 @@ impl Form {
 /// the character the form is written with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Shape {
-    /// `o` — a prompt terminal.
+    /// `( )` — an ordered composition boundary. A compose node is the only
+    /// circular form on the canvas.
     Circle,
+    /// `△` — a prompt terminal.
+    Triangle,
     /// `◇` — a symbol: a name rather than a literal.
     Diamond,
     /// `[]` — the mediator square, and nothing else. The box belongs to the
@@ -244,8 +248,6 @@ pub enum Shape {
     /// The implicit top-level scope holding several forms. Drawn as a hexagon:
     /// a container that is visibly not a mediator.
     Hexagon,
-    /// `( )` — an ordered composition boundary.
-    Oval,
     /// `$` — string interpolation.
     Dollar,
     /// `~` — a macro definition.
@@ -284,8 +286,8 @@ pub enum Stroke {
 
 impl Shape {
     /// The strokes that draw this shape's sigil, or empty for the shapes that
-    /// are outlines ([`Shape::Circle`], [`Shape::Square`], [`Shape::Oval`],
-    /// [`Shape::Diamond`]).
+    /// are outlines ([`Shape::Circle`], [`Shape::Triangle`],
+    /// [`Shape::Square`], [`Shape::Diamond`]).
     pub fn strokes(self) -> &'static [Stroke] {
         match self {
             // Two slanted uprights crossed by two bars.
@@ -346,8 +348,8 @@ impl Shape {
                 Stroke::Poly(&[(-11.0, 15.0), (11.0, -15.0)]),
             ],
             Shape::Circle
+            | Shape::Triangle
             | Shape::Square
-            | Shape::Oval
             | Shape::Diamond
             | Shape::Arrow
             | Shape::Parallelogram
@@ -360,6 +362,26 @@ impl Shape {
     pub fn diamond_points() -> [(f32, f32); 4] {
         let r = NODE_R as f32;
         [(0.0, -r), (r, 0.0), (0.0, r), (-r, 0.0)]
+    }
+
+    /// The three corners of a prompt, pointing upward.
+    pub fn triangle_points() -> [(f32, f32); 3] {
+        let (r, ry) = (NODE_R as f32, NODE_RY as f32);
+        [(0.0, -ry), (r, ry), (-r, ry)]
+    }
+
+    /// A compact right-facing arrow used while a flow form is incomplete.
+    /// Complete flows are drawn as the connection between their operands.
+    pub fn arrow_points() -> [(f32, f32); 7] {
+        [
+            (-10.0, -4.0),
+            (2.0, -4.0),
+            (2.0, -8.0),
+            (10.0, 0.0),
+            (2.0, 8.0),
+            (2.0, 4.0),
+            (-10.0, 4.0),
+        ]
     }
 
     /// The four corners of the call parallelogram: a box sheared to the right.
@@ -406,10 +428,9 @@ impl Shape {
             Shape::Square | Shape::Parallelogram | Shape::Amp | Shape::Hexagon => {
                 dx.abs() <= NODE_R && dy.abs() <= NODE_RY
             }
-            Shape::Oval => {
-                let x = dx / NODE_R;
-                let y = dy / NODE_RY;
-                x * x + y * y <= 1.0
+            Shape::Triangle => {
+                (-NODE_RY..=NODE_RY).contains(&dy)
+                    && dx.abs() <= NODE_R * (dy + NODE_RY) / (2.0 * NODE_RY)
             }
             Shape::Diamond => dx.abs() + dy.abs() <= NODE_R,
             // Only a small handle: the arrow is a line, and a full disc here
@@ -431,9 +452,9 @@ pub struct Node {
     pub text: String,
     pub x: f64,
     pub y: f64,
-    /// Half-width and half-height a square's border was dragged to, when it has
-    /// been resized by hand. `None` means the box takes whatever size its
-    /// contents need.
+    /// Half-width and half-height a container's border was dragged to, when it
+    /// has been resized by hand. `None` means the boundary takes whatever size
+    /// its contents need. A compose circle stores the same radius in both.
     ///
     /// Presentation only, exactly like `x`/`y`: a hand-sized box and an
     /// auto-sized one generate the same source. Read it through
@@ -470,7 +491,7 @@ impl Node {
     }
 }
 
-/// A grab on a square's wall: which box, and which walls the point is on.
+/// A grab on a container's border: which boundary and which axes it changes.
 ///
 /// Both flags are set on a corner. The axes are carried because a drag on a
 /// side wall must change only that dimension — grabbing the left wall of a wide
@@ -520,11 +541,11 @@ impl WorldRect {
             && point.1 <= self.max_y
     }
 
-    fn intersects_node(self, node: &Node) -> bool {
-        node.x + NODE_R >= self.min_x
-            && node.x - NODE_R <= self.max_x
-            && node.y + NODE_RY >= self.min_y
-            && node.y - NODE_RY <= self.max_y
+    fn intersects_node(self, node: &Node, extent: (f64, f64)) -> bool {
+        node.x + extent.0 >= self.min_x
+            && node.x - extent.0 <= self.max_x
+            && node.y + extent.1 >= self.min_y
+            && node.y - extent.1 <= self.max_y
     }
 
     fn intersects_segment(self, from: (f64, f64), to: (f64, f64)) -> bool {
@@ -703,13 +724,13 @@ impl fmt::Display for MandalaError {
 
 impl std::error::Error for MandalaError {}
 
-/// Circle radius, and the square's half-width, in world units.
+/// Compose radius and the base half-width of fixed shapes, in world units.
 pub const NODE_R: f64 = 34.0;
-/// The square's half-height. Squares are a little flatter than circles are tall.
+/// The half-height of flatter fixed shapes and a square's base half-height.
 pub const NODE_RY: f64 = NODE_R * 0.72;
-/// Clearance between an inlined mediator and the wall of its square.
+/// Clearance between inlined contents and their container boundary.
 pub const MEDIATOR_PAD: f64 = 13.0;
-/// How far inside a square's wall still counts as grabbing the wall.
+/// How far either side of a container boundary still counts as grabbing it.
 pub const BORDER_BAND: f64 = 8.0;
 /// Grab radius of the handle on a drawn arrow.
 pub const ARROW_HANDLE: f64 = 11.0;
@@ -817,46 +838,46 @@ impl Default for Mandala {
 
 impl MandalaGeometry {
     fn from_mandala(mandala: &Mandala) -> Self {
-        let squares = mandala
+        let containers = mandala
             .nodes
             .iter()
-            .filter(|node| node.form == Form::Square)
+            .filter(|node| is_visual_container(&node.form))
             .map(|node| node.id)
             .collect::<Vec<_>>();
-        let square_indices = squares
+        let container_indices = containers
             .iter()
             .enumerate()
             .map(|(index, id)| (*id, index))
             .collect::<HashMap<_, _>>();
 
         // `interior` is structural and iterative. Compute it exactly once per
-        // square: re-walking it from every extent query was the source of the
+        // container: re-walking it from every extent query was the source of
         // exponential behaviour in deeply nested drawings.
         let mut inlined = HashSet::new();
-        let interiors = squares
+        let interiors = containers
             .iter()
             .map(|id| {
                 let mut interior = mandala.interior(*id);
-                // A recursive father-of path can lead back to its square. A
-                // box is never its own contents, even when source validation
-                // will later report that structural cycle.
+                // A recursive father-of path can lead back to its container.
+                // A boundary is never its own contents, even when source
+                // validation will later report that structural cycle.
                 interior.remove(id);
                 inlined.extend(interior.iter().copied());
                 interior.into_iter().collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
 
-        // A square depends on the extent of every nested square. Collapse
-        // strongly connected components before sizing: a recursive component
-        // has no finite padded fixed point, so internal references use the
-        // member's hand/base size while all acyclic dependencies retain their
-        // exact computed extent.
+        // A container depends on the extent of every nested container.
+        // Collapse strongly connected components before sizing: a recursive
+        // component has no finite padded fixed point, so internal references
+        // use each member's hand/base size while acyclic dependencies retain
+        // their exact computed extent.
         let dependencies = interiors
             .iter()
             .map(|interior| {
                 interior
                     .iter()
-                    .filter_map(|id| square_indices.get(id).copied())
+                    .filter_map(|id| container_indices.get(id).copied())
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -867,13 +888,13 @@ impl MandalaGeometry {
             .max()
             .map_or(0, |largest| largest + 1);
         let mut members = vec![Vec::new(); component_count];
-        for (square, component) in components.iter().copied().enumerate() {
-            members[component].push(square);
+        for (container, component) in components.iter().copied().enumerate() {
+            members[component].push(container);
         }
 
         let mut component_dependencies = vec![Vec::new(); component_count];
-        for (square, nested) in dependencies.iter().enumerate() {
-            let component = components[square];
+        for (container, nested) in dependencies.iter().enumerate() {
+            let component = components[container];
             for nested in nested {
                 let nested_component = components[*nested];
                 if nested_component != component {
@@ -904,7 +925,7 @@ impl MandalaGeometry {
         let mut fits = mandala
             .nodes
             .iter()
-            .map(|node| (node.id, (NODE_R, NODE_RY)))
+            .map(|node| (node.id, default_extent(node)))
             .collect::<HashMap<_, _>>();
         let mut extents = mandala
             .nodes
@@ -913,17 +934,17 @@ impl MandalaGeometry {
             .collect::<HashMap<_, _>>();
 
         while let Some(component) = ready.pop_front() {
-            for square_index in &members[component] {
-                let square_id = squares[*square_index];
-                let Some(square) = mandala.node(square_id) else {
+            for container_index in &members[component] {
+                let container_id = containers[*container_index];
+                let Some(container) = mandala.node(container_id) else {
                     continue;
                 };
-                let mut fit = (NODE_R, NODE_RY);
-                for inner_id in &interiors[*square_index] {
+                let mut fit = default_extent(container);
+                for inner_id in &interiors[*container_index] {
                     let Some(inner) = mandala.node(*inner_id) else {
                         continue;
                     };
-                    let child_extent = square_indices.get(inner_id).map_or_else(
+                    let child_extent = container_indices.get(inner_id).map_or_else(
                         || base_extent(inner),
                         |inner_index| {
                             if components[*inner_index] == component {
@@ -936,16 +957,21 @@ impl MandalaGeometry {
                             }
                         },
                     );
-                    fit.0 = fit
-                        .0
-                        .max((inner.x - square.x).abs() + child_extent.0 + MEDIATOR_PAD);
-                    fit.1 = fit
-                        .1
-                        .max((inner.y - square.y).abs() + child_extent.1 + MEDIATOR_PAD);
+                    let far_x = (inner.x - container.x).abs() + child_extent.0;
+                    let far_y = (inner.y - container.y).abs() + child_extent.1;
+                    if container.form == Form::Compose {
+                        // The farthest corner of the child's bounds must fit
+                        // within a true circle, not merely its bounding box.
+                        let radius = far_x.hypot(far_y) + MEDIATOR_PAD;
+                        fit = (fit.0.max(radius), fit.1.max(radius));
+                    } else {
+                        fit.0 = fit.0.max(far_x + MEDIATOR_PAD);
+                        fit.1 = fit.1.max(far_y + MEDIATOR_PAD);
+                    }
                 }
-                fits.insert(square_id, fit);
-                let base = base_extent(square);
-                extents.insert(square_id, (fit.0.max(base.0), fit.1.max(base.1)));
+                fits.insert(container_id, fit);
+                let base = base_extent(container);
+                extents.insert(container_id, (fit.0.max(base.0), fit.1.max(base.1)));
             }
 
             for dependent in &dependents[component] {
@@ -964,9 +990,27 @@ impl MandalaGeometry {
     }
 }
 
+fn is_visual_container(form: &Form) -> bool {
+    matches!(form, Form::Square | Form::Compose)
+}
+
+fn default_extent(node: &Node) -> (f64, f64) {
+    if node.form == Form::Compose {
+        (NODE_R, NODE_R)
+    } else {
+        (NODE_R, NODE_RY)
+    }
+}
+
 fn base_extent(node: &Node) -> (f64, f64) {
-    node.size.map_or((NODE_R, NODE_RY), |(half_w, half_h)| {
-        (half_w.max(NODE_R), half_h.max(NODE_RY))
+    let base = default_extent(node);
+    node.size.map_or(base, |(half_w, half_h)| {
+        if node.form == Form::Compose {
+            let radius = half_w.max(half_h).max(NODE_R);
+            (radius, radius)
+        } else {
+            (half_w.max(base.0), half_h.max(base.1))
+        }
     })
 }
 
@@ -1072,25 +1116,24 @@ impl Mandala {
         true
     }
 
-    /// Push unrelated forms out of a square after its structural contents make
-    /// the border grow.
+    /// Push unrelated forms out of a container after its structural contents
+    /// make the boundary grow.
     ///
-    /// Containment is never inferred from overlap: only the mediator subtree is
-    /// inside a square. Consequently, a loose form caught by a newly expanded
-    /// border must remain on the canvas rather than appearing to become part of
-    /// the square. It takes the shortest route beyond one wall. Other squares
-    /// move with their own contents, preserving their visual grouping.
-    pub fn make_room_for_square(&mut self, id: NodeId) {
-        let Some(square) = self.node(id).cloned() else {
+    /// Containment is never inferred from overlap: a square contains its
+    /// mediator subtree and a compose circle contains all of its operand
+    /// subtrees. A loose form caught by a newly expanded boundary therefore
+    /// stays outside. Nested containers move with their contents.
+    pub fn make_room_for_container(&mut self, id: NodeId) {
+        let Some(container) = self.node(id).cloned() else {
             return;
         };
-        if square.form != Form::Square {
+        if !is_visual_container(&container.form) {
             return;
         }
-        let square_extent = self.extent(id);
+        let container_extent = self.extent(id);
         let interior = self.interior(id);
 
-        // Never displace a structural ancestor that contains this square.
+        // Never displace a structural ancestor that contains this boundary.
         let mut ancestors = HashSet::new();
         let mut stack = vec![id];
         while let Some(child) = stack.pop() {
@@ -1121,13 +1164,13 @@ impl Mandala {
                 (node.clone(), extent)
             })
             .filter(|(node, extent)| {
-                (node.x - square.x).abs() < square_extent.0 + extent.0
-                    && (node.y - square.y).abs() < square_extent.1 + extent.1
+                (node.x - container.x).abs() < container_extent.0 + extent.0
+                    && (node.y - container.y).abs() < container_extent.1 + extent.1
             })
             .collect::<Vec<_>>();
-        // Move a nested box before any of its contents, then mark that whole
-        // group as handled so its internal arrangement is not torn apart.
-        candidates.sort_by_key(|(node, _)| node.form != Form::Square);
+        // Move a nested container before any of its contents, then mark that
+        // whole group as handled so its arrangement is not torn apart.
+        candidates.sort_by_key(|(node, _)| !is_visual_container(&node.form));
 
         let mut moved = HashSet::new();
         for (node, extent) in candidates {
@@ -1135,10 +1178,22 @@ impl Mandala {
                 continue;
             }
             let destinations = [
-                (square.x - square_extent.0 - extent.0 - MEDIATOR_PAD, node.y),
-                (square.x + square_extent.0 + extent.0 + MEDIATOR_PAD, node.y),
-                (node.x, square.y - square_extent.1 - extent.1 - MEDIATOR_PAD),
-                (node.x, square.y + square_extent.1 + extent.1 + MEDIATOR_PAD),
+                (
+                    container.x - container_extent.0 - extent.0 - MEDIATOR_PAD,
+                    node.y,
+                ),
+                (
+                    container.x + container_extent.0 + extent.0 + MEDIATOR_PAD,
+                    node.y,
+                ),
+                (
+                    node.x,
+                    container.y - container_extent.1 - extent.1 - MEDIATOR_PAD,
+                ),
+                (
+                    node.x,
+                    container.y + container_extent.1 + extent.1 + MEDIATOR_PAD,
+                ),
             ];
             let destination = destinations
                 .into_iter()
@@ -1148,7 +1203,7 @@ impl Mandala {
                     left_distance.total_cmp(&right_distance)
                 })
                 .unwrap_or((node.x, node.y));
-            if node.form == Form::Square {
+            if is_visual_container(&node.form) {
                 moved.extend(self.interior(node.id));
                 self.move_group_to(node.id, destination.0, destination.1);
             } else {
@@ -1156,6 +1211,12 @@ impl Mandala {
             }
             moved.insert(node.id);
         }
+    }
+
+    /// Backward-compatible name for callers that only know about square
+    /// containers.
+    pub fn make_room_for_square(&mut self, id: NodeId) {
+        self.make_room_for_container(id);
     }
 
     /// Compatibility name using the internal child-to-parent order.
@@ -1273,20 +1334,21 @@ impl Mandala {
         self.nodes
             .iter()
             .filter(|node| {
+                let extent = self.extent(node.id);
                 if node.shape() != Shape::Arrow {
-                    return rect.intersects_node(node);
+                    return rect.intersects_node(node, extent);
                 }
                 let children = self.children(node.id);
                 let [first, second] = children[..] else {
-                    return rect.intersects_node(node);
+                    return rect.intersects_node(node, extent);
                 };
                 let Some(first) = self.node(first) else {
-                    return rect.intersects_node(node);
+                    return rect.intersects_node(node, extent);
                 };
                 let Some(second) = self.node(second) else {
-                    return rect.intersects_node(node);
+                    return rect.intersects_node(node, extent);
                 };
-                rect.intersects_node(node)
+                rect.intersects_node(node, extent)
                     || rect.intersects_segment((first.x, first.y), (second.x, second.y))
             })
             .map(|node| node.id)
@@ -1476,25 +1538,20 @@ impl Mandala {
     /// itself — which keeps pointer coordinates in one space and makes the
     /// interaction testable without a window.
     pub fn hit(&self, x: f64, y: f64) -> Option<NodeId> {
-        // A mediator drawn inside its square is on top of it: clicking the
-        // inner form must select the form, not the box around it.
-        let inside = self.nodes.iter().rev().find_map(|n| {
-            (self.is_inlined(n.id) && n.shape().contains(x - n.x, y - n.y)).then_some(n.id)
-        });
+        // Contents drawn inside a container are on top of it: clicking an
+        // inner form must select the form, not its surrounding boundary.
+        let inside =
+            self.nodes.iter().rev().find_map(|n| {
+                (self.is_inlined(n.id) && self.node_contains(n, x, y)).then_some(n.id)
+            });
         if inside.is_some() {
             return inside;
         }
-        let shape = self.nodes.iter().rev().find_map(|n| {
-            let (half_w, half_h) = self.extent(n.id);
-            let hit = if half_w > NODE_R || half_h > NODE_RY {
-                // A box grown past the base shape — by its contents or by a
-                // border drag — is a plain rectangle at its full extent.
-                (x - n.x).abs() <= half_w && (y - n.y).abs() <= half_h
-            } else {
-                n.shape().contains(x - n.x, y - n.y)
-            };
-            hit.then_some(n.id)
-        });
+        let shape = self
+            .nodes
+            .iter()
+            .rev()
+            .find_map(|n| self.node_contains(n, x, y).then_some(n.id));
         if shape.is_some() {
             return shape;
         }
@@ -1516,6 +1573,21 @@ impl Mandala {
                 <= ARROW_HIT_SLOP * ARROW_HIT_SLOP)
                 .then_some(node.id)
         })
+    }
+
+    fn node_contains(&self, node: &Node, x: f64, y: f64) -> bool {
+        let (dx, dy) = (x - node.x, y - node.y);
+        match node.shape() {
+            Shape::Circle => {
+                let radius = self.extent(node.id).0;
+                dx * dx + dy * dy <= radius * radius
+            }
+            Shape::Square => {
+                let (half_w, half_h) = self.extent(node.id);
+                dx.abs() <= half_w && dy.abs() <= half_h
+            }
+            shape => shape.contains(dx, dy),
+        }
     }
 
     /// Children of `id`: the nodes whose arrows point at it, in draw order.
@@ -1553,13 +1625,34 @@ impl Mandala {
         self.mediator(id)
     }
 
+    /// Direct children drawn within a structural boundary.
+    ///
+    /// Square notation encloses only its first child (the mediator), while
+    /// composition parentheses enclose every ordered operand.
+    #[must_use]
+    pub fn contained_children(&self, id: NodeId) -> Vec<NodeId> {
+        let Some(node) = self.node(id) else {
+            return Vec::new();
+        };
+        match &node.form {
+            Form::Square => self.children(id).into_iter().take(1).collect(),
+            Form::Compose => self.children(id),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether `child` is one of `container`'s directly enclosed operands.
+    #[must_use]
+    pub fn contains_child(&self, container: NodeId, child: NodeId) -> bool {
+        self.contained_children(container).contains(&child)
+    }
+
     /// The nodes of one paint pass, back to front.
     ///
     /// `inlined` picks the pass: `false` is everything on the open canvas,
-    /// `true` is what is drawn inside a box. Within a pass the squares come
-    /// first, because a box is a surface other forms sit on — paint it in
-    /// drawing order instead and a box added late, or dragged across the canvas,
-    /// hides whatever it covers.
+    /// `true` is what is drawn inside a structural boundary. Within a pass the
+    /// containers come first, because their fills are surfaces other forms sit
+    /// on.
     ///
     /// Order only. Which node is in front of which is presentation, exactly like
     /// the coordinates it is derived from; no structure is implied and none is
@@ -1570,32 +1663,38 @@ impl Mandala {
             .nodes
             .iter()
             .filter(|node| self.is_inlined(node.id) == inlined);
-        let (boxes, forms): (Vec<NodeId>, Vec<NodeId>) = pass
-            .map(|node| (node.id, node.form == Form::Square))
-            .fold((Vec::new(), Vec::new()), |mut acc, (id, square)| {
-                if square {
+        let (containers, forms): (Vec<NodeId>, Vec<NodeId>) = pass
+            .map(|node| (node.id, is_visual_container(&node.form)))
+            .fold((Vec::new(), Vec::new()), |mut acc, (id, container)| {
+                if container {
                     acc.0.push(id);
                 } else {
                     acc.1.push(id);
                 }
                 acc
             });
-        boxes.into_iter().chain(forms).collect()
+        containers.into_iter().chain(forms).collect()
     }
 
-    /// Every node drawn inside `id`'s box: its mediator and everything under it.
+    /// Every node drawn inside `id`'s boundary.
     ///
-    /// This is a STRUCTURAL answer, never a geometric one. A node is inside the
-    /// box because the links put it there, so overlapping a box still means
-    /// nothing — which keeps coordinates presentation-only.
+    /// This is a STRUCTURAL answer, never a geometric one. A square includes
+    /// its mediator subtree; a compose circle includes all operand subtrees.
+    /// Merely overlapping a boundary still means nothing.
     #[must_use]
     pub fn interior(&self, id: NodeId) -> std::collections::BTreeSet<NodeId> {
-        self.mediator(id)
-            .map(|mediator| self.subtree(mediator))
-            .unwrap_or_default()
+        let mut interior = self
+            .contained_children(id)
+            .into_iter()
+            .flat_map(|child| self.subtree(child))
+            .collect::<std::collections::BTreeSet<_>>();
+        // A structural cycle may lead back to the boundary, but a container
+        // can never be one of the things it visually contains.
+        interior.remove(&id);
+        interior
     }
 
-    /// Whether this node is drawn inside some square.
+    /// Whether this node is drawn inside some structural container.
     #[must_use]
     pub fn is_inlined(&self, id: NodeId) -> bool {
         self.geometry().inlined.contains(&id)
@@ -1603,11 +1702,10 @@ impl Mandala {
 
     /// The node's half-width and half-height in world units.
     ///
-    /// Everything is one fixed size except a square, which grows to contain
-    /// whatever its mediator subtree needs — that is what makes room for more
-    /// than one block inside. A square whose border has been dragged also
-    /// honours that size, but only where it is the larger of the two: the
-    /// contents can never end up outside the walls drawn around them.
+    /// Fixed forms use their base outline. A square grows around its mediator
+    /// subtree, and a compose circle grows around all of its operand subtrees.
+    /// A hand-set boundary is honoured only where it is larger than the fit, so
+    /// contents can never end up outside.
     #[must_use]
     pub fn extent(&self, id: NodeId) -> (f64, f64) {
         self.geometry()
@@ -1618,7 +1716,7 @@ impl Mandala {
     }
 
     /// The smallest the node may be drawn: one fixed size for every form, and
-    /// for a square whatever its contents occupy. This is the floor
+    /// for a structural container whatever its contents occupy. This is the floor
     /// [`Self::extent`] and [`Self::resize`] measure a hand-set size against.
     #[must_use]
     fn fit_extent(&self, id: NodeId) -> (f64, f64) {
@@ -1629,23 +1727,29 @@ impl Mandala {
             .unwrap_or((NODE_R, NODE_RY))
     }
 
-    /// Set a square's drawn size by hand, in half-extents from its centre.
+    /// Set a container's drawn size by hand, in half-extents from its centre.
     ///
     /// Clamped to what the contents need, so a border dragged inward stops at
-    /// the innermost block rather than swallowing it. Only squares have a box to
-    /// size; every other form is one fixed shape and is left alone.
+    /// the innermost block rather than swallowing it. A square may change each
+    /// axis independently; compose remains a true circle and uses the larger
+    /// requested dimension as its radius.
     ///
     /// The centre does not move, which is what keeps the contents still while
     /// the walls travel: they are placed in canvas coordinates, not relative to
     /// the box.
     pub fn resize(&mut self, id: NodeId, half_w: f64, half_h: f64) {
         let (fit_w, fit_h) = self.fit_extent(id);
-        let square = self.node(id).is_some_and(|node| node.form == Form::Square);
-        if !square {
+        let form = self.node(id).map(|node| node.form.clone());
+        if !form.as_ref().is_some_and(is_visual_container) {
             return;
         }
         if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
-            node.size = Some((half_w.max(fit_w), half_h.max(fit_h)));
+            node.size = Some(if node.form == Form::Compose {
+                let radius = half_w.max(half_h).max(fit_w).max(fit_h);
+                (radius, radius)
+            } else {
+                (half_w.max(fit_w), half_h.max(fit_h))
+            });
             self.invalidate_geometry();
         }
     }
@@ -1669,22 +1773,29 @@ impl Mandala {
         }
     }
 
-    /// The square whose wall the point rests on, and which walls those are.
+    /// The container whose boundary the point rests on, and which axes resize.
     ///
-    /// The band straddles the wall: [`BORDER_BAND`] world units either side of
-    /// it. A wall is drawn as a stroke with width, so the line a hand aims for
-    /// is partly outside the box — measuring only inwards means grabbing the
-    /// visible edge misses the box entirely.
+    /// The band straddles the boundary by [`BORDER_BAND`] world units. A square
+    /// reports the side/corner axes; a compose circle reports both axes because
+    /// its radius must remain equal in every direction.
     ///
     /// This is geometry only — see [`Self::resize_grab`] for the answer a pointer
     /// gesture wants.
     #[must_use]
     pub fn border_hit(&self, x: f64, y: f64) -> Option<BorderGrab> {
         self.nodes.iter().rev().find_map(|node| {
+            let (half_w, half_h) = self.extent(node.id);
+            if node.form == Form::Compose {
+                let distance = (x - node.x).hypot(y - node.y);
+                return ((distance - half_w).abs() <= BORDER_BAND).then_some(BorderGrab {
+                    id: node.id,
+                    wide: true,
+                    tall: true,
+                });
+            }
             if node.form != Form::Square {
                 return None;
             }
-            let (half_w, half_h) = self.extent(node.id);
             let (dx, dy) = ((x - node.x).abs(), (y - node.y).abs());
             // Outside the band around the box altogether: bare canvas.
             if dx > half_w + BORDER_BAND || dy > half_h + BORDER_BAND {
@@ -1700,10 +1811,10 @@ impl Mandala {
         })
     }
 
-    /// Move a square and everything drawn inside it together.
+    /// Move a structural container and everything drawn inside it together.
     ///
-    /// The box and its contents read as one object, so dragging the box by its
-    /// border or its empty space carries the interior along. Plain
+    /// A boundary and its contents read as one object, so dragging it by the
+    /// border or empty space carries the interior along. Plain
     /// [`Mandala::move_to`] still moves exactly one node, which is what layout
     /// wants.
     pub fn move_group_to(&mut self, id: NodeId, x: f64, y: f64) {
@@ -2404,11 +2515,11 @@ impl Mandala {
                 return;
             }
             let depth = depth_of.get(&id).copied().unwrap_or(0);
-            let inlined = m.inlined_mediator(id);
+            let contained = m.contained_children(id);
             let kids: Vec<NodeId> = m
                 .children(id)
                 .into_iter()
-                .filter(|kid| Some(*kid) != inlined)
+                .filter(|kid| !contained.contains(kid))
                 .filter(|kid| depth_of.get(kid).copied() == Some(depth + 1))
                 .collect();
             for kid in &kids {
@@ -2444,17 +2555,18 @@ impl Mandala {
             }
         }
 
-        // Everything drawn inside a square claims no column and no row of its
-        // own out here: the box is laid out first, then its contents are placed
-        // within it. Otherwise the interior would leave holes in the circuit.
-        let boxes: Vec<(NodeId, Vec<NodeId>)> = depths
+        // Everything drawn inside a structural boundary claims no column or
+        // row of its own out here: the container is laid out first, then its
+        // contents are placed within it. Otherwise the interior leaves holes
+        // in the exterior circuit.
+        let containers: Vec<(NodeId, Vec<NodeId>)> = depths
             .iter()
             .filter_map(|(id, _)| {
                 let interior: Vec<NodeId> = self.interior(*id).into_iter().collect();
                 (!interior.is_empty()).then_some((*id, interior))
             })
             .collect();
-        let inside: HashSet<NodeId> = boxes
+        let inside: HashSet<NodeId> = containers
             .iter()
             .flat_map(|(_, interior)| interior.iter().copied())
             .collect();
@@ -2472,20 +2584,25 @@ impl Mandala {
             self.move_to(id, x, y);
         }
 
-        // Lay each interior out as its own small circuit, centred on its box.
-        for (square, interior) in boxes {
-            let Some(node) = self.node(square) else {
+        // Lay each interior out as its own small circuit, centred within its
+        // boundary.
+        for (container, interior) in containers {
+            let Some(node) = self.node(container) else {
                 continue;
             };
             let (ox, oy) = (node.x, node.y);
-            let mediator = match self.mediator(square) {
-                Some(mediator) => mediator,
-                None => continue,
-            };
+            let roots = self.contained_children(container);
+            if roots.is_empty() {
+                continue;
+            }
             // Depth and row within the interior only.
             let inner_depth: HashMap<NodeId, usize> = {
                 let mut out = HashMap::new();
-                let mut frontier = vec![(mediator, 0usize)];
+                let mut frontier = roots
+                    .iter()
+                    .rev()
+                    .map(|root| (*root, 0usize))
+                    .collect::<Vec<_>>();
                 while let Some((id, depth)) = frontier.pop() {
                     if out.insert(id, depth).is_some() {
                         continue;
@@ -2499,14 +2616,16 @@ impl Mandala {
             let mut inner_rows = HashMap::new();
             let mut inner_seen = HashSet::new();
             let mut inner_leaf = 0.0;
-            pack(
-                self,
-                mediator,
-                &inner_depth,
-                &mut inner_rows,
-                &mut inner_seen,
-                &mut inner_leaf,
-            );
+            for root in roots {
+                pack(
+                    self,
+                    root,
+                    &inner_depth,
+                    &mut inner_rows,
+                    &mut inner_seen,
+                    &mut inner_leaf,
+                );
+            }
             let max_depth = inner_depth.values().copied().max().unwrap_or(0) as f64;
             let max_row = inner_rows.values().copied().fold(0.0_f64, f64::max);
             let spots: Vec<(NodeId, f64, f64)> = interior
@@ -3090,9 +3209,90 @@ mod tests {
     }
 
     #[test]
+    fn compose_contains_moves_and_resizes_around_every_operand() {
+        let source = "(\"a\" (-> \"b\" \"c\"))";
+        let mut m = Mandala::from_rebis(source).unwrap();
+        let compose = m
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Compose)
+            .unwrap()
+            .clone();
+        let interior = m.interior(compose.id);
+        assert_eq!(
+            interior.len(),
+            4,
+            "the direct prompt plus the flow and both of its prompts"
+        );
+        assert!(interior.iter().all(|id| m.is_inlined(*id)));
+        assert_eq!(m.contained_children(compose.id).len(), 2);
+
+        let (radius_x, radius_y) = m.extent(compose.id);
+        assert_eq!(radius_x, radius_y, "compose must remain a true circle");
+        assert!(radius_x > NODE_R, "the circle grew around its operands");
+        for id in &interior {
+            let node = m.node(*id).unwrap();
+            let child_extent = m.extent(*id);
+            let far_corner = ((node.x - compose.x).abs() + child_extent.0)
+                .hypot((node.y - compose.y).abs() + child_extent.1);
+            assert!(
+                far_corner + MEDIATOR_PAD <= radius_x + 1e-9,
+                "{:?} escaped the compose circle",
+                node.form
+            );
+        }
+
+        // Hit geometry follows the circle rather than its square bounds, and
+        // the whole circumference offers a radial resize.
+        assert_eq!(
+            m.hit(compose.x + radius_x * 0.72, compose.y + radius_x * 0.72),
+            None
+        );
+        let diagonal = radius_x / 2.0_f64.sqrt();
+        let grab = m
+            .border_hit(compose.x + diagonal, compose.y + diagonal)
+            .expect("the circular border resizes");
+        assert_eq!(grab.id, compose.id);
+        assert!(grab.wide && grab.tall);
+        assert_eq!(
+            m.resize_grab(compose.x + diagonal, compose.y + diagonal),
+            Some(grab)
+        );
+
+        let before = interior
+            .iter()
+            .map(|id| {
+                let node = m.node(*id).unwrap();
+                (*id, node.x - compose.x, node.y - compose.y)
+            })
+            .collect::<Vec<_>>();
+        m.move_group_to(compose.id, compose.x + 400.0, compose.y - 150.0);
+        let moved = m.node(compose.id).unwrap().clone();
+        for (id, dx, dy) in before {
+            let node = m.node(id).unwrap();
+            assert!((node.x - moved.x - dx).abs() < 1e-9);
+            assert!((node.y - moved.y - dy).abs() < 1e-9);
+        }
+
+        m.resize(compose.id, radius_x + 60.0, radius_y + 20.0);
+        assert_eq!(
+            m.extent(compose.id),
+            (radius_x + 60.0, radius_x + 60.0),
+            "manual resize changes one shared radius"
+        );
+        m.resize(compose.id, 1.0, 1.0);
+        let restored = m.extent(compose.id);
+        assert!(
+            (restored.0 - radius_x).abs() < 1e-9 && (restored.1 - radius_y).abs() < 1e-9,
+            "the circle cannot shrink through its contents: {restored:?}"
+        );
+        assert_eq!(m.to_rebis().unwrap(), source);
+    }
+
+    #[test]
     fn structural_forms_use_their_declared_outlines() {
-        assert_eq!(Form::Prompt.shape(), Shape::Circle);
-        assert_eq!(Form::Compose.shape(), Shape::Oval);
+        assert_eq!(Form::Prompt.shape(), Shape::Triangle);
+        assert_eq!(Form::Compose.shape(), Shape::Circle);
         // The box belongs to the mediator alone: a square on the canvas can
         // only mean a mediation. The implicit top-level scope is a hexagon.
         assert_eq!(Form::Square.shape(), Shape::Square);
@@ -3113,11 +3313,15 @@ mod tests {
         // canvas is always a mediator and never a scope.
         let mut distinct = Vec::new();
         let mut squares = 0;
+        let mut circles = 0;
         for (_, make, _) in Form::ALL {
             let form = make();
             let shape = form.shape();
             if shape == Shape::Square {
                 squares += 1;
+            }
+            if shape == Shape::Circle {
+                circles += 1;
             }
             if shape == Shape::Arrow {
                 continue; // forward and backflow share the arrow by design
@@ -3129,7 +3333,10 @@ mod tests {
             distinct.push(shape);
         }
         assert_eq!(squares, 1, "the square belongs to the mediator alone");
+        assert_eq!(circles, 1, "the circle belongs to compose alone");
         assert!(distinct.contains(&Shape::Square));
+        assert!(distinct.contains(&Shape::Circle));
+        assert!(distinct.contains(&Shape::Triangle));
         assert!(distinct.contains(&Shape::Hexagon));
     }
 
@@ -3146,7 +3353,12 @@ mod tests {
         ] {
             assert!(!s.strokes().is_empty(), "{s:?} draws nothing");
         }
-        for s in [Shape::Circle, Shape::Square, Shape::Oval, Shape::Diamond] {
+        for s in [
+            Shape::Circle,
+            Shape::Triangle,
+            Shape::Square,
+            Shape::Diamond,
+        ] {
             assert!(s.strokes().is_empty(), "{s:?} is an outline, not a sigil");
         }
     }
@@ -3209,12 +3421,16 @@ mod tests {
     }
 
     #[test]
-    fn the_compose_oval_uses_elliptical_hit_geometry() {
-        assert_eq!(Form::Compose.shape(), Shape::Oval);
-        assert!(Shape::Oval.contains(NODE_R - 1.0, 0.0));
-        assert!(Shape::Oval.contains(0.0, NODE_RY - 1.0));
-        assert!(!Shape::Oval.contains(NODE_R * 0.8, NODE_RY * 0.8));
-        assert!(!Shape::Oval.contains(0.0, NODE_RY + 1.0));
+    fn prompt_triangles_use_their_outline_for_hit_testing() {
+        assert_eq!(Form::Prompt.shape(), Shape::Triangle);
+        assert!(Shape::Triangle.contains(0.0, 0.0));
+        assert!(Shape::Triangle.contains(NODE_R * 0.9, NODE_RY * 0.9));
+        assert!(!Shape::Triangle.contains(NODE_R * 0.8, -NODE_RY * 0.8));
+        assert!(!Shape::Triangle.contains(0.0, NODE_RY + 1.0));
+
+        for (x, y) in Shape::triangle_points() {
+            assert!(Shape::Triangle.contains(x as f64 * 0.98, y as f64 * 0.98));
+        }
     }
 
     #[test]
@@ -3647,13 +3863,13 @@ mod tests {
     // ── hit testing ────────────────────────────────────────────────────────
 
     #[test]
-    fn hit_finds_a_circle_only_inside_its_radius() {
+    fn hit_finds_a_triangle_only_inside_its_outline() {
         let mut m = Mandala::new();
         let a = m.add(Form::Prompt, "a", 100.0, 100.0);
         assert_eq!(m.hit(100.0, 100.0), Some(a));
-        assert_eq!(m.hit(100.0 + NODE_R - 1.0, 100.0), Some(a));
-        assert_eq!(m.hit(100.0 + NODE_R + 1.0, 100.0), None);
-        assert_eq!(m.hit(100.0 + NODE_R, 100.0 + NODE_R), None);
+        assert_eq!(m.hit(100.0 + NODE_R * 0.8, 100.0 + NODE_RY * 0.8), Some(a));
+        assert_eq!(m.hit(100.0 + NODE_R * 0.8, 100.0 - NODE_RY * 0.8), None);
+        assert_eq!(m.hit(100.0, 100.0 + NODE_RY + 1.0), None);
     }
 
     #[test]
@@ -3710,7 +3926,7 @@ mod tests {
             assert!(corner.wide && corner.tall, "a corner sizes both");
         }
 
-        // Only squares have a box to size.
+        // Fixed forms do not offer a resizable border.
         let mut other = Mandala::new();
         other.add(Form::Prompt, "a", 0.0, 0.0);
         assert!(other.border_hit(NODE_R - 1.0, 0.0).is_none());
@@ -3917,7 +4133,7 @@ mod tests {
         let mediator = m.add(Form::Prompt, "mediator", 200.0, 0.0);
         m.father_of(square, mediator);
 
-        m.make_room_for_square(square);
+        m.make_room_for_container(square);
 
         let square_node = m.node(square).unwrap();
         let loose_node = m.node(loose).unwrap();
@@ -3929,6 +4145,29 @@ mod tests {
             "the loose form must remain visibly outside the structural box"
         );
         assert!(m.is_inlined(mediator));
+        assert!(!m.is_inlined(loose));
+    }
+
+    #[test]
+    fn compose_expansion_keeps_overlapping_loose_forms_outside() {
+        let mut m = Mandala::new();
+        let compose = m.add(Form::Compose, "", 0.0, 0.0);
+        let loose = m.add(Form::Prompt, "loose", 100.0, 0.0);
+        let operand = m.add(Form::Prompt, "operand", 220.0, 0.0);
+        m.father_of(compose, operand);
+
+        m.make_room_for_container(compose);
+
+        let circle = m.node(compose).unwrap();
+        let loose_node = m.node(loose).unwrap();
+        let radius = m.extent(compose).0;
+        let loose_extent = m.extent(loose);
+        assert!(
+            (loose_node.x - circle.x).abs() > radius + loose_extent.0
+                || (loose_node.y - circle.y).abs() > radius + loose_extent.1,
+            "a loose form must not appear to become part of the compose circle"
+        );
+        assert!(m.is_inlined(operand));
         assert!(!m.is_inlined(loose));
     }
 

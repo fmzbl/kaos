@@ -54,6 +54,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "KAOS_REBIS_MAX_MODULES",
     "KAOS_REBIS_MAX_CALLS",
     "KAOS_REBIS_MAX_CONCURRENCY",
+    "KAOS_REBIS_GIT_WORKTREES",
     "KAOS_REBIS_TIMEOUT_S",
     "KAOS_DEBUG",
 ];
@@ -358,6 +359,13 @@ pub const CONFIG_DOCS: &[ConfigDoc] = &[
         example: "KAOS_REBIS_MAX_CONCURRENCY = 8",
     },
     ConfigDoc {
+        key: "KAOS_REBIS_GIT_WORKTREES",
+        kind: ValueKind::Boolean,
+        summary: "Isolate live tool-using square branches with Git worktrees.",
+        details: "Opt-in. With `1`, each concurrent `[]` child receives a detached worktree and Kaos reconciles its Git-visible edits in source order before the mediator runs. If Git, worktree support, or a repository is unavailable, Kaos explains how to enable the dependency and continues sequentially instead of failing the run.",
+        example: "KAOS_REBIS_GIT_WORKTREES = true",
+    },
+    ConfigDoc {
         key: "KAOS_REBIS_TIMEOUT_S",
         kind: ValueKind::DurationSeconds,
         summary: "Timeout for one model-backed Rebis turn.",
@@ -450,12 +458,15 @@ KAOS_UNIT = 700
 KAOS_BASE = 500
 KAOS_RUNGS = 5
 
-# Rebis runtime limits. Zero disables macro expansion, imports, or model calls;
-# zero concurrency is sequential and zero timeout falls back to its safe default.
+# Rebis runtime. Zero disables macro expansion, imports, or model calls; zero
+# concurrency is sequential and zero timeout falls back to its safe default.
 KAOS_REBIS_MAX_EXPANSIONS = 256
 KAOS_REBIS_MAX_MODULES = 64
 KAOS_REBIS_MAX_CALLS = 1024
 KAOS_REBIS_MAX_CONCURRENCY = 4
+# Optional live tool-agent parallelism for `[]`. Requires Git + a repository;
+# unavailable Git falls back to normal sequential execution.
+KAOS_REBIS_GIT_WORKTREES = 0
 # Seconds for one Rebis model turn, not the complete recursive process.
 KAOS_REBIS_TIMEOUT_S = 600
 

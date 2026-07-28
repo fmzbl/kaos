@@ -1113,16 +1113,18 @@ struct RebisOracle<'a> {
     /// In a hosted run this is a renewable slice: reaching it pauses before
     /// the next model call, and SIGCONT grants another slice.
     model_call_slice: usize,
-    /// Interpreter prompt position, including answers replayed from a previous
-    /// child after an interruption.
-    sequence: std::cell::Cell<usize>,
+    /// Human-facing agent number. Checkpoint identity comes from Rebis's
+    /// structural scope, so scheduling cannot change it.
+    display_sequence: std::sync::atomic::AtomicUsize,
     /// New model calls made by this child. Replayed calls do not consume a
     /// renewed model-call slice or trigger its pause boundary again.
-    live_sequence: std::cell::Cell<usize>,
+    live_sequence: std::sync::atomic::AtomicUsize,
     journal: kaos::rebis_checkpoint::PromptJournal,
     /// Read before each unfinished prompt. The TUI may update this file while
     /// the interpreter is alive; checkpoint replays intentionally bypass it.
     directive_path: Option<std::path::PathBuf>,
+    /// Present only for opted-in, tool-using parallel runs.
+    worktrees: Option<kaos::rebis_worktree::GitWorktrees>,
 }
 
 impl RebisOracle<'_> {
@@ -1132,12 +1134,16 @@ impl RebisOracle<'_> {
 
     fn finish_prompt(
         &self,
-        index: usize,
+        scope: &rebis_lang::ExecutionScope,
+        call: usize,
         prompt: &str,
         answer: Option<String>,
     ) -> Result<Option<String>, String> {
         loop {
-            match self.journal.record(index, prompt, answer.as_deref()) {
+            match self
+                .journal
+                .record_scoped(scope, call, prompt, answer.as_deref())
+            {
                 Ok(()) => return Ok(answer),
                 Err(error) if self.pause_failed_prompt(&error) => {}
                 Err(error) => return Err(error),
@@ -1185,14 +1191,31 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
     }
 
     fn try_fire(&self, prompt: &str) -> Result<Option<String>, String> {
+        self.try_fire_scoped(prompt, &rebis_lang::ExecutionScope::root(), 0)
+    }
+
+    fn try_fire_scoped(
+        &self,
+        prompt: &str,
+        scope: &rebis_lang::ExecutionScope,
+        call: usize,
+    ) -> Result<Option<String>, String> {
+        let branch_seed = if scope.is_root() {
+            String::new()
+        } else {
+            format!("|{scope}|{call}")
+        };
         let mut sampling = kaos::backend::Sampling::seeded(hash_str(&format!(
-            "rebis-agent|{}|{prompt}",
-            if self.chaos { "chaos" } else { "normal" }
+            "rebis-agent|{}{branch_seed}|{prompt}",
+            if self.chaos { "chaos" } else { "normal" },
         )));
         sampling.temperature = kaos::spiral::Polarity::Solar.temperature();
-        let agent = self.sequence.get() + 1;
-        self.sequence.set(agent);
-        if let kaos::rebis_checkpoint::Replay::Hit(answer) = self.journal.replay(agent - 1, prompt)
+        let agent = self
+            .display_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if let kaos::rebis_checkpoint::Replay::Hit(answer) =
+            self.journal.replay_scoped(scope, call, prompt)
         {
             println!("checkpoint replayed · Rebis prompt {agent} already complete");
             let _ = std::io::stdout().flush();
@@ -1209,8 +1232,10 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             let _ = std::io::stdout().flush();
         }
         let mut step = 0usize;
-        let live_agent = self.live_sequence.get() + 1;
-        self.live_sequence.set(live_agent);
+        let live_agent = self
+            .live_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         if self.model_call_slice > 0
             && live_agent > 1
             && (live_agent - 1).checked_rem(self.model_call_slice) == Some(0)
@@ -1264,19 +1289,29 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             let _ = std::io::stdout().flush();
             let answer = response.trim().to_string();
             kaos::fold::close();
-            return self.finish_prompt(agent - 1, prompt, (!answer.is_empty()).then_some(answer));
+            return self.finish_prompt(scope, call, prompt, (!answer.is_empty()).then_some(answer));
         }
 
-        let root = std::fs::canonicalize(self.root).unwrap_or_else(|_| self.root.to_path_buf());
+        let root = match &self.worktrees {
+            Some(worktrees) => worktrees.workspace(scope)?,
+            None => std::fs::canonicalize(self.root).unwrap_or_else(|_| self.root.to_path_buf()),
+        };
+        let worktree_contract = (!scope.is_root() && self.worktrees.is_some()).then(|| {
+            format!(
+                "\n\nThis is isolated Rebis branch {scope}. Do not create Git commits, \
+                 branches, or worktrees; Kaos reconciles working-tree edits at the square join."
+            )
+        });
         if !self.chaos && self.model.kind == Kind::ClaudeCli {
             println!("model    direct Claude agent · {model_label} · native tools enabled");
             let task = format!(
                 "{}\n\nYou are operating directly in this workspace:\n{}\n\nUse your native \
                  file and command tools to perform every requested change. Do not merely describe \
                  edits. Complete only this Rebis node, then return the value that should flow to \
-                 the next node.\n\nNODE PROMPT:\n{effective_prompt}",
+                 the next node.{}\n\nNODE PROMPT:\n{effective_prompt}",
                 kaos::conductor::rebis_agent_system_prompt(),
-                root.display()
+                root.display(),
+                worktree_contract.as_deref().unwrap_or_default(),
             );
             let response = loop {
                 let response = kaos::backend::run_claude_agent_once_with_result(
@@ -1308,7 +1343,7 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             };
             let answer = response.trim().to_string();
             kaos::fold::close();
-            return self.finish_prompt(agent - 1, prompt, (!answer.is_empty()).then_some(answer));
+            return self.finish_prompt(scope, call, prompt, (!answer.is_empty()).then_some(answer));
         }
 
         println!(
@@ -1325,8 +1360,9 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
              command requested by the instruction. Do not merely describe changes that the \
              instruction asks you to make. Complete the work in this launch directory, verify it \
              when appropriate, and finish with the value that should flow to the next Rebis \
-             node:\n\n{effective_prompt}",
-            root.display()
+             node:{}\n\n{effective_prompt}",
+            root.display(),
+            worktree_contract.as_deref().unwrap_or_default(),
         );
         let mut on_model_call = |turn: usize| {
             println!("model    generating turn {turn} · {model_label} · limit {timeout_s}s");
@@ -1396,7 +1432,35 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             }
         }
         kaos::fold::close();
-        self.finish_prompt(agent - 1, prompt, (!answer.is_empty()).then_some(answer))
+        self.finish_prompt(scope, call, prompt, (!answer.is_empty()).then_some(answer))
+    }
+
+    fn begin_parallel(
+        &self,
+        parent: &rebis_lang::ExecutionScope,
+        children: &[rebis_lang::ExecutionScope],
+    ) -> Result<bool, String> {
+        if let Some(worktrees) = &self.worktrees {
+            if let Err(error) = worktrees.begin(parent, children) {
+                eprintln!(
+                    "rebis: Git isolation unavailable for square {parent}: {error}; \
+                     continuing that square sequentially"
+                );
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn finish_parallel(
+        &self,
+        parent: &rebis_lang::ExecutionScope,
+        children: &[rebis_lang::ExecutionScope],
+    ) -> Result<(), String> {
+        if let Some(worktrees) = &self.worktrees {
+            worktrees.finish(parent, children)?;
+        }
+        Ok(())
     }
 }
 
@@ -1656,6 +1720,7 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             .unwrap_or(default)
     };
     let model_call_slice = limit("KAOS_REBIS_MAX_CALLS", rebis_lang::MAX_MODEL_CALLS);
+    let max_concurrency = limit("KAOS_REBIS_MAX_CONCURRENCY", rebis_lang::MAX_CONCURRENCY);
     let limits = rebis_lang::RuntimeLimits::standard()
         .with_macro_expansions(limit(
             "KAOS_REBIS_MAX_EXPANSIONS",
@@ -1672,13 +1737,35 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
         } else {
             model_call_slice
         })
-        .with_max_concurrency(limit(
-            "KAOS_REBIS_MAX_CONCURRENCY",
-            rebis_lang::MAX_CONCURRENCY,
-        ));
-    // Dry evaluation is safe to fan out. Tool-using agents share one real
-    // workspace, so execute them sequentially in program order: concurrent file
-    // edits would violate Rebis's isolation assumptions and race each other.
+        .with_max_concurrency(max_concurrency);
+    let worktrees = if !dry
+        && allow_tools
+        && max_concurrency > 1
+        && kaos::config::enabled(kaos::rebis_worktree::CONFIG_KEY)
+    {
+        match kaos::rebis_worktree::GitWorktrees::new(&root) {
+            Ok(worktrees) => {
+                println!(
+                    "rebis: live [] branches use isolated Git worktrees (limit {max_concurrency})"
+                );
+                Some(worktrees)
+            }
+            Err(guidance) => {
+                eprintln!("rebis: {guidance}; continuing with normal sequential [] execution");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    // Model-only calls do not mutate the workspace and are safe to fan out.
+    // Tool agents require the explicit Git-worktree capability above.
+    let live_parallel = !dry && max_concurrency > 1 && (!allow_tools || worktrees.is_some());
+    if live_parallel {
+        // Nested fold markers are stack-shaped and cannot represent interleaved
+        // branch streams. Plain headings keep concurrent output truthful.
+        std::env::set_var("KAOS_FOLD", "0");
+    }
     let result = if dry {
         rebis_lang::orchestrate_parallel(
             &expr,
@@ -1689,27 +1776,42 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             &mut stream,
         )
     } else {
-        rebis_lang::orchestrate_with_inlet(
-            &expr,
-            &mut record,
-            &RebisOracle {
-                model: &session.model,
-                root: &root,
-                allow_tools,
-                chaos,
-                model_call_slice,
-                sequence: std::cell::Cell::new(0),
-                live_sequence: std::cell::Cell::new(0),
-                journal: kaos::rebis_checkpoint::PromptJournal::from_env(),
-                directive_path: kaos::rebis_supervisor::path_from_env(),
-            },
-            &modules,
-            &RebisInlet {
-                path: kaos::rebis_inlet::path_from_env(),
-            },
-            limits,
-            &mut stream,
-        )
+        let oracle = RebisOracle {
+            model: &session.model,
+            root: &root,
+            allow_tools,
+            chaos,
+            model_call_slice,
+            display_sequence: std::sync::atomic::AtomicUsize::new(0),
+            live_sequence: std::sync::atomic::AtomicUsize::new(0),
+            journal: kaos::rebis_checkpoint::PromptJournal::from_env(),
+            directive_path: kaos::rebis_supervisor::path_from_env(),
+            worktrees,
+        };
+        let inlet = RebisInlet {
+            path: kaos::rebis_inlet::path_from_env(),
+        };
+        if live_parallel {
+            rebis_lang::orchestrate_parallel_with_inlet(
+                &expr,
+                &mut record,
+                &oracle,
+                &modules,
+                &inlet,
+                limits,
+                &mut stream,
+            )
+        } else {
+            rebis_lang::orchestrate_with_inlet(
+                &expr,
+                &mut record,
+                &oracle,
+                &modules,
+                &inlet,
+                limits,
+                &mut stream,
+            )
+        }
     };
     println!("{}", rebis_lang::REBIS_SIGIL);
     println!("RESULT");

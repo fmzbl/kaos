@@ -148,6 +148,7 @@ of the transcript are intentionally favored over its rotting middle.
 | `KAOS_REBIS_MAX_MODULES` | `64` | integer | Distinct uncached module-load budget for `(# name)`. `0` disables imports. |
 | `KAOS_REBIS_MAX_CALLS` | `1024` | integer | Model-backed prompt budget for one process. `0` makes execution model-silent. |
 | `KAOS_REBIS_MAX_CONCURRENCY` | `4` | integer | Parallel branch bound for Rebis square evaluation. `1` or `0` means sequential. |
+| `KAOS_REBIS_GIT_WORKTREES` | `0` | boolean | Opt into detached Git worktrees for parallel, live tool-using `[]` children. |
 | `KAOS_REBIS_TIMEOUT_S` | `600` | seconds | Timeout for one model-backed Rebis turn, not the whole recursive process. |
 
 These limits are applied by the host when it constructs Rebis's
@@ -161,6 +162,16 @@ grant another slice. A direct terminal run reports the model-call diagnostic
 when its allowance is exhausted. Unlike the three zero-disable budgets,
 `KAOS_REBIS_MAX_CONCURRENCY=0` is normalized to sequential execution and
 `KAOS_REBIS_TIMEOUT_S=0` falls back to its safe default.
+
+`KAOS_REBIS_GIT_WORKTREES=1` makes filesystem-writing square children eligible
+for parallel execution. Kaos snapshots the parent working tree without
+changing its branch or index, creates one detached worktree per child, and
+reconciles edits in source order before the mediator. The later child wins an
+overlapping hunk; the combined changes are left unstaged. Git and a repository
+are optional capabilities: if `git` is missing, too old for `git worktree`, or
+the current directory is not in a repository, Kaos reports the reason (and
+advises installing/upgrading Git when applicable) and runs the square
+sequentially.
 
 ### Diagnostics
 

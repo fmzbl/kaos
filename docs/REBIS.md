@@ -332,6 +332,13 @@ the box still moves the box and its contents together, and a block dropped
 across a wall is still grabbed as a block. A hand-set size is presentation
 like every coordinate: the same source is generated either way.
 
+A compose form is the only circle. Every one of its ordered operands, and each
+operand's subtree, is drawn inside that circumference. The circle grows around
+all of them, dragging it carries them together, and dragging anywhere along its
+border changes one shared radius so it never becomes an oval. Its contents are
+the minimum size. Prompts use triangle outlines, while `$`, `~`, `#`, `'`, `,`,
+`^`, and `%` appear as their own marks rather than circles.
+
 Drawing parsed source lays the syntax tree out as a left-to-right circuit:
 nesting depth is the column, so a form sits one column left of its operands,
 and a tidy row packing centres each form on the rows of the operands it drives,
@@ -575,6 +582,16 @@ and `KAOS_REBIS_MAX_CONCURRENCY`. Zero disables macro expansion, imports, or
 model calls; zero concurrency means sequential evaluation. Each tool-using
 agent model turn has a 600-second wall-clock limit; set
 `KAOS_REBIS_TIMEOUT_S` to accommodate a slower local model.
+
+Model-only `[]` children can use that concurrency directly. Live children with
+file and command tools remain sequential unless
+`KAOS_REBIS_GIT_WORKTREES=1` is enabled. In that mode Kaos snapshots the current
+Git working tree, gives each child a detached worktree, and reconciles the
+resulting edits in source order immediately before the mediator. The user's
+branch and index are untouched and the combined edits remain unstaged. Git is
+optional: a missing executable, old worktree implementation, or non-repository
+directory produces guidance and transparently falls back to normal sequential
+execution.
 
 Use `/output` to show only the final value. `/output copy` places it in the
 embedded Vim yank register for `p`, and `/output write FILE` writes the exact

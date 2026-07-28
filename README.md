@@ -526,19 +526,19 @@ a small helical separation, so recursion reads as a loop instead of a crossing
 line. Flow forms become explicit arrow-glyph nodes in 3D. Camera movement and
 mode switching never change Rebis or enter undo history; use 2D to edit.
 
-The whiteboard exposes every Rebis form. Prompts, symbols, compose, and
-combining forms use distinct outlines; source sigils are drawn as their own
-shapes:
+The whiteboard exposes every Rebis form. Compose alone uses a circle; prompts
+are triangles, and source sigils are drawn as their own marks without generic
+circular backplates:
 
 | draw | means | generates |
 |---|---|---|
-| `o` | prompt terminal | `"label"` |
+| `△` | prompt terminal | `"label"` |
 | `◇` | symbol | `name` |
-| oval `( )` | ordered composition | `(A B …)` |
-| `[]` | square, call, or program | the matching structural form |
+| circle `( )` | ordered composition container | `(A B …)` |
+| `[]` | mediator square | `([M] A B …)` |
+| parallelogram / inlet / hexagon | call / input / program | the matching structural form |
 | `→` | answer flow | `(-> A B)` (reverse drawing loads `<-`) |
-| `$`, `~`, `#`, `'`, `,` | the corresponding source sigil | its Rebis form |
-| `^` | syntax inverter shape | `(^ E)` |
+| `$`, `~`, `#`, `'`, `,`, `^`, `%` | the corresponding source sigil | its Rebis form |
 
 An arrow means "this answer flows into that shape". Drawing a `←` is the same
 as drawing a `→` the other way, so there is nothing extra to learn. The
@@ -563,6 +563,13 @@ global node labels.
 Position is presentation only: moving, overlapping, or drawing one shape inside
 another never links them or changes the program. The same blue/grey distinction
 is retained in 2D and 3D.
+
+A compose circle encloses every operand connected to it and every form below
+those operands. It grows to keep them all within the circumference, moves them
+as a group when dragged, and can be resized from any point on its border while
+remaining perfectly circular. Its contents set the minimum radius. This visual
+containment comes from `father of` links only; overlap still creates no
+structure.
 
 Rebis's `->` is binary and folds left, so `(-> a b "label")` means "a flows to b
 flows to label". A square provides the direct representation of mediated
@@ -698,6 +705,7 @@ KAOS_REBIS_MAX_EXPANSIONS   macro expansion limit (256)
 KAOS_REBIS_MAX_MODULES      module import limit (64)
 KAOS_REBIS_MAX_CALLS        model call limit (1024)
 KAOS_REBIS_MAX_CONCURRENCY  runtime branch concurrency (4)
+KAOS_REBIS_GIT_WORKTREES    isolated live tool branches (off)
 vim_mode                    persistent embedded-Vim preference (false)
 ```
 
@@ -707,6 +715,16 @@ execution and a zero Rebis timeout falls back to its safe default. In a hosted
 TUI run, the model-call limit is a renewable slice: reaching it pauses the live
 run and `p` grants the next slice. Explicit shell environment variables
 override values loaded from the config file.
+
+Live model-only square children can run concurrently without filesystem
+isolation. Tool-using children stay sequential by default. Set
+`KAOS_REBIS_GIT_WORKTREES=1` to give each concurrent `[]` child a detached Git
+worktree; Kaos snapshots the current working tree, runs children independently,
+then reconciles their changes in source order before the mediator. Later
+children win only overlapping Git hunks, and the combined result remains
+unstaged. This requires the `git` executable and a repository. If either is
+unavailable, Kaos prints an install/setup hint and continues with normal
+sequential execution rather than failing the run.
 
 ## Chat and coding-agent workflows
 
