@@ -188,6 +188,28 @@ impl Form {
         matches!(self, Form::Forward | Form::Backflow)
     }
 
+    /// Whether the form is written as a mark immediately before its one operand.
+    ///
+    /// `'form` and `,value` open no parentheses and take no place of their own
+    /// in the source — they are read as part of the thing they precede. Drawing
+    /// them as separate forms scattered among their neighbours lost exactly the
+    /// relation that adjacency was carrying, so they are drawn where they are
+    /// written: on the front of their operand.
+    #[must_use]
+    pub fn is_prefix_sigil(&self) -> bool {
+        matches!(self, Form::Quote | Form::Unquote)
+    }
+
+    /// The character the prefix is written with.
+    #[must_use]
+    pub fn prefix_sigil(&self) -> &'static str {
+        match self {
+            Form::Quote => "'",
+            Form::Unquote => ",",
+            _ => "",
+        }
+    }
+
     /// How the form is drawn.
     ///
     /// Every indentation is a boundary, because on this canvas the boundary IS
@@ -1468,6 +1490,58 @@ impl Mandala {
         for (id, x, y) in spiral_spots(&items) {
             self.move_group_to(id, centre.0 + x, centre.1 + y);
         }
+        // Prefix sigils ride on the form they are written on, so they never
+        // linger where a previous arrangement left them.
+        let riders = self
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .filter(|id| self.is_written_prefix(*id))
+            .filter_map(|id| {
+                let operand = *self.children(id).first()?;
+                let node = self.node(operand)?;
+                Some((id, node.x, node.y))
+            })
+            .collect::<Vec<_>>();
+        for (id, x, y) in riders {
+            self.move_to(id, x, y);
+        }
+    }
+
+    /// The prefix sigils written on the front of this form, outermost first.
+    ///
+    /// `',x` is one written thing: a quote of an unquote of `x`. The sigils are
+    /// not forms standing beside `x`, they are marks on it, so the drawing puts
+    /// them there — `',` in front of the symbol — instead of leaving three
+    /// separate shapes for the eye to reassemble.
+    #[must_use]
+    pub fn written_prefix(&self, id: NodeId) -> String {
+        let mut sigils = Vec::new();
+        let mut cursor = id;
+        let mut seen = HashSet::new();
+        while seen.insert(cursor) {
+            let Some(father) = self.father(cursor) else {
+                break;
+            };
+            let Some(node) = self.node(father) else {
+                break;
+            };
+            if !node.form.is_prefix_sigil() {
+                break;
+            }
+            sigils.push(node.form.prefix_sigil());
+            cursor = father;
+        }
+        sigils.reverse();
+        sigils.concat()
+    }
+
+    /// Whether this form is a prefix sigil, and so is drawn on its operand
+    /// rather than anywhere of its own.
+    #[must_use]
+    pub fn is_written_prefix(&self, id: NodeId) -> bool {
+        self.node(id)
+            .is_some_and(|node| node.form.is_prefix_sigil() && self.children(id).len() == 1)
     }
 
     /// Put a new indentation *around* an existing form.
@@ -3452,6 +3526,11 @@ impl Mandala {
                 continue;
             }
             stack.extend(self.children(id).into_iter().rev());
+            // A prefix sigil is drawn on the front of its operand, so it claims
+            // no slot of its own; its operand takes the place it would have had.
+            if self.is_written_prefix(id) {
+                continue;
+            }
             if self.holder(id).is_none() {
                 let _ = self.hold(container, id);
             }
@@ -4646,6 +4725,7 @@ mod tests {
                 .nodes()
                 .iter()
                 .filter(|node| node.id != circle)
+                .filter(|node| !mandala.is_written_prefix(node.id))
                 .all(|node| mandala.is_inlined(node.id)),
             "nothing is left loose outside a boundary"
         );
@@ -5189,6 +5269,57 @@ mod tests {
     }
 
     #[test]
+    fn a_prefix_sigil_is_written_on_its_operand_not_beside_it() {
+        // `,worker` is one written thing. Drawn as a loose comma somewhere near
+        // a loose diamond, the adjacency that carried the relation is gone and
+        // the reader has to guess which mark belongs to which form.
+        let m = Mandala::from_rebis("(,worker ,task)").unwrap();
+        let circle = m
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Compose)
+            .unwrap()
+            .id;
+
+        // The circle holds the two symbols. The sigils take no slot of their
+        // own and are read off the front of the form they mark.
+        let held = m.contained_children(circle);
+        assert_eq!(held.len(), 2, "two forms inside, not four");
+        for id in held {
+            assert_eq!(m.node(id).unwrap().form, Form::Symbol);
+            assert_eq!(m.written_prefix(id), ",");
+        }
+        for node in m.nodes() {
+            if node.form.is_prefix_sigil() {
+                assert!(m.is_written_prefix(node.id));
+                assert_eq!(m.holder(node.id), None, "a prefix claims no slot");
+            }
+        }
+
+        // Stacked prefixes read outermost first, exactly as written.
+        let m = Mandala::from_rebis("(',x)").unwrap();
+        let symbol = m
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Symbol)
+            .unwrap()
+            .id;
+        assert_eq!(m.written_prefix(symbol), "',");
+        assert_eq!(m.to_rebis().unwrap(), "(',x)");
+
+        // A quoted boundary wears its prefix too, and keeps its own contents.
+        let m = Mandala::from_rebis("('([,x] ,x))").unwrap();
+        let square = m
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Square)
+            .unwrap()
+            .id;
+        assert_eq!(m.written_prefix(square), "'");
+        assert_eq!(m.contained_children(square).len(), 2);
+    }
+
+    #[test]
     fn a_boundary_lays_its_contents_out_in_operand_order() {
         let mut m = Mandala::from_rebis("(\"one\" \"two\" \"three\" \"four\" \"five\")").unwrap();
         let circle = m
@@ -5363,13 +5494,21 @@ mod tests {
             Some(outer),
             "the inner `(^ …)` is drawn inside the outer one"
         );
+        // `'` is written on the front of what it quotes, not held beside it.
         let quote = mandala
             .nodes()
             .iter()
             .find(|node| node.form == Form::Quote)
             .unwrap()
             .id;
-        assert_eq!(mandala.holder(quote), Some(outer));
+        assert!(mandala.is_written_prefix(quote));
+        assert_eq!(mandala.holder(quote), None, "a prefix claims no slot");
+        let quoted = mandala.children(quote)[0];
+        assert_eq!(
+            mandala.written_prefix(quoted),
+            "'",
+            "and is read on the form it marks"
+        );
         let prompt = mandala
             .nodes()
             .iter()

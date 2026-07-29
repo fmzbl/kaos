@@ -399,7 +399,10 @@ actual glyph, hit target, caption, edge clearance, 2D layout footprint, and 3D
 projection together. Hand-set size and positions are presentation; crossing a
 boundary is the deliberate structural edit. An indentation carries the sigil
 that opened it on its ring, keeping its interior clear for what it holds.
-A form shows one token on the canvas — the operator that opened it, or the
+`'` and `,` open no parentheses and take no place of their own: they are drawn
+on the front of the form they mark, so `,worker` is one symbol reading `,worker`
+rather than a loose comma somewhere near a loose diamond. Stacked prefixes read
+outermost first, as written. A form shows one token on the canvas — the operator that opened it, or the
 first word of its text — and the panel beside the canvas holds the whole of it,
 editable. Nothing is lost by that: it is a smaller view of text that is still
 there, one click away. Sizing a form's complete payload to its own outline is

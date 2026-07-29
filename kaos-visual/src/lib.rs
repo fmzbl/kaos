@@ -6638,7 +6638,11 @@ impl Editor {
         extent: Vec2,
         scale: f32,
     ) {
-        let mark = node.mark();
+        let mark = format!(
+            "{}{}",
+            self.doc().mandala.written_prefix(node.id),
+            node.mark()
+        );
         if mark.is_empty() {
             return;
         }
@@ -6742,13 +6746,22 @@ impl Editor {
             | Shape::Parallelogram
             | Shape::Amp
             | Shape::Hexagon => {
-                painter.text(centre, Align2::CENTER_CENTER, node.glyph(), font, k.ink);
+                let written = format!(
+                    "{}{}",
+                    self.doc().mandala.written_prefix(node.id),
+                    node.glyph()
+                );
+                painter.text(centre, Align2::CENTER_CENTER, written, font, k.ink);
             }
             _ => {
                 painter.text(
                     Pos2::new(centre.x, centre.y + screen_extent.y + 12.0 * zoom),
                     Align2::CENTER_CENTER,
-                    node.glyph(),
+                    format!(
+                        "{}{}",
+                        self.doc().mandala.written_prefix(node.id),
+                        node.glyph()
+                    ),
                     font,
                     k.faint,
                 );
@@ -7199,6 +7212,10 @@ impl Editor {
                     continue;
                 };
                 if n.form.opens_indentation() != boundaries {
+                    continue;
+                }
+                if self.doc().mandala.is_written_prefix(n.id) {
+                    // Drawn on the front of its operand, not beside it.
                     continue;
                 }
                 if !showing(footprint(n)) {
