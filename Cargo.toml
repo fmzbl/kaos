@@ -16,6 +16,15 @@ license = "GPL-3.0-or-later"
 [workspace]
 members = ["kaos-agent", "kaos-core", "kaos-pact", "kaos-visual", "kaos-workspace"]
 
+# Rebis is the model-interface language. Kaos is a host of it; the dependency is
+# deliberately one-way (rebis-lang has no knowledge of Kaos). It is taken from
+# git rather than a relative path so that a clone of Kaos alone builds: a path
+# dependency silently required a rebis checkout to be sitting beside it, which
+# is true on the machine it was written on and nowhere else. Declared once here
+# so all five crates that use it move together. `Cargo.lock` pins the revision.
+[workspace.dependencies]
+rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+
 [dependencies]
 # The fullscreen TUI. ratatui draws it, crossterm is the terminal backend, and
 # ansi-to-tui renders the themed ANSI that command subprocesses emit into styled
@@ -29,9 +38,7 @@ base64 = { version = "0.22", optional = true }
 # a fallback for remote terminals, but VTE/GNOME may ignore it and may consume
 # Ctrl-Shift-C before the application receives the key.
 arboard = { version = "3.6", default-features = false, optional = true }
-# Rebis is the model-interface language.  KAOS is a host of the language; the
-# dependency is deliberately one-way (rebis-lang has no knowledge of KAOS).
-rebis-lang = { path = "../rebis" }
+rebis-lang.workspace = true
 # The shared, front-end-agnostic core: config, palette, sessions, mandala model.
 kaos-core = { path = "kaos-core" }
 # The offline, deterministic simulation core.
