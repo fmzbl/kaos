@@ -21,7 +21,8 @@ use std::collections::BTreeSet;
 
 use kaos_core::tabs::{TabId, Tabs};
 use kaos_core::visual::{
-    BorderGrab, Form, Mandala, Node, NodeId, Shape, SpatialLayout, Stroke, View, WorldRect,
+    scales_uniformly, BorderGrab, Form, Mandala, Node, NodeId, Shape, SpatialLayout, Stroke, View,
+    WorldRect, BORDER_BAND,
 };
 use kaos_workspace::rebis_workspace::{
     handle_edit_key, highlights, EditKey, EditModifiers, Editor as SourceEditor,
@@ -30,6 +31,7 @@ use kaos_workspace::rebis_workspace::{
 
 mod actions;
 mod automata;
+mod pdf;
 /// The automaton's geometry, re-exported for `examples/generation_preview.rs`.
 ///
 /// That example renders the same composition to a PNG so the figure can be
@@ -78,6 +80,12 @@ struct Doc {
     /// edit made on the canvas from one typed into the panel, without either
     /// overwriting the other mid-keystroke.
     generated: String,
+    /// Frame the whole drawing the next time the canvas is painted.
+    ///
+    /// Fitting needs the window, and a drawing is loaded long before there is
+    /// one, so the intent is recorded here and spent by the first canvas frame
+    /// that knows its own size.
+    fit_pending: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
@@ -117,6 +125,28 @@ impl Default for SpatialCamera {
             pitch: 0.34,
             zoom: 1.0,
             pan: [0.0, 0.0, 0.0],
+        }
+    }
+}
+
+impl SpatialCamera {
+    /// The smallest scale the projection still survives, mirroring
+    /// [`View::MIN_ZOOM`] for the flat canvas.
+    const MIN_ZOOM: f32 = f32::MIN_POSITIVE;
+
+    /// Scale the view by `factor`, with no stop at either end.
+    ///
+    /// The structural view is the same drawing seen from somewhere else, so it
+    /// gets the same unbounded wheel: pulling back has no artificial floor and
+    /// pushing in has no ceiling. Only a scale that stops being representable
+    /// is refused.
+    fn zoom_by(&mut self, factor: f32) {
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+        let zoom = (self.zoom * factor).max(Self::MIN_ZOOM);
+        if zoom.is_finite() {
+            self.zoom = zoom;
         }
     }
 }
@@ -217,20 +247,14 @@ fn complete_flow(mandala: &Mandala, id: NodeId) -> bool {
     mandala.flow_result(id).is_some()
 }
 
-fn resolved_flow_result(mandala: &Mandala, mut id: NodeId) -> NodeId {
-    for _ in 0..16 {
-        let Some(next) = mandala.flow_result(id) else {
-            break;
-        };
-        id = next;
-    }
-    id
-}
-
+/// Whether a flow endpoint is something a connection can be drawn to.
+///
+/// Anything actually on the canvas is. A nested flow is a circle in its own
+/// right, so it is the block the arrow above it points at — following the chain
+/// through to its innermost result instead would flatten the nesting the source
+/// actually wrote.
 fn is_flow_boundary(mandala: &Mandala, id: NodeId) -> bool {
-    mandala
-        .node(id)
-        .is_some_and(|node| matches!(node.form, Form::Square | Form::Compose))
+    mandala.node(id).is_some()
 }
 
 /// Project stored syntax links into the operator connections shown by both
@@ -243,7 +267,7 @@ fn is_flow_boundary(mandala: &Mandala, id: NodeId) -> bool {
 fn visible_edges(mandala: &Mandala) -> Vec<VisibleEdge> {
     let mut edges = Vec::new();
     for node in mandala.nodes() {
-        if node.shape() != Shape::Arrow || !complete_flow(mandala, node.id) {
+        if !node.form.is_flow() || !complete_flow(mandala, node.id) {
             continue;
         }
         let kids = mandala.children(node.id);
@@ -255,8 +279,6 @@ fn visible_edges(mandala: &Mandala) -> Vec<VisibleEdge> {
         } else {
             (first, second)
         };
-        let from = resolved_flow_result(mandala, from);
-        let to = resolved_flow_result(mandala, to);
         if !is_flow_boundary(mandala, from) || !is_flow_boundary(mandala, to) {
             continue;
         }
@@ -290,6 +312,174 @@ struct GlyphPaint {
     hot: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct CaptionLayout {
+    lines: Vec<String>,
+    font_size: f32,
+    line_height: f32,
+    offset: Vec2,
+}
+
+/// The largest conservative rectangle that stays inside a text-bearing
+/// outline. It is intentionally expressed in half-extents so resizing a form
+/// expands its typography in the same proportion as its geometry.
+fn caption_box(shape: Shape, half: Vec2) -> (Vec2, Vec2) {
+    match shape {
+        Shape::Circle => (Vec2::ZERO, Vec2::new(half.x * 1.34, half.y * 1.34)),
+        Shape::Triangle => (
+            Vec2::new(0.0, half.y * 0.36),
+            Vec2::new(half.x * 1.00, half.y * 0.94),
+        ),
+        Shape::Diamond => (Vec2::ZERO, Vec2::new(half.x * 1.12, half.y * 1.12)),
+        Shape::Square => (Vec2::ZERO, Vec2::new(half.x * 1.72, half.y * 1.72)),
+        Shape::Parallelogram => (Vec2::ZERO, Vec2::new(half.x * 1.42, half.y * 1.54)),
+        Shape::Amp => (
+            Vec2::new(half.x * 0.10, 0.0),
+            Vec2::new(half.x * 1.18, half.y * 1.54),
+        ),
+        Shape::Hexagon => (Vec2::ZERO, Vec2::new(half.x * 1.50, half.y * 1.55)),
+        _ => (Vec2::ZERO, half * 2.0),
+    }
+}
+
+/// Wrap a caption without deleting or replacing any character. Breaks prefer
+/// existing whitespace, but long identifiers still split so an unbroken model
+/// or path cannot force an ellipsis.
+fn wrap_caption(text: &str, columns: usize) -> Vec<String> {
+    let columns = columns.max(1);
+    let mut wrapped = Vec::new();
+    for source_line in text.split('\n') {
+        let mut remaining = source_line.chars().collect::<Vec<_>>();
+        if remaining.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        while remaining.len() > columns {
+            let split = remaining[..columns]
+                .iter()
+                .rposition(|character| character.is_whitespace())
+                .map(|index| index + 1)
+                .filter(|index| *index > 0)
+                .unwrap_or(columns);
+            wrapped.push(remaining.drain(..split).collect());
+        }
+        wrapped.push(remaining.into_iter().collect());
+    }
+    wrapped
+}
+
+/// Fit every caption character into its outline. Monospace text is estimated
+/// at 0.62 em per character; both the egui painter and PDF renderer consume
+/// this same layout, keeping line breaks and scale stable across export.
+///
+/// `ceiling` is the largest type the consumer can actually set. The on-screen
+/// painter has one, because its glyphs are rasterized and the canvas zoom is
+/// unbounded; the PDF renderer passes infinity, because its text is curves and
+/// a page has no zoom to run away with.
+fn fit_caption(text: &str, shape: Shape, half: Vec2, ceiling: f32) -> CaptionLayout {
+    let (offset, area) = caption_box(shape, half);
+    let fits = |font_size: f32| {
+        let columns = (area.x / (font_size * 0.62).max(f32::EPSILON))
+            .floor()
+            .max(1.0) as usize;
+        let lines = wrap_caption(text, columns);
+        let line_height = font_size * 1.16;
+        let tallest = line_height * lines.len().max(1) as f32;
+        let widest = lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or_default() as f32
+            * font_size
+            * 0.62;
+        (tallest <= area.y && widest <= area.x, lines, line_height)
+    };
+
+    // Bounded above by what the consumer will actually draw, so a deeply
+    // zoomed-in shape settles on the largest type its renderer can set rather
+    // than asking for one the size of its own outline.
+    let mut low = MIN_GLYPH_PX;
+    let mut high = area.y.clamp(MIN_GLYPH_PX, ceiling.max(MIN_GLYPH_PX));
+    for _ in 0..18 {
+        let middle = (low + high) * 0.5;
+        if fits(middle).0 {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    // The search lands on an arbitrary fraction of a pixel, and every distinct
+    // fraction is a separate rasterisation the atlas keeps forever. Settling on
+    // a rung of the shared ladder is what lets a zoom reuse glyphs it has
+    // already paid for; it settles DOWNWARD, so the text that fitted still fits.
+    let low = glyph_px(low);
+    let (_, lines, line_height) = fits(low);
+    CaptionLayout {
+        lines,
+        font_size: low,
+        line_height,
+        offset,
+    }
+}
+
+/// The largest glyph the text rasterizer is ever asked for, in pixels.
+///
+/// The canvas is vectors and its zoom has no ceiling, so a caption's natural
+/// size has none either. Outlines can keep growing without complaint; a font
+/// atlas cannot. It does not run out of memory — epaint's atlas is capped at
+/// 2048×2048 — it *asserts*: a glyph too wide to place trips `x < w && y < h`
+/// in its glyph allocator and takes the process with it. Measured on epaint
+/// 0.29, 1536px still lands and 1792px panics, so the zoom that grows a caption
+/// past roughly 1600px is a crash, not a blurry letter.
+///
+/// Rasterizing is not free below that either: one glyph costs about 16ms at
+/// this size and rises with it, so the ceiling is set where a first use is
+/// still worth one frame and there is 5× headroom to the assert. A letter
+/// already taller than the window carries no more meaning for being taller
+/// still, so raster text stops here while the geometry around it goes on.
+const MAX_GLYPH_PX: f32 = 320.0;
+
+/// The smallest glyph worth asking for. Below this a line is a smudge, and the
+/// rasterizer should not be woken for it.
+const MIN_GLYPH_PX: f32 = 0.35;
+
+/// Distinct glyph sizes the canvas may ask for, per doubling.
+///
+/// The font atlas caches by exact size and never evicts, so a caption sized
+/// `11.0 * zoom` asks for a size no one has ever asked for on every single
+/// frame of a wheel-zoom — each one rasterised, stored, and never reused. That
+/// is the memory: not a leak, but an atlas filled with hundreds of one-shot
+/// renderings until it saturates.
+///
+/// Snapping onto a ladder makes zooming reuse what it has already paid for. At
+/// sixteen rungs per doubling the neighbours are 4.4% apart — below the
+/// threshold where growth reads as stepped — and the whole range from a smudge
+/// to the ceiling is about 160 sizes, which the atlas holds comfortably.
+const GLYPH_RUNGS_PER_DOUBLING: f32 = 16.0;
+
+/// The nearest rung at or below `size`, clamped to what the rasterizer will
+/// actually draw.
+///
+/// Downward, never up: callers have already checked that their text fits at the
+/// size they asked for, and a rung below that still fits.
+fn glyph_px(size: f32) -> f32 {
+    if !size.is_finite() {
+        return MIN_GLYPH_PX;
+    }
+    let size = size.clamp(MIN_GLYPH_PX, MAX_GLYPH_PX);
+    let step = 1.0 / GLYPH_RUNGS_PER_DOUBLING;
+    // A hair of tolerance in rung space, so a size already standing on a rung
+    // stays there instead of sliding down one every time it is settled again.
+    // Settling has to be idempotent: it runs over sizes that came out of it.
+    let mut rung = (size.log2() / step + 1e-3).floor() * step;
+    let mut settled = rung.exp2();
+    if settled > size * (1.0 + 1e-6) {
+        rung -= step;
+        settled = rung.exp2();
+    }
+    settled.clamp(MIN_GLYPH_PX, MAX_GLYPH_PX)
+}
+
 fn node_resize(mandala: &Mandala, node: &Node) -> Vec2 {
     let (half_w, half_h) = mandala.extent(node.id);
     let (base_w, base_h) = node.base_extent();
@@ -309,15 +499,68 @@ const fn node_outline_width(shape: Shape, emphasized: bool) -> f32 {
         Shape::Circle | Shape::Square | Shape::Parallelogram | Shape::Amp | Shape::Hexagon
     ) {
         if emphasized {
-            5.5
+            2.6
         } else {
-            4.5
+            1.8
         }
     } else if emphasized {
-        2.5
+        2.0
     } else {
-        1.5
+        1.3
     }
+}
+
+/// The size of a form's one-token label on the canvas, before the view zoom.
+const LABEL_PX: f32 = 11.0;
+
+/// The size of the sigil written on an indentation's ring.
+///
+/// Larger than an ordinary label, because it is the one mark that says what
+/// kind of boundary this is, and it is read against the whole circle rather
+/// than against the word beside it.
+const MARK_PX: f32 = 18.0;
+
+/// The thinnest a drawn line may become, in screen pixels.
+///
+/// Every stroke is scaled by the view, and a stroke scaled to less than a pixel
+/// does not become a fine line — it becomes a faint smear, or nothing. Zoomed
+/// out to fit a real program, a 1.8px outline lands at 0.34px and the drawing
+/// fades to almost blank: the connections disappear entirely, and the circles
+/// survive only because there are many of them.
+///
+/// So the pen has a floor. Geometry keeps shrinking with the zoom; the ink it
+/// is drawn with does not go below what a screen can show.
+const HAIRLINE_PX: f32 = 1.15;
+
+/// A stroke width that stays visible however far the canvas is pushed away.
+fn pen(width: f32) -> f32 {
+    if width.is_finite() {
+        width.max(HAIRLINE_PX)
+    } else {
+        HAIRLINE_PX
+    }
+}
+
+/// How much a hand-resized symbol is allowed to thicken its own outline.
+///
+/// A wall's weight belongs to the view, not to how much the wall encloses. Left
+/// proportional, a boundary grown to hold a nested program drew a border five
+/// times heavier than the same boundary holding one prompt — the drawing got
+/// louder the more it contained. A little response is still wanted, so a symbol
+/// deliberately made small reads as finer; past that the pen stops growing.
+fn pen_weight(resize: Vec2) -> f32 {
+    resize_weight(resize).clamp(0.7, 1.25)
+}
+
+/// How much a boundary's own size enlarges the sigil written on its ring.
+///
+/// Unlike the pen, the mark *does* measure the boundary: a wide outer circle
+/// wears a larger sigil than a circle nested deep inside it, which is what says
+/// at a glance which level of the drawing the eye is on. Damped by a square
+/// root so a boundary a hundred times the size of a symbol does not wear a mark
+/// a hundred times the size of a letter.
+fn mark_weight(resize: Vec2) -> f32 {
+    resize_weight(resize).max(1.0).sqrt().min(8.0)
 }
 
 impl Doc {
@@ -480,6 +723,24 @@ impl Doc {
         self.clear_selection();
         self.running.clear();
     }
+
+    /// A tab holding a drawing that has just been laid out.
+    ///
+    /// It opens framed: the first canvas frame fits the whole program on screen
+    /// rather than dropping the reader at the origin with the drawing somewhere
+    /// off the edge.
+    fn drawn(mandala: Mandala) -> Self {
+        Self {
+            mandala,
+            fit_pending: true,
+            ..Self::default()
+        }
+    }
+
+    /// Ask for the whole drawing to be framed on the next canvas frame.
+    fn show_everything(&mut self) {
+        self.fit_pending = true;
+    }
 }
 
 /// A conversation, with the same durable sessions the terminal app writes.
@@ -494,6 +755,12 @@ struct ChatPane {
     /// When present, each submitted turn receives a fresh snapshot of this
     /// retained run, including its complete source and output.
     run_id: Option<u64>,
+    /// Messages typed while a turn was still running.
+    ///
+    /// They are not sent yet and not part of the transcript yet — the model has
+    /// not been asked them. They wait here, visible, and go out as the next turn
+    /// the moment the current one lands.
+    queued: Vec<String>,
 }
 
 impl Default for ChatPane {
@@ -509,6 +776,7 @@ impl Default for ChatPane {
             browsing: true,
             notice: None,
             run_id: None,
+            queued: Vec::new(),
         }
     }
 }
@@ -735,17 +1003,23 @@ fn sigil_catalog_row(
             *action = Some(SigilAction::Chat(entry.clone()));
         }
         if entry.read_only {
-            ui.add_enabled(false, egui::Button::new("delete").small())
-                .on_disabled_hover_text("embedded std sigils cannot be deleted");
+            ui.add_enabled(
+                false,
+                egui::Button::new(egui::RichText::new("delete").color(ink.danger)).small(),
+            )
+            .on_disabled_hover_text("embedded std sigils cannot be deleted");
             return;
         }
         let confirming = pane.pending_delete.as_deref() == Some(&entry.name);
         if ui
-            .small_button(if confirming {
-                "confirm delete"
-            } else {
-                "delete"
-            })
+            .small_button(
+                egui::RichText::new(if confirming {
+                    "confirm delete"
+                } else {
+                    "delete"
+                })
+                .color(ink.danger),
+            )
             .clicked()
         {
             if confirming {
@@ -824,6 +1098,31 @@ struct PendingRun {
     lane: runs::Lane,
 }
 
+/// Whether the space bar is being held as a "move the view" modifier.
+///
+/// The convention every drawing tool shares: hold space and the pointer stops
+/// editing and starts moving the canvas, whatever tool is selected and whatever
+/// it is over. Without it, panning means finding empty canvas — which a drawing
+/// that fills the window does not have.
+///
+/// No focus gate. A pan can only begin with a press on the canvas, and that
+/// press already surrenders whatever had the keyboard — so asking a second time
+/// whether some widget might want a space only adds ways for the gesture to go
+/// quiet. Typing a space into a text field starts no drag and pans nothing.
+fn space_held(ui: &egui::Ui) -> bool {
+    ui.input(|input| input.key_down(egui::Key::Space))
+}
+
+/// The world-space thickness of a wall's grab band under this view.
+///
+/// [`BORDER_BAND`] is a screen measurement, so it divides by the zoom: a wall
+/// stays the same number of pixels wide whether the canvas is magnified a
+/// thousandfold or pushed far away. Zoom is floored well above zero by
+/// [`View`], so this cannot divide by nothing.
+fn grab_band(view: View) -> f64 {
+    BORDER_BAND / view.zoom.max(View::MIN_ZOOM)
+}
+
 /// An in-progress pointer gesture.
 #[derive(Clone, Copy, PartialEq)]
 struct HolderSnapshot {
@@ -831,6 +1130,9 @@ struct HolderSnapshot {
     centre: (f64, f64),
     extent: (f64, f64),
     circular: bool,
+    /// The boundary's own hand-set size before the drag pinned it, so the wall
+    /// can be handed back to its contents when the piece lands.
+    size: Option<(f64, f64)>,
 }
 
 impl HolderSnapshot {
@@ -873,8 +1175,11 @@ impl Drag {
     /// A scale outline offered for resizing wins first, then whatever shape the point
     /// landed on, and bare canvas pans. `Mandala::resize_grab` is what keeps a
     /// block dropped across a wall grabbable as a block.
-    fn beginning_at(mandala: &Mandala, wx: f64, wy: f64) -> Self {
-        if let Some(grab) = mandala.resize_grab(wx, wy) {
+    ///
+    /// `band` is the world-space wall tolerance for this view — see
+    /// [`grab_band`].
+    fn beginning_at(mandala: &Mandala, wx: f64, wy: f64, band: f64) -> Self {
+        if let Some(grab) = mandala.resize_grab(wx, wy, band) {
             return Drag::Resize(grab);
         }
         match mandala.hit(wx, wy) {
@@ -886,6 +1191,7 @@ impl Drag {
                         centre: (node.x, node.y),
                         extent: mandala.extent(holder),
                         circular: node.form == Form::Compose,
+                        size: mandala.hand_size(holder),
                     })
                 });
                 Drag::Node {
@@ -1080,13 +1386,7 @@ impl Editor {
         let mut notice = None;
         match start {
             Opened::Drawing(mandala) => {
-                tabs.open(
-                    "mandala",
-                    Pane::Mandala(Doc {
-                        mandala,
-                        ..Doc::default()
-                    }),
-                );
+                tabs.open("mandala", Pane::Mandala(Doc::drawn(mandala)));
             }
             Opened::Source { text, path, error } => {
                 // The empty canvas comes first so the drawing surface still
@@ -1217,7 +1517,7 @@ impl Editor {
             .show(ctx, |ui| {
                 let screen = ctx.screen_rect();
                 ui.painter()
-                    .rect_filled(screen, 0.0, Color32::from_black_alpha(140));
+                    .rect_filled(screen, 0.0, frost_shadow(k, 140.0 / 255.0));
                 // Clicking the dimmed backdrop (anywhere outside the window)
                 // dismisses the modal, like tapping away from a dialog.
                 if ui.allocate_rect(screen, Sense::click()).clicked() {
@@ -1347,7 +1647,7 @@ impl Editor {
             .show(ctx, |ui| {
                 let screen = ctx.screen_rect();
                 ui.painter()
-                    .rect_filled(screen, 0.0, Color32::from_black_alpha(140));
+                    .rect_filled(screen, 0.0, frost_shadow(self.ink, 140.0 / 255.0));
                 ui.allocate_rect(screen, Sense::hover());
             });
         // Same tie as the run modal: lift the window above its own scrim.
@@ -1363,12 +1663,12 @@ impl Editor {
                 } else {
                     "run is running"
                 });
-                ui.colored_label(self.ink.accent, state);
+                ui.colored_label(run_state_tone(run.state, run.paused, self.ink), state);
                 ui.label(format!("{} · {}", run.mode.label(), run.scope.label()));
                 ui.label(preview);
                 if let Some(last_output) = &last_output {
                     ui.separator();
-                    ui.colored_label(self.ink.faint, last_output);
+                    paint_stream_line(ui, last_output, self.ink);
                 }
                 // A live run stops for authority the instant it is submitted,
                 // which is while this modal is on screen. Asking here is asking
@@ -1539,6 +1839,76 @@ impl Editor {
                 }
             }
         }
+        self.dispatch_queued_chat();
+    }
+
+    /// Send whatever was typed while the model was working.
+    ///
+    /// A message written mid-answer does not stop the turn in flight and does
+    /// not open a second one beside it: it waits, visible, and goes out as the
+    /// next turn the moment that one lands. Several of them go out as one turn,
+    /// in the order they were written, because that is how they were meant to
+    /// be read.
+    fn dispatch_queued_chat(&mut self) {
+        let ready = self
+            .tabs
+            .iter_mut()
+            .filter_map(|tab| match &mut tab.content {
+                Pane::Chat(chat) if !chat.queued.is_empty() => {
+                    Some((chat.session.id.clone(), std::mem::take(&mut chat.queued)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (session, queued) in ready {
+            if self.actions.session_active(&session) {
+                // Still busy: put them back and wait for the next landing.
+                if let Some(chat) = self.chat_pane_mut(&session) {
+                    chat.queued = queued;
+                }
+                continue;
+            }
+            self.dispatch_chat_turn(&session, queued.join("\n\n"));
+        }
+    }
+
+    fn chat_pane_mut(&mut self, session: &str) -> Option<&mut ChatPane> {
+        self.tabs.iter_mut().find_map(|tab| match &mut tab.content {
+            Pane::Chat(chat) if chat.session.id == session => Some(chat),
+            _ => None,
+        })
+    }
+
+    /// Ask the model one thing, recording it in the transcript first.
+    ///
+    /// The same path the input box takes, so a queued message and a typed one
+    /// are the same turn in every respect.
+    fn dispatch_chat_turn(&mut self, session: &str, said: String) {
+        let Some(chat) = self.chat_pane_mut(session) else {
+            return;
+        };
+        let resume = chat
+            .session
+            .turns
+            .iter()
+            .any(|turn| turn.role == kaos_core::sessions::Role::Model);
+        chat.session
+            .push(kaos_core::sessions::Role::User, said.clone());
+        let prior = chat.session.turns.len().saturating_sub(1);
+        let history = recent_chat_history(&chat.session.turns[..prior]);
+        let run_id = chat.run_id;
+        let _ = kaos_core::sessions::Store::default_store().save(&chat.session);
+
+        let history_text = history
+            .iter()
+            .map(|(user, assistant)| format!("USER: {user}\nASSISTANT: {assistant}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let prompt = run_id
+            .and_then(|id| self.run_chat_context(id, &history, &said))
+            .unwrap_or_else(|| kaos_core::chat::DEFAULT_CONTEXT.render_chat(&history_text, &said));
+        self.actions
+            .submit_chat(prompt, session.to_string(), resume, &self.cwd);
     }
 
     /// The open drawing, or a stand-in while a conversation is on screen — so
@@ -1563,8 +1933,8 @@ impl Editor {
     }
 }
 
-/// Operator arrows remain purple in both projections; selection changes their
-/// weight, never the hue carrying direction.
+/// Operator arrows remain blue in both projections; selection changes their
+/// weight, never the colour carrying direction.
 pub(crate) const fn edge_colour(k: Ink) -> Color32 {
     k.secondary
 }
@@ -1597,8 +1967,9 @@ impl StreamKind {
 
     const fn tone(self, k: Ink) -> Color32 {
         match self {
-            Self::Signal | Self::Caution => k.secondary,
+            Self::Signal => k.secondary,
             Self::Success | Self::Progress => k.accent,
+            Self::Caution => k.danger,
             Self::Plain => k.faint,
         }
     }
@@ -1623,15 +1994,25 @@ fn stream_line(line: &str) -> StreamLine<'_> {
     let (candidate, rest) = boundary.map_or((content, ""), |at| {
         (&content[..at], content[at..].trim_start())
     });
-    let kind = match candidate {
-        "event" | "prompt" | "model" | "chat" | "firing" | "directive" => Some(StreamKind::Signal),
-        "answer" | "result" | "complete" | "received" | "reply" | "score" => {
-            Some(StreamKind::Success)
+    let rest_lower = rest.to_ascii_lowercase();
+    let negative_body = ["failed", "error", "cancelled", "refused", "denied"]
+        .iter()
+        .any(|word| rest_lower.starts_with(word));
+    let kind = if negative_body {
+        Some(StreamKind::Caution)
+    } else {
+        match candidate {
+            "event" | "prompt" | "model" | "chat" | "firing" | "directive" => {
+                Some(StreamKind::Signal)
+            }
+            "answer" | "result" | "complete" | "received" | "reply" | "score" => {
+                Some(StreamKind::Success)
+            }
+            "started" | "resumed" | "input" => Some(StreamKind::Progress),
+            "diagnostic" | "paused" | "awaiting" | "permission" | "cancelled" | "failed"
+            | "error" | "note" => Some(StreamKind::Caution),
+            _ => None,
         }
-        "started" | "resumed" | "input" => Some(StreamKind::Progress),
-        "diagnostic" | "paused" | "awaiting" | "permission" | "cancelled" | "failed" | "error"
-        | "note" => Some(StreamKind::Caution),
-        _ => None,
     };
     kind.map_or(
         StreamLine {
@@ -1689,6 +2070,16 @@ fn role_wash(tone: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(tone.r(), tone.g(), tone.b(), alpha)
 }
 
+/// A shadow stays in the palette's navy end instead of introducing pure black.
+fn frost_shadow(k: Ink, opacity: f32) -> Color32 {
+    let tone = if k.ground.r() < k.ink.r() {
+        k.ground
+    } else {
+        k.ink
+    };
+    role_wash(tone, (opacity.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
 /// A readable, selectable code surface shared by chat context and run detail.
 fn paint_code_panel(ui: &mut egui::Ui, text: &str, k: Ink, tone: Color32) {
     egui::Frame::none()
@@ -1710,8 +2101,8 @@ fn paint_code_panel(ui: &mut egui::Ui, text: &str, k: Ink, tone: Color32) {
         });
 }
 
-/// Source gets the same green/purple syntax roles as every editable Rebis
-/// surface, even when it is shown read-only inside a run.
+/// Source gets the same green/blue syntax roles as every editable Rebis surface,
+/// even when it is shown read-only inside a run.
 fn paint_rebis_panel(ui: &mut egui::Ui, source: &str, k: Ink) {
     egui::Frame::none()
         .fill(k.fill)
@@ -1891,9 +2282,8 @@ fn paint_chat_turn(ui: &mut egui::Ui, role: kaos_core::sessions::Role, text: &st
 fn run_state_tone(state: runs::State, paused: bool, k: Ink) -> Color32 {
     match (state, paused) {
         (runs::State::Complete, _) | (runs::State::Running, false) => k.accent,
-        (runs::State::AwaitingPermission, _)
-        | (runs::State::Running, true)
-        | (runs::State::Cancelled, _) => k.secondary,
+        (runs::State::AwaitingPermission, _) | (runs::State::Running, true) => k.secondary,
+        (runs::State::Cancelled, _) => k.danger,
         (runs::State::Queued, _) => k.faint,
     }
 }
@@ -1967,7 +2357,7 @@ impl eframe::App for Editor {
 impl Editor {
     fn header(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            // Wrapped: the header carries up to seven controls, and a narrow
+            // Wrapped: the header carries a dense row of controls, and a narrow
             // window used to cut the last of them off the right edge.
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(self.ink.accent, "KAOS VISUAL");
@@ -1992,10 +2382,10 @@ impl Editor {
                         });
                     self.doc_mut().canvas_mode = mode;
                     let zoom = match mode {
-                        CanvasMode::Planar => self.doc().view.zoom as f32,
-                        CanvasMode::Spatial => self.doc().camera.zoom,
+                        CanvasMode::Planar => self.doc().view.zoom,
+                        CanvasMode::Spatial => f64::from(self.doc().camera.zoom),
                     };
-                    ui.colored_label(self.ink.faint, format!("{}%", (zoom * 100.0).round()));
+                    ui.colored_label(self.ink.faint, zoom_label(zoom));
                 }
                 // `with_main_wrap` is the part that matters: a right-to-left
                 // group nested in a horizontal row is ONE item to the outer
@@ -2021,10 +2411,20 @@ impl Editor {
                         if self.on_mandala() && ui.button("run").clicked() {
                             self.run_mandala();
                         }
+                        let can_export = self.on_mandala() && !self.doc().mandala.is_empty();
+                        if ui
+                            .add_enabled(can_export, egui::Button::new("export PDF"))
+                            .on_hover_text(
+                                "save the complete planar mandala as a one-page vector PDF",
+                            )
+                            .clicked()
+                        {
+                            self.export_mandala_pdf();
+                        }
                         if self.on_mandala() && ui.button("reset view").clicked() {
                             let doc = self.doc_mut();
                             match doc.canvas_mode {
-                                CanvasMode::Planar => doc.view = View::new(),
+                                CanvasMode::Planar => doc.show_everything(),
                                 CanvasMode::Spatial => doc.camera = SpatialCamera::default(),
                             }
                         }
@@ -2049,6 +2449,29 @@ impl Editor {
                     },
                 );
             });
+        });
+    }
+
+    fn export_mandala_pdf(&mut self) {
+        let selected = rfd::FileDialog::new()
+            .set_title("Export mandala to PDF")
+            .set_directory(&self.cwd)
+            .set_file_name("mandala.pdf")
+            .add_filter("PDF document", &["pdf"])
+            .save_file();
+        let Some(mut path) = selected else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("pdf");
+        }
+        let result = {
+            let doc = self.doc();
+            pdf::save(&doc.mandala, &doc.angled, self.ink, &path)
+        };
+        self.notice = Some(match result {
+            Ok(()) => format!("exported {}", path.display()),
+            Err(error) => error,
         });
     }
 
@@ -2191,7 +2614,7 @@ impl Editor {
             let dead = pane.machine.dead_count();
             if dead > 0 {
                 ui.separator();
-                ui.colored_label(k.accent, format!("{dead} cells killed by a refusal"));
+                ui.colored_label(k.danger, format!("{dead} cells killed by a refusal"));
             }
         });
         ui.horizontal_wrapped(|ui| {
@@ -2432,7 +2855,7 @@ impl Editor {
             ui.colored_label(k.faint, kaos_core::config::path().display().to_string());
             let dirty = pane.dirty();
             if dirty > 0 {
-                ui.colored_label(k.accent, format!("{dirty} unsaved"));
+                ui.colored_label(k.secondary, format!("{dirty} unsaved"));
             }
             if ui.button("save persistent").clicked() {
                 save = true;
@@ -2812,6 +3235,10 @@ impl Editor {
         let chat_busy = session_id
             .as_deref()
             .is_some_and(|id| self.actions.session_active(id));
+        // What the turn in flight has written so far, if there is one.
+        let streaming = session_id
+            .as_deref()
+            .and_then(|id| self.actions.session_stream(id));
         let Some(Pane::Chat(chat)) = self.tabs.active_mut() else {
             return;
         };
@@ -2902,6 +3329,7 @@ impl Editor {
                 }
                 if chat_busy {
                     ui.colored_label(k.secondary, "◇ model working");
+                    ui.colored_label(k.faint, "· keep typing, it goes out next");
                 }
                 if ui.small_button("sessions").clicked() {
                     chat.browsing = true;
@@ -2976,6 +3404,31 @@ impl Editor {
                     for turn in &chat.session.turns {
                         paint_chat_turn(ui, turn.role, &turn.text, k);
                     }
+                    // The turn in flight, as it arrives. A chat is a child
+                    // process streaming into a retained log, so the answer
+                    // exists long before it is delivered; watching a still
+                    // window until it finished was hiding work already done.
+                    if let Some((lines, timer)) = streaming.as_ref() {
+                        ui.add_space(7.0);
+                        ui.horizontal(|ui| {
+                            ui.colored_label(k.secondary, "◇ MODEL");
+                            ui.colored_label(k.faint, format!("working · {timer}"));
+                        });
+                        if lines.is_empty() {
+                            ui.colored_label(k.faint, "…");
+                        }
+                        for line in lines {
+                            paint_stream_line(ui, line, k);
+                        }
+                    }
+                    for waiting in &chat.queued {
+                        ui.add_space(5.0);
+                        ui.horizontal(|ui| {
+                            ui.colored_label(k.faint, "● YOU");
+                            ui.colored_label(k.faint, "queued");
+                        });
+                        ui.colored_label(k.faint, waiting);
+                    }
                 });
         }
 
@@ -2985,13 +3438,23 @@ impl Editor {
                 .add(
                     egui::TextEdit::singleline(&mut chat.input)
                         .desired_width((ui.available_width() - 70.0).max(80.0))
-                        .hint_text("say something"),
+                        .hint_text(if chat_busy {
+                            "say something — it queues behind the answer in progress"
+                        } else {
+                            "say something"
+                        }),
                 )
                 .lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (send || ui.button("send").clicked()) && !chat.input.trim().is_empty() {
                 chat.browsing = false;
                 let said = std::mem::take(&mut chat.input);
+                if chat_busy {
+                    // The turn in flight keeps going; this rides behind it and
+                    // goes out the moment it lands.
+                    chat.queued.push(said);
+                    return;
+                }
                 let resume = chat
                     .session
                     .turns
@@ -3185,13 +3648,7 @@ impl Editor {
                     match lib.load_catalog(&name) {
                         Ok(source) => match Mandala::from_rebis(&source) {
                             Ok(mandala) => {
-                                self.tabs.open(
-                                    name,
-                                    Pane::Mandala(Doc {
-                                        mandala,
-                                        ..Doc::default()
-                                    }),
-                                );
+                                self.tabs.open(name, Pane::Mandala(Doc::drawn(mandala)));
                             }
                             Err(error) => {
                                 self.set_sigil_notice(format!("{name}: {error}"));
@@ -3507,13 +3964,8 @@ impl Editor {
                 }
                 SourceAction::Draw(text) => match Mandala::from_rebis(&text) {
                     Ok(mandala) => {
-                        self.tabs.open(
-                            "mandala",
-                            Pane::Mandala(Doc {
-                                mandala,
-                                ..Doc::default()
-                            }),
-                        );
+                        self.tabs
+                            .open("mandala", Pane::Mandala(Doc::drawn(mandala)));
                     }
                     Err(error) => self.set_source_notice(error.to_string()),
                 },
@@ -3814,6 +4266,8 @@ impl Editor {
             doc.mandala = mandala;
             doc.generated = doc.mandala.to_rebis().unwrap_or_default();
             doc.reset_interaction();
+            // Source adopted from the panel is a fresh layout, so frame it.
+            doc.show_everything();
         }
     }
 
@@ -4007,7 +4461,7 @@ impl Editor {
                             Ok(None) => {}
                             Err(error) => {
                                 ui.colored_label(
-                                    self.ink.accent,
+                                    self.ink.danger,
                                     format!("block is not one exact form: {error}"),
                                 );
                             }
@@ -4015,11 +4469,14 @@ impl Editor {
                         ui.add_space(4.0);
                         if graph_editable
                             && ui
-                                .button(if selection_len > 1 {
-                                    "delete selection"
-                                } else {
-                                    "delete shape"
-                                })
+                                .button(
+                                    egui::RichText::new(if selection_len > 1 {
+                                        "delete selection"
+                                    } else {
+                                        "delete shape"
+                                    })
+                                    .color(self.ink.danger),
+                                )
                                 .clicked()
                         {
                             self.doc_mut().delete_selected();
@@ -4049,7 +4506,14 @@ impl Editor {
                     } else {
                         "exact · 1:1".to_string()
                     };
-                    ui.colored_label(k.faint, status);
+                    let status_tone = if typed.trim().is_empty() {
+                        k.faint
+                    } else if exact.is_err() || rebis_lang::parse(&typed).is_err() {
+                        k.danger
+                    } else {
+                        k.accent
+                    };
+                    ui.colored_label(status_tone, status);
                     if exact.is_ok() && ui.small_button("open in editor").clicked() {
                         open_in_editor = true;
                     }
@@ -4174,7 +4638,11 @@ impl Editor {
                     self.runs.active_count()
                 ),
             );
-            if self.runs.has_active() && ui.button("cancel all").clicked() {
+            if self.runs.has_active()
+                && ui
+                    .button(egui::RichText::new("cancel all").color(k.danger))
+                    .clicked()
+            {
                 cancel_all = true;
             }
             if let Some(note) = &self.runs.notice {
@@ -4274,7 +4742,7 @@ impl Editor {
                             submit = Some(self.runs.lane);
                         }
                     });
-                    ui.colored_label(if valid { k.faint } else { k.accent }, diagnostic);
+                    ui.colored_label(if valid { k.accent } else { k.danger }, diagnostic);
                 });
             });
 
@@ -4323,7 +4791,10 @@ impl Editor {
                         // run that is not currently running — the terminal's
                         // `u`/Delete, one click.
                         if run.state != runs::State::Running
-                            && ui.small_button("✕").on_hover_text("remove run").clicked()
+                            && ui
+                                .small_button(egui::RichText::new("✕").color(k.danger))
+                                .on_hover_text("remove run")
+                                .clicked()
                         {
                             select = Some(run.id);
                             remove = true;
@@ -4354,7 +4825,7 @@ impl Editor {
                         })
                         .show(ui, |ui| {
                             if let Some(reason) = &run.pause_reason {
-                                ui.colored_label(k.accent, reason);
+                                ui.colored_label(k.secondary, reason);
                             }
                             // A run stopped on an `&` port is waiting for a
                             // person, not for a process. This is where that
@@ -4394,7 +4865,10 @@ impl Editor {
                                         select = Some(id);
                                         permission = Some(runs::Authority::Session);
                                     }
-                                    if ui.button("deny").clicked() {
+                                    if ui
+                                        .button(egui::RichText::new("deny").color(k.danger))
+                                        .clicked()
+                                    {
                                         deny_run = Some(id);
                                     }
                                 }
@@ -4404,7 +4878,11 @@ impl Editor {
                                     select = Some(id);
                                     pause = true;
                                 }
-                                if !state.terminal() && ui.button("cancel").clicked() {
+                                if !state.terminal()
+                                    && ui
+                                        .button(egui::RichText::new("cancel").color(k.danger))
+                                        .clicked()
+                                {
                                     select = Some(id);
                                     cancel = true;
                                 }
@@ -4881,9 +5359,9 @@ impl Editor {
                 let hint = if self.on_mandala()
                     && self.doc().canvas_mode == CanvasMode::Spatial
                 {
-                    "drag a piece to move · drag empty space to orbit · G/X/Y/Z constrain · wheel zoom"
+                    "drag a piece to move · space or empty drag orbits · G/X/Y/Z constrain · wheel zoom"
                 } else {
-                    "drag/pan · right-drag marquee · Ctrl-click toggles · Ctrl-C/V block · Delete · Ctrl-Z"
+                    "drag/pan · space+drag or middle-drag moves the view · right-drag marquee · Ctrl-click toggles · Ctrl-C/V block · Delete · Ctrl-Z"
                 };
                 ui.colored_label(
                     self.ink.faint,
@@ -4991,11 +5469,33 @@ impl Editor {
     fn canvas_2d(&mut self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let origin = response.rect.min;
+        // A drawing is laid out before there is a window to lay it out in, so
+        // the request to frame it waits here for the first frame that knows how
+        // big the canvas is. An empty drawing has nothing to frame and simply
+        // spends the request.
+        if self.doc().fit_pending {
+            let size = response.rect.size();
+            if size.x > 1.0 && size.y > 1.0 {
+                if let Some(bounds) = self.doc().mandala.bounds() {
+                    self.doc_mut().view =
+                        View::fitting(bounds, f64::from(size.x), f64::from(size.y));
+                }
+                self.doc_mut().fit_pending = false;
+            }
+        }
         // When the right-click menu is open, the click that dismisses it must
         // only close the menu — never also select, place, or move on the
         // canvas. This is true coming into the frame; egui closes the menu as
         // it processes the click, so we suppress canvas actions for it.
         let menu_open = ui.ctx().is_context_menu_open();
+        let panning = space_held(ui);
+        if response.hovered() && panning {
+            ui.ctx().set_cursor_icon(if response.dragged() {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
+            });
+        }
         if response.clicked() || response.drag_started() {
             // Canvas interaction takes editing intent away from any previous
             // text widget. Leaving that stale focus alive would make the
@@ -5022,12 +5522,15 @@ impl Editor {
         }
 
         // A wall is a narrow target, so the cursor names it before the drag
-        // begins — otherwise resizing is invisible until stumbled on.
-        if response.hovered() && matches!(self.drag, Drag::None) {
+        // begins — otherwise resizing is invisible until stumbled on. While
+        // space is held the pointer is not going to resize anything, so it must
+        // not promise to.
+        if response.hovered() && !panning && matches!(self.drag, Drag::None) {
             if let Some(p) = response.hover_pos() {
                 let (sx, sy) = local(p);
                 let (wx, wy) = self.doc().view.to_world(sx, sy);
-                if let Some(grab) = self.doc().mandala.resize_grab(wx, wy) {
+                let band = grab_band(self.doc().view);
+                if let Some(grab) = self.doc().mandala.resize_grab(wx, wy, band) {
                     let centre = self
                         .doc()
                         .mandala
@@ -5060,24 +5563,61 @@ impl Editor {
                     additive,
                 };
             }
+        } else if !menu_open && response.drag_started_by(PointerButton::Middle) {
+            // The middle button always moves the view. It is the one panning
+            // gesture that touches no keyboard at all, so nothing focused
+            // anywhere can quietly take it away.
+            self.drag = Drag::Pan;
+        } else if !menu_open && response.drag_started_by(PointerButton::Primary) && panning {
+            // Space held: the pointer moves the view, not the drawing, wherever
+            // it happens to be resting.
+            self.drag = Drag::Pan;
         } else if !menu_open && response.drag_started_by(PointerButton::Primary) {
-            if let Some(p) = response.interact_pointer_pos() {
+            // What the gesture grabbed is decided from where the button went
+            // DOWN, not from where the pointer has already travelled to by the
+            // time egui calls it a drag rather than a click. A wall is only a
+            // few pixels wide, so resolving it after that threshold made every
+            // brisk pull off a border pan the canvas instead of resizing.
+            let origin = ui
+                .input(|input| input.pointer.press_origin())
+                .or_else(|| response.interact_pointer_pos());
+            if let Some(p) = origin {
                 let (sx, sy) = local(p);
                 let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
-                let drag = Drag::beginning_at(&self.doc().mandala, wx, wy);
+                let band = grab_band(self.doc().view);
+                let drag = Drag::beginning_at(&self.doc().mandala, wx, wy, band);
                 // Moving or sizing a shape changes the drawing;
                 // panning only changes where it is looked at.
                 if !matches!(drag, Drag::Pan) {
                     self.doc_mut().checkpoint();
                 }
-                if let Drag::Node { id, .. } = drag {
+                if let Drag::Node { id, holder, .. } = drag {
                     // Membership is reassigned at drop time. Releasing it
                     // while it moves prevents its old boundary from expanding
                     // forever to chase a block that is being pulled out.
+                    //
+                    // But a boundary is the indentation itself, so it must not
+                    // collapse either: releasing alone left the wall to shrink
+                    // to nothing under a piece merely being rearranged inside
+                    // it. Holding the boundary at the size it had keeps it drawn
+                    // around its contents for the length of the gesture, and the
+                    // drop hands it back to them.
+                    if let Some(holder) = holder {
+                        self.doc_mut()
+                            .mandala
+                            .resize(holder.id, holder.extent.0, holder.extent.1);
+                    }
                     self.doc_mut().mandala.release(id);
                 }
                 self.drag = drag;
             }
+        }
+        if response.dragged_by(PointerButton::Middle) && matches!(self.drag, Drag::Pan) {
+            let d = response.drag_delta();
+            self.doc_mut().view.pan(f64::from(d.x), f64::from(d.y));
+        }
+        if response.drag_stopped_by(PointerButton::Middle) {
+            self.drag = Drag::None;
         }
         if response.dragged_by(PointerButton::Primary) {
             match self.drag {
@@ -5087,20 +5627,39 @@ impl Editor {
                         let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
                         let (mut half_w, mut half_h) = self.doc().mandala.extent(grab.id);
                         if let Some(node) = self.doc().mandala.node(grab.id) {
-                            if node.form == Form::Compose {
-                                let radius = (wx - node.x).hypot(wy - node.y);
+                            let (dx, dy) = ((wx - node.x).abs(), (wy - node.y).abs());
+                            if !scales_uniformly(&node.form) {
+                                // A square alone has two free walls.
+                                if grab.wide {
+                                    half_w = dx;
+                                }
+                                if grab.tall {
+                                    half_h = dy;
+                                }
+                            } else if node.shape() == Shape::Circle {
+                                // A circle is dragged by its circumference, so
+                                // the pointer's distance from the centre IS the
+                                // radius it is asking for.
+                                let radius = dx.hypot(dy);
                                 half_w = radius;
                                 half_h = radius;
                             } else {
-                                if grab.wide {
-                                    half_w = (wx - node.x).abs();
-                                }
-                                if grab.tall {
-                                    half_h = (wy - node.y).abs();
-                                }
+                                // Any other outline scales whole. Whichever axis
+                                // the pointer reached furthest past sets one
+                                // factor, and `resize` applies it to both while
+                                // keeping the form's own proportions.
+                                let (base_w, base_h) = node.base_extent();
+                                let scale = (dx / base_w.max(f64::EPSILON))
+                                    .max(dy / base_h.max(f64::EPSILON));
+                                half_w = base_w * scale;
+                                half_h = base_h * scale;
                             }
                         }
-                        self.doc_mut().mandala.resize(grab.id, half_w, half_h);
+                        // A boundary and what it holds read as one object, so
+                        // the wall carries the forms indented inside it: they
+                        // travel and grow with it rather than staying a speck
+                        // in a room that keeps getting larger.
+                        self.doc_mut().mandala.resize_group(grab.id, half_w, half_h);
                     }
                 }
                 Drag::Node { id, grab, .. } => {
@@ -5169,11 +5728,17 @@ impl Editor {
                         self.doc_mut().mandala.detach(id);
                     }
                 }
+                // The gesture is over, so the boundary it was pinned at goes
+                // back to being decided by what it holds — which is now the
+                // right answer whether the piece stayed, moved on, or left.
+                if let Some(holder) = holder {
+                    self.doc_mut().mandala.set_size(holder.id, holder.size);
+                }
             }
             self.drag = Drag::None;
         }
 
-        if !menu_open && response.clicked_by(PointerButton::Primary) {
+        if !menu_open && !panning && response.clicked_by(PointerButton::Primary) {
             if let Some(p) = response.interact_pointer_pos() {
                 let (sx, sy) = local(p);
                 let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
@@ -5228,7 +5793,7 @@ impl Editor {
             self.paste_selected(os_text.as_deref());
         }
         if reset_view {
-            self.doc_mut().view = View::new();
+            self.doc_mut().show_everything();
         }
 
         // A turning ring needs a clock and a reason to redraw. egui only
@@ -5243,7 +5808,7 @@ impl Editor {
                 let (wx, wy) = self.doc().view.to_world(sx, sy);
                 self.doc()
                     .mandala
-                    .resize_grab(wx, wy)
+                    .resize_grab(wx, wy, grab_band(self.doc().view))
                     .map(|grab| grab.id)
                     .or_else(|| self.doc().mandala.hit(wx, wy))
             }),
@@ -5297,7 +5862,7 @@ impl Editor {
             }
             ui.colored_label(
                 self.ink.faint,
-                "drag piece · drag empty to orbit · wheel zoom",
+                "drag piece · space or empty drag orbits · wheel zoom",
             );
         });
         if let Some(axis) = picked_axis {
@@ -5334,7 +5899,7 @@ impl Editor {
             let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll.abs() > 0.0 {
                 let factor = if scroll > 0.0 { 1.1 } else { 1.0 / 1.1 };
-                self.doc_mut().camera.zoom = (self.doc().camera.zoom * factor).clamp(0.25, 4.0);
+                self.doc_mut().camera.zoom_by(factor);
             }
         }
 
@@ -5421,7 +5986,10 @@ impl Editor {
             self.doc().camera,
         );
 
-        if !menu_open && response.drag_started() {
+        if !menu_open && response.drag_started() && space_held(ui) {
+            // Space held: move the view rather than a piece of the structure.
+            self.spatial_drag = SpatialDrag::Orbit;
+        } else if !menu_open && response.drag_started() {
             if let Some(pointer) = response.interact_pointer_pos() {
                 let selected = self.doc().selected;
                 let gizmo_axis = selected
@@ -5618,6 +6186,38 @@ impl Editor {
                     self.doc_mut().pending = None;
                 }
             },
+            // Placing a form on a boundary draws it INSIDE, as that boundary's
+            // newest content — a click inside a circle is how you fill it in,
+            // and it used to do nothing but reselect the circle it landed on.
+            // Shift draws the new boundary AROUND it instead, which is the rarer
+            // and far more disruptive of the two. Either way it is one edit.
+            (Some(id), Tool::Place(form))
+                if self
+                    .doc()
+                    .mandala
+                    .node(id)
+                    .is_some_and(|node| node.form.opens_indentation()) =>
+            {
+                self.doc_mut().checkpoint();
+                let wrapping = angle && form.opens_indentation();
+                let made = if wrapping {
+                    self.doc_mut().mandala.wrap(id, form)
+                } else {
+                    let text = default_text(&form);
+                    self.doc_mut().mandala.nest(id, form, text)
+                };
+                match made {
+                    Some(made) => {
+                        self.notice = Some(if wrapping {
+                            "drew it around".into()
+                        } else {
+                            "drew it inside".into()
+                        });
+                        self.doc_mut().select_only(made);
+                    }
+                    None => self.doc_mut().select_only(id),
+                }
+            }
             (Some(id), _) => self.doc_mut().select_only(id),
             // Clicked empty canvas.
             (None, Tool::Place(form)) => {
@@ -5805,7 +6405,7 @@ impl Editor {
             // a circular outline.
             _ => {
                 let pen = UiStroke::new(
-                    5.0 * zoom * resize_weight(resize),
+                    pen(5.0 * zoom * resize_weight(resize)),
                     if hot { k.accent } else { k.ink },
                 );
                 for stroke in shape.strokes() {
@@ -5901,7 +6501,7 @@ impl Editor {
                 painter.add(egui::Shape::ellipse_filled(
                     centre + Vec2::new(radius * 0.24, radius * 0.30),
                     Vec2::new(radius * 0.48, radius * 0.15),
-                    Color32::from_black_alpha(38),
+                    frost_shadow(k, 38.0 / 255.0),
                 ));
                 painter.circle_stroke(centre, radius, outline);
                 painter.circle_stroke(
@@ -5962,6 +6562,94 @@ impl Editor {
         }
     }
 
+    /// The pen a form's outline is drawn with, shared by the body pass and the
+    /// wall pass so a re-stroked boundary is exactly the line it replaces.
+    fn node_outline(&self, node: &Node, zoom: f32, recursive: bool) -> UiStroke {
+        let k = self.ink;
+        let shape = node.shape();
+        let hot = self.doc().is_selected(node.id) || self.doc().pending == Some(node.id);
+        let accented = hot || recursive;
+        // An arrow is blue whatever else is true of it. Selecting a block must
+        // not repaint the one form whose colour carries its meaning; the
+        // thicker outline, and the accent ring for recursion, already say
+        // everything selection needs to say.
+        let colour = if hot || recursive { k.accent } else { k.faint };
+        let scale = zoom * pen_weight(node_resize(&self.doc().mandala, node));
+        UiStroke::new(pen(node_outline_width(shape, accented) * scale), colour)
+    }
+
+    /// Re-stroke a boundary's wall with no fill behind it.
+    ///
+    /// A circle or square IS the indentation, so its wall has to stay visible
+    /// while its contents move — including the moment a piece is dragged across
+    /// it. Drawing the boundaries first and the contents afterwards is what puts
+    /// held forms inside; this pass puts the wall back on top of them, so a
+    /// piece can overlap the border without erasing the container it belongs to.
+    fn paint_boundary_wall(&self, painter: &egui::Painter, node: &Node, centre: Pos2, zoom: f32) {
+        let outline = self.node_outline(node, zoom, false);
+        let (half_w, half_h) = self.doc().mandala.extent(node.id);
+        match node.shape() {
+            Shape::Circle => {
+                painter.circle_stroke(centre, half_w as f32 * zoom, outline);
+            }
+            Shape::Square => {
+                painter.rect_stroke(
+                    Rect::from_center_size(
+                        centre,
+                        Vec2::new(half_w as f32 * 2.0, half_h as f32 * 2.0) * zoom,
+                    ),
+                    4.0 * zoom,
+                    outline,
+                );
+            }
+            _ => {}
+        }
+        // The wall goes down after everything it holds, so the notation written
+        // on it has to follow, or the re-stroked ring would run through it.
+        self.paint_indentation_mark(
+            painter,
+            node,
+            centre,
+            Vec2::new(half_w as f32, half_h as f32) * zoom,
+            zoom * mark_weight(node_resize(&self.doc().mandala, node)),
+        );
+    }
+
+    /// Write an indentation's notation on its own ring.
+    ///
+    /// `($ …)` is one circle, and the `$` names it from the boundary rather than
+    /// floating loose among the forms the parentheses hold. The wall is cleared
+    /// behind the sigil so the outline reads as broken by it rather than struck
+    /// through it, which is how a label on a boundary is drawn everywhere else.
+    fn paint_indentation_mark(
+        &self,
+        painter: &egui::Painter,
+        node: &Node,
+        centre: Pos2,
+        extent: Vec2,
+        scale: f32,
+    ) {
+        let mark = node.mark();
+        if mark.is_empty() {
+            return;
+        }
+        let k = self.ink;
+        // The mark grows with the boundary it names. A drawing is levels of
+        // nesting, and the sigil on a wide outer circle reading larger than the
+        // one on a circle deep inside it is how the eye is told which level it
+        // is looking at. `glyph_px` still stops it where the rasterizer does.
+        let font = FontId::monospace(glyph_px(MARK_PX * scale));
+        let galley = painter.layout_no_wrap(mark, font, k.ink);
+        let at = Pos2::new(centre.x, centre.y - extent.y);
+        let pad = Vec2::new(4.0, 1.0) * scale.clamp(0.5, 2.0);
+        painter.rect_filled(
+            Rect::from_center_size(at, galley.size() + pad * 2.0),
+            2.0 * scale,
+            k.fill,
+        );
+        painter.galley(at - galley.size() * 0.5, galley, k.ink);
+    }
+
     fn paint_graph_node(&self, painter: &egui::Painter, node: &Node, paint: NodePaint) {
         let NodePaint {
             position: centre,
@@ -5972,7 +6660,7 @@ impl Editor {
             volumetric,
         } = paint;
         let shape = node.shape();
-        if shape == Shape::Arrow && !arrow_body {
+        if node.form.is_flow() && !arrow_body {
             return;
         }
         let k = self.ink;
@@ -5982,22 +6670,7 @@ impl Editor {
         let (half_w, half_h) = self.doc().mandala.extent(node.id);
         let screen_extent = Vec2::new(half_w as f32, half_h as f32) * zoom;
         let hot = self.doc().is_selected(node.id) || self.doc().pending == Some(node.id);
-        let accented = hot || recursive || shape == Shape::Arrow;
-        // An arrow is purple whatever else is true of it. Selecting a block must
-        // not repaint the one form whose colour carries its meaning; the
-        // thicker outline below, and the accent ring for recursion, already
-        // say everything selection needs to say.
-        let outline_color = if shape == Shape::Arrow {
-            k.secondary
-        } else if hot || recursive {
-            k.accent
-        } else {
-            k.faint
-        };
-        let outline = UiStroke::new(
-            node_outline_width(shape, accented) * symbol_scale,
-            outline_color,
-        );
+        let outline = self.node_outline(node, zoom, recursive);
         if recursive {
             painter.add(egui::Shape::ellipse_stroke(
                 centre,
@@ -6017,6 +6690,13 @@ impl Editor {
         } else {
             self.paint_node_body(painter, node, glyph);
         }
+        self.paint_indentation_mark(
+            painter,
+            node,
+            centre,
+            screen_extent,
+            zoom * mark_weight(resize),
+        );
 
         if self.doc().running.contains(&node.id) {
             self.running_ring(
@@ -6032,34 +6712,34 @@ impl Editor {
                 Pos2::new(centre.x, centre.y - screen_extent.y - 13.0 * symbol_scale),
                 Align2::CENTER_BOTTOM,
                 truncate_model(&format!("/{model}")),
-                FontId::monospace(9.0 * symbol_scale),
+                FontId::monospace(glyph_px(9.0 * symbol_scale)),
                 k.secondary,
             );
         }
-        if shape == Shape::Arrow {
-            return;
-        }
 
+        // One token, at one readable size. A form's complete text lives in the
+        // panel, so nothing here has to grow with the shape — which is what
+        // used to bury whatever the shape contained under its own caption.
         let caption = node.caption();
-        if caption.is_empty() {
+        if caption.is_empty() || (node.form == Form::Program && !hot) {
             return;
         }
-        let caption = truncate(&caption);
-        let font = FontId::monospace(11.0 * symbol_scale);
+        let font = FontId::monospace(glyph_px(LABEL_PX * zoom));
         match shape {
             Shape::Circle
             | Shape::Triangle
             | Shape::Square
             | Shape::Diamond
             | Shape::Parallelogram
-            | Shape::Amp => {
-                painter.text(centre, Align2::CENTER_CENTER, caption, font, k.ink);
+            | Shape::Amp
+            | Shape::Hexagon => {
+                painter.text(centre, Align2::CENTER_CENTER, node.glyph(), font, k.ink);
             }
             _ => {
                 painter.text(
-                    Pos2::new(centre.x, centre.y + screen_extent.y + 12.0 * symbol_scale),
+                    Pos2::new(centre.x, centre.y + screen_extent.y + 12.0 * zoom),
                     Align2::CENTER_CENTER,
-                    caption,
+                    node.glyph(),
                     font,
                     k.faint,
                 );
@@ -6113,6 +6793,7 @@ impl Editor {
         projected: ProjectedNode,
         depth: usize,
     ) {
+        let k = self.ink;
         let dark = self.ink.ground.r() < 128;
         let style = spatial_shadow_style(depth, projected.scale, dark);
         let (half_w, half_h) = self.doc().mandala.extent(node.id);
@@ -6131,7 +6812,7 @@ impl Editor {
             painter.add(egui::Shape::ellipse_filled(
                 projected.position + style.offset * travel,
                 radius,
-                Color32::BLACK.gamma_multiply(style.opacity * opacity),
+                frost_shadow(k, style.opacity * opacity),
             ));
         }
     }
@@ -6207,7 +6888,7 @@ impl Editor {
             let shadow =
                 spatial_shadow_style(depth, (from.scale + to.scale) * 0.5, k.ground.r() < 128);
             let shadow_offset = shadow.offset * 0.38;
-            let shadow_color = Color32::BLACK.gamma_multiply(shadow.opacity * 0.34);
+            let shadow_color = frost_shadow(k, shadow.opacity * 0.34);
             if recursive {
                 let stroke = UiStroke::new(if touches { 2.8 } else { 2.2 }, link_color);
                 let lift = (start.distance(end) * 0.42).clamp(48.0, 150.0);
@@ -6301,7 +6982,7 @@ impl Editor {
             let Some(node) = self.doc().mandala.node(projected_node.id) else {
                 continue;
             };
-            if node.shape() == Shape::Arrow && complete_flow(&self.doc().mandala, node.id) {
+            if node.form.is_flow() {
                 continue;
             }
             let depth = layout
@@ -6314,7 +6995,7 @@ impl Editor {
             let Some(node) = self.doc().mandala.node(projected_node.id) else {
                 continue;
             };
-            if node.shape() == Shape::Arrow && complete_flow(&self.doc().mandala, node.id) {
+            if node.form.is_flow() {
                 continue;
             }
             let spatial = layout.node(node.id);
@@ -6331,7 +7012,11 @@ impl Editor {
                     volumetric: true,
                 },
             );
-            if let Some(spatial) = spatial {
+            if let Some(spatial) = spatial.filter(|_| {
+                node.form != Form::Program
+                    || self.doc().is_selected(node.id)
+                    || self.doc().pending == Some(node.id)
+            }) {
                 let extent = self.doc().mandala.extent(node.id);
                 painter.text(
                     projected_node.position
@@ -6383,9 +7068,6 @@ impl Editor {
     }
 
     fn paint_resize_outline(&self, painter: &egui::Painter, node: &Node, centre: Pos2, zoom: f32) {
-        if node.shape() == Shape::Arrow && complete_flow(&self.doc().mandala, node.id) {
-            return;
-        }
         let extent = self.doc().mandala.extent(node.id);
         let radius = Vec2::new(extent.0 as f32, extent.1 as f32) * zoom
             + Vec2::splat((2.0 * zoom).clamp(1.0, 4.0));
@@ -6418,10 +7100,32 @@ impl Editor {
             let (sx, sy) = v.to_screen(x, y);
             Pos2::new(origin.x + sx as f32, origin.y + sy as f32)
         };
+        // What a form occupies on screen, generous enough to include the labels,
+        // rings and traces that hang off its edges.
+        let footprint = |node: &Node| {
+            let (half_w, half_h) = self.doc().mandala.extent(node.id);
+            let margin = Vec2::splat(24.0 * zoom.max(1.0));
+            Rect::from_center_size(
+                at(node.x, node.y),
+                (Vec2::new(half_w as f32, half_h as f32) * zoom + margin) * 2.0,
+            )
+        };
+        // Zoom has no ceiling, so most of a drawing is usually nowhere near the
+        // window. Skipping what cannot be seen keeps a deep zoom as cheap as a
+        // shallow one, and keeps coordinates far outside f32's comfortable range
+        // away from the tessellator.
+        let canvas = painter.clip_rect();
+        let showing = |rect: Rect| {
+            rect.min.x.is_finite()
+                && rect.min.y.is_finite()
+                && rect.max.x.is_finite()
+                && rect.max.y.is_finite()
+                && canvas.intersects(rect)
+        };
         self.chaos_star(painter);
 
         // The semantic projection is shared with 3D: nesting supplies structure
-        // and complete flow operators become directional purple connections
+        // and complete flow operators become directional blue connections
         // between circle/square blocks. Boundaries go down first, then those
         // operator connections, then the content resting inside.
         let paint_edges = |want_interior: bool| {
@@ -6437,11 +7141,15 @@ impl Editor {
                 ) else {
                     continue;
                 };
+                if !showing(footprint(from).union(footprint(to))) {
+                    continue;
+                }
                 let hot =
                     self.doc().is_selected(edge.owner) || self.doc().pending == Some(edge.owner);
                 let touches =
                     hot || (self.doc().is_selected(edge.from) && self.doc().is_selected(edge.to));
-                let stroke = UiStroke::new(if touches { 2.6 } else { 1.8 } * zoom, edge_colour(k));
+                let stroke =
+                    UiStroke::new(pen(if touches { 2.6 } else { 1.8 } * zoom), edge_colour(k));
                 let from_extent = self.doc().mandala.extent(from.id);
                 let to_extent = self.doc().mandala.extent(to.id);
                 circuit_trace(
@@ -6452,7 +7160,9 @@ impl Editor {
                         Vec2::new(from_extent.0 as f32, from_extent.1 as f32) * zoom,
                         Vec2::new(to_extent.0 as f32, to_extent.1 as f32) * zoom,
                     ],
-                    11.0 * zoom,
+                    // The head says which way the answer flows, so it keeps a
+                    // readable size even when the whole program is on screen.
+                    (11.0 * zoom).max(6.0),
                     stroke,
                     self.doc().angled.contains(&edge.owner),
                 );
@@ -6467,7 +7177,7 @@ impl Editor {
                         midpoint - Vec2::new(0.0, 8.0 * zoom),
                         Align2::CENTER_BOTTOM,
                         truncate_model(&format!("/{model}")),
-                        FontId::monospace(9.0 * zoom),
+                        FontId::monospace(glyph_px(9.0 * zoom)),
                         k.secondary,
                     );
                 }
@@ -6479,10 +7189,10 @@ impl Editor {
                 let Some(n) = self.doc().mandala.node(id) else {
                     continue;
                 };
-                if matches!(n.form, Form::Square | Form::Compose) != boundaries {
+                if n.form.opens_indentation() != boundaries {
                     continue;
                 }
-                if n.shape() == Shape::Arrow && complete_flow(&self.doc().mandala, n.id) {
+                if !showing(footprint(n)) {
                     continue;
                 }
                 let centre = at(n.x, n.y);
@@ -6501,6 +7211,21 @@ impl Editor {
             }
         };
 
+        let paint_walls = |pass: bool| {
+            for id in self.doc().mandala.paint_order(pass) {
+                let Some(n) = self.doc().mandala.node(id) else {
+                    continue;
+                };
+                if !n.form.opens_indentation() {
+                    continue;
+                }
+                if !showing(footprint(n)) {
+                    continue;
+                }
+                self.paint_boundary_wall(painter, n, at(n.x, n.y), zoom);
+            }
+        };
+
         // Every visual boundary is a receiving surface. Paint outer and nested
         // circle/square fills first, then all connections, then the symbols
         // resting on them. In particular, a nested square can no longer cover
@@ -6511,6 +7236,12 @@ impl Editor {
         paint_edges(true);
         paint_nodes(false, false);
         paint_nodes(true, false);
+        // The wall goes back down last. A boundary is the indentation itself, so
+        // it must stay legible while a piece is dragged over it — the fill order
+        // above is what puts contents inside, and this is what keeps the
+        // container drawn around them.
+        paint_walls(false);
+        paint_walls(true);
 
         if let Some(id) = hovered {
             if let Some(node) = self.doc().mandala.node(id) {
@@ -6555,6 +7286,28 @@ impl Editor {
 
 // Dashed scale guides are deliberately composed from ordinary line segments,
 // so they remain crisp under every canvas zoom without a texture dependency.
+
+/// How many dashes one guide may be cut into.
+///
+/// A guide's length grows with the zoom and its dashes are held near a fixed
+/// pixel size, so the count between them is what runs away: an unbounded zoom
+/// would otherwise ask the tessellator for billions of segments and never come
+/// back. Past this many, the dashes are lengthened instead of multiplied — at
+/// that magnification a single dash is already wider than the window, so the
+/// guide reads as the continuous line it has effectively become.
+const MAX_DASHES: f32 = 400.0;
+
+/// Dash and gap grown, when needed, so a guide of `length` stays within
+/// [`MAX_DASHES`].
+fn bounded_dash(length: f32, dash: f32, gap: f32) -> (f32, f32) {
+    let period = (dash + gap).max(f32::EPSILON);
+    if !length.is_finite() || length <= period * MAX_DASHES {
+        return (dash, gap);
+    }
+    let growth = length / (period * MAX_DASHES);
+    (dash * growth, gap * growth)
+}
+
 fn dashed_segment(
     painter: &egui::Painter,
     from: Pos2,
@@ -6565,9 +7318,10 @@ fn dashed_segment(
 ) {
     let delta = to - from;
     let length = delta.length();
-    if length <= f32::EPSILON {
+    if !length.is_finite() || length <= f32::EPSILON {
         return;
     }
+    let (dash, gap) = bounded_dash(length, dash, gap);
     let direction = delta / length;
     let mut travelled = 0.0;
     while travelled < length {
@@ -6576,7 +7330,11 @@ fn dashed_segment(
             [from + direction * travelled, from + direction * end],
             stroke,
         );
-        travelled += dash + gap;
+        let step = dash + gap;
+        if step <= f32::EPSILON {
+            return;
+        }
+        travelled += step;
     }
 }
 
@@ -6609,7 +7367,13 @@ fn dashed_ellipse(
 ) {
     let circumference =
         std::f32::consts::TAU * ((radius.x * radius.x + radius.y * radius.y) * 0.5).sqrt();
-    let periods = (circumference / (dash + gap)).round().max(6.0) as usize;
+    if !circumference.is_finite() {
+        return;
+    }
+    let (dash, gap) = bounded_dash(circumference, dash, gap);
+    let periods = (circumference / (dash + gap))
+        .round()
+        .clamp(6.0, MAX_DASHES) as usize;
     let dash_angle = std::f32::consts::TAU / periods as f32 * dash / (dash + gap).max(f32::EPSILON);
     let period = std::f32::consts::TAU / periods as f32;
     for index in 0..periods {
@@ -6644,6 +7408,21 @@ fn circuit_trace(
     stroke: UiStroke,
     angled: bool,
 ) {
+    for segment in circuit_trace_geometry(from, to, extents, head, angled) {
+        painter.line_segment(segment, stroke);
+    }
+}
+
+/// Screen-neutral line segments for one operator trace. PDF export consumes
+/// this exact geometry as the canvas painter, including resize clearance,
+/// right-angle routing, optional straight routing, and arrowhead barbs.
+fn circuit_trace_geometry(
+    from: Pos2,
+    to: Pos2,
+    extents: [Vec2; 2],
+    head: f32,
+    angled: bool,
+) -> Vec<[Pos2; 2]> {
     let [from_extent, to_extent] = extents;
     let (dx, dy) = (to.x - from.x, to.y - from.y);
     if angled {
@@ -6655,46 +7434,38 @@ fn circuit_trace(
         let to_clearance = ray_to_extent(to_extent, Vec2::new(ux, uy));
         let p0 = Pos2::new(from.x + ux * from_clearance, from.y + uy * from_clearance);
         let p1 = Pos2::new(to.x - ux * to_clearance, to.y - uy * to_clearance);
-        painter.line_segment([p0, p1], stroke);
+        let mut segments = vec![[p0, p1]];
         for side in [-0.45f32, 0.45] {
             let (cs, sn) = (side.cos(), side.sin());
             let (bx, by) = (ux * cs - uy * sn, ux * sn + uy * cs);
-            painter.line_segment([p1, Pos2::new(p1.x - bx * head, p1.y - by * head)], stroke);
+            segments.push([p1, Pos2::new(p1.x - bx * head, p1.y - by * head)]);
         }
-        return;
+        return segments;
     }
     if dx.abs() >= dy.abs() {
         let dir = if dx >= 0.0 { 1.0 } else { -1.0 };
         let p0 = Pos2::new(from.x + dir * from_extent.x, from.y);
         let p1 = Pos2::new(to.x - dir * to_extent.x, to.y);
         let mid = (p0.x + p1.x) * 0.5;
-        painter.line_segment([p0, Pos2::new(mid, p0.y)], stroke);
-        painter.line_segment([Pos2::new(mid, p0.y), Pos2::new(mid, p1.y)], stroke);
-        painter.line_segment([Pos2::new(mid, p1.y), p1], stroke);
-        painter.line_segment(
+        vec![
+            [p0, Pos2::new(mid, p0.y)],
+            [Pos2::new(mid, p0.y), Pos2::new(mid, p1.y)],
+            [Pos2::new(mid, p1.y), p1],
             [p1, Pos2::new(p1.x - dir * head, p1.y - head * 0.6)],
-            stroke,
-        );
-        painter.line_segment(
             [p1, Pos2::new(p1.x - dir * head, p1.y + head * 0.6)],
-            stroke,
-        );
+        ]
     } else {
         let dir = if dy >= 0.0 { 1.0 } else { -1.0 };
         let p0 = Pos2::new(from.x, from.y + dir * from_extent.y);
         let p1 = Pos2::new(to.x, to.y - dir * to_extent.y);
         let mid = (p0.y + p1.y) * 0.5;
-        painter.line_segment([p0, Pos2::new(p0.x, mid)], stroke);
-        painter.line_segment([Pos2::new(p0.x, mid), Pos2::new(p1.x, mid)], stroke);
-        painter.line_segment([Pos2::new(p1.x, mid), p1], stroke);
-        painter.line_segment(
+        vec![
+            [p0, Pos2::new(p0.x, mid)],
+            [Pos2::new(p0.x, mid), Pos2::new(p1.x, mid)],
+            [Pos2::new(p1.x, mid), p1],
             [p1, Pos2::new(p1.x - head * 0.6, p1.y - dir * head)],
-            stroke,
-        );
-        painter.line_segment(
             [p1, Pos2::new(p1.x + head * 0.6, p1.y - dir * head)],
-            stroke,
-        );
+        ]
     }
 }
 
@@ -6800,7 +7571,7 @@ fn spatial_hit(mandala: &Mandala, projected: &[ProjectedNode], pointer: Pos2) ->
             let node = mandala.node(projected_node.id)?;
             // A complete flow is selected by its visible block-to-block edge,
             // not by an invisible cone-tree handle.
-            if node.shape() == Shape::Arrow && complete_flow(mandala, node.id) {
+            if node.form.is_flow() {
                 return None;
             }
             let scale = projected_node.scale.max(0.6);
@@ -6880,7 +7651,12 @@ fn project_spatial(
         .max(bounds.5 - bounds.4)
         .max(120.0) as f32;
     let available = (rect.width() - 140.0).min(rect.height() - 110.0).max(80.0);
-    let fit = (available / span).clamp(0.35, 1.2);
+    // A fit has to fit. Holding it above a floor meant a drawing larger than
+    // that floor allowed was scaled *up* and opened part-way off screen —
+    // exactly what nesting every parenthesised form made routine. It still
+    // refuses to magnify past natural size, so a small structure is shown at
+    // full size in the middle rather than blown across the window.
+    let fit = (available / span).clamp(f32::MIN_POSITIVE, 1.0);
     let camera_distance = span * 2.4 + 220.0;
     let (yaw_cos, yaw_sin) = (camera.yaw.cos(), camera.yaw.sin());
     let (pitch_cos, pitch_sin) = (camera.pitch.cos(), camera.pitch.sin());
@@ -6985,15 +7761,11 @@ pub(crate) fn source_status(ui: &mut egui::Ui, k: Ink, source: &str) {
         return;
     }
     ui.horizontal_wrapped(|ui| {
-        let tone = if state.is_valid() {
-            k.faint
-        } else {
-            k.secondary
-        };
+        let tone = if state.is_valid() { k.accent } else { k.danger };
         ui.colored_label(tone, state.mark());
         let detail = state.detail();
         if !detail.is_empty() {
-            ui.colored_label(k.secondary, detail);
+            ui.colored_label(tone, detail);
         }
     });
 }
@@ -7015,9 +7787,9 @@ pub(crate) fn matched_pair(
 
 /// One Rebis syntax colouring, shared by every text surface in the editor.
 ///
-/// Symbols carry the green, operators and delimiters the purple, prompt text stays
-/// ink. Extracted so the Source tab, the mandala's source box, and the run
-/// draft cannot drift into three different-looking editors.
+/// Symbols carry green, operators and delimiters blue, invalid syntax is red,
+/// and prompt text stays ink. Extracted so the Source tab, the mandala's source
+/// box, and the run draft cannot drift into three different-looking editors.
 pub(crate) fn rebis_layout_job(
     source: &str,
     ink: Ink,
@@ -7032,7 +7804,7 @@ pub(crate) fn rebis_layout_job(
     job.wrap.max_width = f32::INFINITY;
     for (index, character) in source.chars().enumerate() {
         let tone = match syntax.get(index).copied().unwrap_or(SourceHighlight::Atom) {
-            // Operators and delimiters share one colour — purple — as the
+            // Operators and delimiters share blue, as the
             // language legend in the top bar does, parentheses included.
             SourceHighlight::Forward
             | SourceHighlight::Backflow
@@ -7042,8 +7814,9 @@ pub(crate) fn rebis_layout_job(
             | SourceHighlight::Model
             | SourceHighlight::Parenthesis => ink.secondary,
             SourceHighlight::Whitespace | SourceHighlight::Comment => ink.faint,
-            // Symbols carry the green; prompt text is content and stays ink.
-            SourceHighlight::Atom | SourceHighlight::Invalid => ink.accent,
+            // Symbols carry green; invalid syntax is red; prompt text stays ink.
+            SourceHighlight::Atom => ink.accent,
+            SourceHighlight::Invalid => ink.danger,
             SourceHighlight::Prompt => ink.ink,
         };
         // A matched pair is marked on the delimiters themselves. Selection
@@ -7419,6 +8192,19 @@ fn truncate_model(label: &str) -> String {
     truncate_chars(label, 28)
 }
 
+/// The readout for a scale with no stop at either end.
+///
+/// Percent while a percent still says something; scientific once the wheel has
+/// carried the canvas past where "0%" or a seven-digit percentage would be the
+/// only thing left to print.
+fn zoom_label(zoom: f64) -> String {
+    if (0.001..10_000.0).contains(&zoom) {
+        format!("{:.0}%", zoom * 100.0)
+    } else {
+        format!("{zoom:.2e}×")
+    }
+}
+
 fn truncate_chars(label: &str, max: usize) -> String {
     if label.chars().count() <= max {
         return label.to_string();
@@ -7715,6 +8501,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fitted_shape_text_keeps_every_character_and_grows_with_the_shape() {
+        let text = "a-complete-prompt-that-must-never-be-trimmed";
+        let compact = fit_caption(text, Shape::Hexagon, Vec2::new(24.0, 18.0), MAX_GLYPH_PX);
+        let expanded = fit_caption(text, Shape::Hexagon, Vec2::new(120.0, 90.0), MAX_GLYPH_PX);
+
+        assert_eq!(compact.lines.concat(), text);
+        assert!(!compact.lines.iter().any(|line| line.contains('…')));
+        assert!(
+            expanded.font_size > compact.font_size,
+            "resizing the shape should give its complete text more room"
+        );
+    }
+
+    #[test]
+    fn zooming_reuses_glyph_sizes_instead_of_asking_for_a_new_one_every_frame() {
+        // The font atlas caches by exact size and never evicts, so a caption
+        // sized straight from the zoom asks for a brand-new rasterisation on
+        // every frame of a wheel-zoom. Every size the canvas requests must land
+        // on the shared ladder, which is what makes zooming reuse the atlas.
+        let mut asked = std::collections::HashSet::new();
+        for frame in 0..600 {
+            let smooth = MIN_GLYPH_PX + (MAX_GLYPH_PX - MIN_GLYPH_PX) * frame as f32 / 599.0;
+            let settled = glyph_px(smooth);
+            asked.insert(settled.to_bits());
+            // Never above what was asked for: text that fitted still fits.
+            assert!(
+                settled <= smooth * (1.0 + 1e-5),
+                "{settled} exceeds the {smooth} it settled from"
+            );
+            assert!((MIN_GLYPH_PX..=MAX_GLYPH_PX).contains(&settled));
+            // Idempotent, so a size that has already settled stays put.
+            assert_eq!(glyph_px(settled).to_bits(), settled.to_bits());
+        }
+        assert!(
+            asked.len() < 120,
+            "a full zoom sweep asked for {} distinct glyph sizes",
+            asked.len()
+        );
+
+        // A fitted caption settles on the ladder too — the binary search lands
+        // on an arbitrary fraction of a pixel otherwise.
+        let layout = fit_caption(
+            "prompt",
+            Shape::Hexagon,
+            Vec2::new(97.3, 61.7),
+            MAX_GLYPH_PX,
+        );
+        assert_eq!(
+            layout.font_size.to_bits(),
+            glyph_px(layout.font_size).to_bits()
+        );
+
+        // Nothing pathological gets through to the rasterizer.
+        for bad in [f32::NAN, f32::INFINITY, -1.0, 0.0, 1e30] {
+            let settled = glyph_px(bad);
+            assert!(settled.is_finite() && (MIN_GLYPH_PX..=MAX_GLYPH_PX).contains(&settled));
+        }
+    }
+
     /// Drive the Source tab headlessly: click into it, wait `idle` frames, then
     /// press `pressed`. Returns the pane the interaction left behind.
     ///
@@ -7807,7 +8653,7 @@ mod tests {
     }
 
     #[test]
-    fn symbols_are_green_and_operators_purple_in_every_editor() {
+    fn symbols_use_green_and_operators_use_blue_in_every_editor() {
         // One layout function serves the Source tab, the mandala's source box,
         // and the run draft, so pinning it here pins all three.
         let k = crate::theme::Ink::load();
@@ -7815,13 +8661,13 @@ mod tests {
         let job = rebis_layout_job("(-> ab \"p\")", k, 14.0, &|_| false, None);
         let colour = |i: usize| job.sections[i].format.color;
         for (i, what) in [(0, "("), (1, "-"), (2, ">"), (10, ")")] {
-            assert_eq!(colour(i), k.secondary, "operator {what} must be purple");
+            assert_eq!(colour(i), k.secondary, "operator {what} must use blue");
         }
         for i in [4, 5] {
-            assert_eq!(colour(i), k.accent, "a symbol must be green");
+            assert_eq!(colour(i), k.accent, "a symbol must use green");
         }
         // The quote marks themselves are classified Atom by the shared
-        // highlighter, so they take the symbol green; the text between them is
+        // highlighter, so they take symbol green; the text between them is
         // Prompt and stays ink.
         assert_eq!(colour(8), k.ink, "prompt text stays ink");
         for i in [7, 9] {
@@ -7832,6 +8678,10 @@ mod tests {
 
     #[test]
     fn retained_output_is_split_into_semantic_labels_without_changing_its_body() {
+        let k = crate::theme::Ink::load();
+        assert_eq!(StreamKind::Success.tone(k), k.accent);
+        assert_eq!(StreamKind::Signal.tone(k), k.secondary);
+        assert_eq!(StreamKind::Caution.tone(k), k.danger);
         assert_eq!(
             stream_line("event    prompt started · abstraction 2"),
             StreamLine {
@@ -7857,6 +8707,14 @@ mod tests {
             }
         );
         assert_eq!(
+            stream_line("model       failed · provider unavailable"),
+            StreamLine {
+                tag: Some("model"),
+                body: "failed · provider unavailable",
+                kind: StreamKind::Caution,
+            }
+        );
+        assert_eq!(
             stream_line("provider prose remains intact"),
             StreamLine {
                 tag: None,
@@ -7864,6 +8722,60 @@ mod tests {
                 kind: StreamKind::Plain,
             }
         );
+    }
+
+    #[test]
+    fn a_message_typed_mid_answer_waits_its_turn_instead_of_starting_a_second_one() {
+        use kaos_core::sessions::Role;
+        let mut editor = Editor::new(Mandala::new());
+        let chat = ChatPane {
+            browsing: false,
+            queued: vec!["and the dead letters?".into(), "with an example".into()],
+            ..ChatPane::default()
+        };
+        let session = chat.session.id.clone();
+        editor.tabs.open("chat", Pane::Chat(chat));
+
+        // Nothing queued has been asked yet, so nothing queued is in the
+        // transcript — it is waiting, not said.
+        let turns = |editor: &Editor, session: &str| {
+            editor
+                .tabs
+                .iter()
+                .find_map(|tab| match &tab.content {
+                    Pane::Chat(chat) if chat.session.id == session => Some(
+                        chat.session
+                            .turns
+                            .iter()
+                            .map(|turn| (turn.role, turn.text.clone()))
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        assert!(turns(&editor, &session).is_empty());
+
+        editor.dispatch_queued_chat();
+
+        // They go out together, in the order they were written, as one turn.
+        assert_eq!(
+            turns(&editor, &session),
+            vec![(
+                Role::User,
+                "and the dead letters?\n\nwith an example".to_string()
+            )],
+            "queued messages are asked as one turn, in order"
+        );
+        let drained = editor
+            .tabs
+            .iter()
+            .find_map(|tab| match &tab.content {
+                Pane::Chat(chat) if chat.session.id == session => Some(chat.queued.len()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(drained, 0, "and the queue is emptied by sending them");
     }
 
     #[test]
@@ -7911,8 +8823,8 @@ mod tests {
     }
 
     #[test]
-    fn a_flow_arrow_keeps_its_purple_when_the_block_is_selected() {
-        // Nesting has no line of its own. Purple is therefore reserved for the
+    fn a_flow_arrow_keeps_its_blue_when_the_block_is_selected() {
+        // Nesting has no line of its own. Blue is therefore reserved for the
         // one remaining connection: an explicit flow operator.
         let k = crate::theme::Ink::load();
         assert_eq!(edge_colour(k), k.secondary);
@@ -8117,8 +9029,9 @@ mod tests {
         // On the wall: a resize, naming the axis the wall governs. Aiming at the
         // drawn line lands either side of it, so both sides must resize — a miss
         // to the outside used to reach bare canvas and pan the whole view.
+        let band = grab_band(doc.view);
         for x in [half_w - 1.0, half_w, half_w + 1.0] {
-            let wall = Drag::beginning_at(&doc.mandala, x, 0.0);
+            let wall = Drag::beginning_at(&doc.mandala, x, 0.0, band);
             let Drag::Resize(grab) = wall else {
                 panic!("the wall at {x} must begin a resize, not a pan or a move");
             };
@@ -8129,7 +9042,7 @@ mod tests {
         // In the middle: the box moves, exactly as before.
         assert!(
             matches!(
-                Drag::beginning_at(&doc.mandala, 0.0, 0.0),
+                Drag::beginning_at(&doc.mandala, 0.0, 0.0, band),
                 Drag::Node { id, .. } if id == square
             ),
             "the middle of the box still moves it"
@@ -8137,7 +9050,7 @@ mod tests {
 
         // Off the drawing: the canvas pans.
         assert!(matches!(
-            Drag::beginning_at(&doc.mandala, 900.0, 900.0),
+            Drag::beginning_at(&doc.mandala, 900.0, 900.0, band),
             Drag::Pan
         ));
 
@@ -8165,12 +9078,46 @@ mod tests {
                 &doc.mandala,
                 40.0 + radius * angle.cos(),
                 -20.0 + radius * angle.sin(),
+                grab_band(doc.view),
             );
             let Drag::Resize(grab) = drag else {
                 panic!("the circumference must begin a radial resize");
             };
             assert_eq!(grab.id, compose);
             assert!(grab.wide && grab.tall);
+        }
+    }
+
+    #[test]
+    fn a_wall_stays_the_same_thickness_under_the_pointer_at_every_zoom() {
+        let mut doc = Doc::default();
+        let square = doc.mandala.add(Form::Square, "", 0.0, 0.0);
+        let (half_w, _) = doc.mandala.extent(square);
+
+        // The band is a screen measurement. Two pixels outside the drawn wall is
+        // a resize whether the canvas is magnified or pushed away — before this,
+        // the band was fixed in world units, so zooming out put the wall out of
+        // reach and zooming in swallowed the whole shape into its own border.
+        for zoom in [0.2, 1.0, 6.0, 1_000.0, 1e9] {
+            doc.view.zoom = zoom;
+            let band = grab_band(doc.view);
+            let outside = half_w + 2.0 / zoom;
+            assert!(
+                matches!(
+                    Drag::beginning_at(&doc.mandala, outside, 0.0, band),
+                    Drag::Resize(grab) if grab.id == square
+                ),
+                "two pixels outside the wall must resize at zoom {zoom}"
+            );
+            // And the centre never becomes wall, however wide the band would be
+            // in world units.
+            assert!(
+                matches!(
+                    Drag::beginning_at(&doc.mandala, 0.0, 0.0, band),
+                    Drag::Node { id, .. } if id == square
+                ),
+                "the middle of the box must still move it at zoom {zoom}"
+            );
         }
     }
 
@@ -8239,25 +9186,33 @@ mod tests {
     }
 
     #[test]
-    fn visible_edges_are_only_flow_operators_between_boundaries() {
+    fn every_flow_operator_is_drawn_as_the_line_between_its_two_operands() {
         let mut mandala = Mandala::new();
         let square = mandala.add(Form::Square, "", 0.0, 0.0);
         let circle = mandala.add(Form::Compose, "", 200.0, 0.0);
         let flow = mandala.flow(square, circle, Form::Forward).unwrap();
         let leaf_a = mandala.add(Form::Prompt, "a", 0.0, 200.0);
         let leaf_b = mandala.add(Form::Prompt, "b", 200.0, 200.0);
-        let _leaf_flow = mandala.flow(leaf_a, leaf_b, Form::Forward).unwrap();
-        // Stored syntax still has ordered operand relations, but none of those
+        let leaf_flow = mandala.flow(leaf_a, leaf_b, Form::Forward).unwrap();
+        // Stored syntax still has ordered operand relations, and none of those
         // relations becomes an invented line.
         mandala.father_of(circle, leaf_a);
 
         let edges = visible_edges(&mandala);
-        assert_eq!(edges.len(), 1);
-        let flow_edge = edges.first().unwrap();
-        assert_eq!(
-            (flow_edge.from, flow_edge.to, flow_edge.owner),
-            (square, circle, flow)
-        );
+        let drawn = edges
+            .iter()
+            .map(|edge| (edge.from, edge.to, edge.owner))
+            .collect::<Vec<_>>();
+        // A flow between two leaves is a connection just as much as one between
+        // two boundaries. Drawing only the latter left the former as an arrow
+        // glyph standing between its own operands.
+        assert_eq!(drawn.len(), 2);
+        assert!(drawn.contains(&(square, circle, flow)));
+        assert!(drawn.contains(&(leaf_a, leaf_b, leaf_flow)));
+        // The plain parent relation invented nothing.
+        assert!(!drawn
+            .iter()
+            .any(|(from, to, _)| *from == circle && *to == leaf_a));
     }
 
     #[test]
@@ -8308,9 +9263,14 @@ mod tests {
             doc.mandala.node(pasted[1]).unwrap().size,
             Some((190.0, 120.0))
         );
-        assert_eq!(
-            doc.mandala.node(pasted[2]).unwrap().size,
-            Some((88.0, 64.0))
+        // A hexagon scales whole, so the taller of the two requested factors
+        // governs both axes and the form keeps its own proportions.
+        let base = doc.mandala.node(pasted[2]).unwrap().base_extent();
+        let scale = (88.0f64 / base.0).max(64.0f64 / base.1);
+        let kept = doc.mandala.node(pasted[2]).unwrap().size.unwrap();
+        assert!(
+            (kept.0 - base.0 * scale).abs() < 1e-9 && (kept.1 - base.1 * scale).abs() < 1e-9,
+            "the pasted hexagon kept {kept:?} rather than its own proportions"
         );
     }
 
@@ -8423,6 +9383,216 @@ mod tests {
             assert!((direction.length() - 1.0).abs() < 1e-5);
             let pointer = centre + direction * 48.0;
             assert_eq!(spatial_gizmo_hit(pointer, centre, camera), Some(axis));
+        }
+    }
+
+    #[test]
+    fn holding_space_drags_the_view_instead_of_the_drawing() {
+        use egui::{Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0));
+
+        // Drag from the middle of a form, so without space the gesture has
+        // something to grab and moving the view would be plainly wrong.
+        let run = |space: bool| {
+            let mut editor = Editor::new(Mandala::from_rebis("(\"a\" \"b\")").unwrap());
+            let ctx = egui::Context::default();
+            let mut origin = Pos2::ZERO;
+            let frame = |editor: &mut Editor, events: Vec<Event>, origin: &mut Pos2| {
+                let _ = ctx.run(
+                    RawInput {
+                        events,
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        // The whole window, not just the canvas: the panels
+                        // around it are where a focus or key gate would bite.
+                        editor.header(ctx);
+                        editor.tab_bar(ctx);
+                        editor.palette(ctx);
+                        editor.side(ctx);
+                        editor.footer(ctx);
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            // Canvas coordinates are relative to this rect, so
+                            // the pointer positions below must be too.
+                            *origin = ui.max_rect().min;
+                            editor.canvas(ui);
+                        });
+                    },
+                );
+            };
+            // Two settling frames: egui sizes panels from the previous pass, so
+            // the canvas rect is only final on the second.
+            frame(&mut editor, Vec::new(), &mut origin);
+            frame(&mut editor, Vec::new(), &mut origin);
+            let held = editor.doc().mandala.nodes()[1].id;
+            let node = editor.doc().mandala.node(held).unwrap();
+            let (sx, sy) = editor.doc().view.to_screen(node.x, node.y);
+            let start = origin + Vec2::new(sx as f32, sy as f32);
+            let before = (node.x, node.y);
+            let framed = editor.doc().view;
+
+            let held_space = |mut events: Vec<Event>| {
+                if space {
+                    events.insert(
+                        0,
+                        Event::Key {
+                            key: Key::Space,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: Modifiers::default(),
+                        },
+                    );
+                }
+                events
+            };
+            frame(
+                &mut editor,
+                held_space(vec![
+                    Event::PointerMoved(start),
+                    Event::PointerButton {
+                        pos: start,
+                        button: PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Modifiers::default(),
+                    },
+                ]),
+                &mut origin,
+            );
+            for step in [40.0f32, 90.0] {
+                frame(
+                    &mut editor,
+                    held_space(vec![Event::PointerMoved(start + Vec2::splat(step))]),
+                    &mut origin,
+                );
+            }
+            let after = editor.doc().mandala.node(held).map(|n| (n.x, n.y)).unwrap();
+            (framed, editor.doc().view, before, after)
+        };
+
+        let (framed, view, before, after) = run(true);
+        assert!(
+            (view.tx - framed.tx).abs() > 1.0 || (view.ty - framed.ty).abs() > 1.0,
+            "space held must move the view, but it stayed at ({}, {})",
+            view.tx,
+            view.ty
+        );
+        assert_eq!(
+            before, after,
+            "and must not move the form under the pointer"
+        );
+
+        let (framed, view, before, after) = run(false);
+        assert_ne!(before, after, "without space the same drag moves the form");
+        assert_eq!(
+            (view.tx, view.ty),
+            (framed.tx, framed.ty),
+            "and leaves the view where framing put it"
+        );
+    }
+
+    #[test]
+    fn a_wider_boundary_wears_a_larger_sigil() {
+        // The mark measures the boundary it names: nesting is read by seeing
+        // the outer circle's sigil larger than the one on a circle inside it.
+        let natural = mark_weight(Vec2::splat(1.0));
+        let wide = mark_weight(Vec2::splat(9.0));
+        let vast = mark_weight(Vec2::splat(400.0));
+        assert!(wide > natural, "a grown boundary wears a larger mark");
+        assert!(vast > wide, "and a larger one larger still");
+
+        // Damped, so a boundary a hundred times a symbol's size does not wear a
+        // mark a hundred times a letter's, and bounded so it cannot run away.
+        assert!(wide < 9.0, "the growth is damped, not proportional");
+        assert!(vast <= 8.0, "and it stops");
+
+        // Never below natural: a boundary is not made illegible by being snug.
+        assert_eq!(mark_weight(Vec2::splat(0.2)), 1.0);
+
+        // And whatever it works out to, the rasterizer still caps it.
+        assert!(glyph_px(MARK_PX * vast * 40.0) <= MAX_GLYPH_PX);
+    }
+
+    #[test]
+    fn nothing_drawn_thins_below_a_pixel_however_far_the_canvas_is_pushed_away() {
+        // Every stroke is scaled by the view. At the zoom that fits a real
+        // program — around a fifth — an unfloored 1.8px outline lands at 0.34px
+        // and the drawing fades to almost blank: the flow connections vanish
+        // outright, which is how a program full of arrows came to show none.
+        let fitted = 0.19_f32;
+        assert!(
+            1.8 * fitted < 0.5,
+            "the unfloored width really is sub-pixel"
+        );
+        for zoom in [1e-6, 0.05, fitted, 0.5, 1.0, 12.0] {
+            for width in [
+                node_outline_width(Shape::Circle, false) * zoom,
+                node_outline_width(Shape::Diamond, false) * zoom,
+                1.8 * zoom,
+                5.0 * zoom,
+            ] {
+                let drawn = pen(width);
+                assert!(drawn >= HAIRLINE_PX, "{drawn} at zoom {zoom} is invisible");
+                assert!(drawn >= width - 1e-6, "the floor must never thin a line");
+            }
+        }
+        // Zoomed in, the pen is the geometry's own width again, not the floor.
+        assert!(pen(node_outline_width(Shape::Circle, false) * 12.0) > HAIRLINE_PX);
+        // And nothing pathological reaches the tessellator.
+        for bad in [f32::NAN, f32::INFINITY, -3.0] {
+            assert!(pen(bad).is_finite() && pen(bad) >= HAIRLINE_PX);
+        }
+    }
+
+    #[test]
+    fn the_structural_view_opens_framed_and_its_wheel_has_no_stop() {
+        // A big drawing must be scaled DOWN to the window. Holding the fit above
+        // a floor scaled it up instead and opened it part-way off screen, which
+        // nesting every parenthesised form made routine.
+        let mut sprawling = Mandala::new();
+        let root = sprawling.add(Form::Compose, "", 0.0, 0.0);
+        for step in 0..24 {
+            let leaf = sprawling.add(Form::Prompt, "p", f64::from(step) * 400.0, 0.0);
+            sprawling.father_of(root, leaf);
+        }
+        let layout = sprawling.spatial_layout();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 640.0));
+        let projected = project_spatial(&sprawling, &layout, rect, SpatialCamera::default());
+        let frame = rect.expand(1.0);
+        assert!(
+            projected
+                .iter()
+                .all(|node| frame.contains(node.position)
+                    || rect.expand(140.0).contains(node.position)),
+            "a drawing wider than the window must be fitted into it, not enlarged"
+        );
+
+        // And the wheel runs out of arithmetic rather than out of permission,
+        // in both directions, exactly as the flat canvas does.
+        let mut camera = SpatialCamera::default();
+        for _ in 0..200 {
+            camera.zoom_by(1.0 / 1.1);
+        }
+        assert!(
+            camera.zoom < 1e-6,
+            "pulling back stopped at {}",
+            camera.zoom
+        );
+        assert!(camera.zoom > 0.0 && camera.zoom.is_finite());
+
+        let mut camera = SpatialCamera::default();
+        for _ in 0..200 {
+            camera.zoom_by(1.1);
+        }
+        assert!(camera.zoom > 1e6, "pushing in stopped at {}", camera.zoom);
+        assert!(camera.zoom.is_finite());
+
+        // Nothing pathological moves it.
+        let mut camera = SpatialCamera::default();
+        for bad in [f32::NAN, f32::INFINITY, 0.0, -2.0] {
+            camera.zoom_by(bad);
+            assert_eq!(camera.zoom, 1.0, "{bad} must leave the camera alone");
         }
     }
 

@@ -19,6 +19,7 @@ pub(crate) fn rgb((r, g, b): (u8, u8, u8)) -> Color32 {
 pub(crate) struct Ink {
     pub(crate) accent: Color32,
     pub(crate) secondary: Color32,
+    pub(crate) danger: Color32,
     pub(crate) ground: Color32,
     pub(crate) chrome: Color32,
     pub(crate) fill: Color32,
@@ -32,6 +33,7 @@ impl Ink {
         Self {
             accent: rgb(p.accent),
             secondary: rgb(p.secondary),
+            danger: rgb(p.danger),
             ground: rgb(p.ground),
             chrome: rgb(p.chrome),
             fill: rgb(p.fill),
@@ -171,7 +173,7 @@ fn install_type_scale(style: &mut egui::Style) {
 /// which
 /// made the loudest thing on screen the fact that you had just clicked
 /// something. Accent now lives in strokes and text: it marks where you are, not
-/// what you did. Fills stay neutral in every state.
+/// what you did. Fills stay quiet frost blue in every state.
 pub(crate) fn install_theme(ctx: &egui::Context, k: Ink) {
     let light = kaos_core::theme::mode() == kaos_core::theme::Mode::Light;
     let mut visuals = if light {
@@ -183,18 +185,30 @@ pub(crate) fn install_theme(ctx: &egui::Context, k: Ink) {
     visuals.panel_fill = k.chrome;
     visuals.window_fill = k.chrome;
     visuals.extreme_bg_color = k.ground;
+    visuals.faint_bg_color = k.chrome;
+    visuals.code_bg_color = k.fill;
     // Left unset so a widget's own foreground stroke decides its text colour —
     // an override here would win over every state below, including the accent
     // that marks the pressed and open ones.
     visuals.override_text_color = None;
 
     let hairline = |width: f32, color: Color32| UiStroke::new(width, color);
+    let wash = |color: Color32, opacity: f32| {
+        Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            (opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+        )
+    };
     // Rules and edges are hairlines, not lines: full-strength `faint` on every
     // frame boundary turns a panel into a wireframe.
-    let rule = k.faint.gamma_multiply(if light { 0.45 } else { 0.35 });
+    let rule = wash(k.faint, if light { 0.45 } else { 0.35 });
 
     // Resting: a surface a step forward from the panel, edged rather than
     // outlined, with no accent anywhere.
+    visuals.widgets.noninteractive.bg_fill = k.chrome;
+    visuals.widgets.noninteractive.weak_bg_fill = k.chrome;
     visuals.widgets.noninteractive.bg_stroke = hairline(1.0, rule);
     visuals.widgets.inactive.bg_fill = k.fill;
     visuals.widgets.inactive.weak_bg_fill = k.fill;
@@ -247,12 +261,11 @@ pub(crate) fn install_theme(ctx: &egui::Context, k: Ink) {
     visuals.window_shadow = egui::epaint::Shadow::NONE;
     visuals.popup_shadow = egui::epaint::Shadow::NONE;
 
-    // egui's defaults still carry unrelated colours in a few corners. Remove
-    // those so the shared green accent and its purple second stay the only
-    // chromatic roles.
-    visuals.hyperlink_color = k.accent;
-    visuals.warn_fg_color = k.ink;
-    visuals.error_fg_color = k.ink;
+    // egui's defaults still carry unrelated colours in a few corners. Route
+    // them through Kaos's chosen semantic roles instead.
+    visuals.hyperlink_color = k.secondary;
+    visuals.warn_fg_color = k.danger;
+    visuals.error_fg_color = k.danger;
     visuals.text_cursor.stroke = hairline(1.5, k.accent);
     // Text and range selection: egui ships its own blue here, which is a third
     // hue nobody chose. The accent at egui's own default weight keeps the
@@ -276,27 +289,35 @@ pub(crate) fn install_theme(ctx: &egui::Context, k: Ink) {
 mod tests {
     use super::*;
 
-    /// Every colour in the editor comes from the shared palette.
+    /// Every colour in the editor comes from the shared semantic palette.
     ///
     /// egui ships defaults with hues of their own — a blue text selection, a
     /// blue hyperlink, a yellow warning, a red error. Each one that survives is
     /// a colour nobody chose, and it makes the interface look like the toolkit
-    /// rather than like Kaos. Structure carries meaning through brightness
-    /// here; exactly two roles are allowed a hue.
+    /// rather than like Kaos. Kaos deliberately chooses its own green, blue,
+    /// and red roles.
     #[test]
-    fn the_editor_uses_only_the_two_palette_accents() {
+    fn the_editor_uses_only_the_shared_semantic_palette() {
         let k = Ink::load();
         let ctx = egui::Context::default();
         install_theme(&ctx, k);
         let v = ctx.style().visuals.clone();
-        let grey = |c: Color32| c.r() == c.g() && c.g() == c.b();
-        // Color32 stores premultiplied channels, so a translucent accent is not
-        // literally the accent's bytes. Reconstruct at the same alpha instead.
+        // Color32 stores premultiplied channels, so a translucent role is not
+        // literally the role's bytes. Reconstruct at the same alpha instead.
         let is_role = |c: Color32, role: Color32| {
             c == Color32::from_rgba_unmultiplied(role.r(), role.g(), role.b(), c.a())
         };
-        let from_palette =
-            |c: Color32| grey(c) || c.a() == 0 || is_role(c, k.accent) || is_role(c, k.secondary);
+        let roles = [
+            k.ground,
+            k.chrome,
+            k.fill,
+            k.ink,
+            k.faint,
+            k.accent,
+            k.secondary,
+            k.danger,
+        ];
+        let from_palette = |c: Color32| c.a() == 0 || roles.iter().any(|role| is_role(c, *role));
         let mut strays: Vec<String> = Vec::new();
         let mut check = |name: &str, c: Color32| {
             if !from_palette(c) {

@@ -1,30 +1,32 @@
 //! The palette, shared by the terminal app and `kaos visual`.
 //!
-//! Two modes, each a neutral grey scale with two semantic colours. Green marks
-//! focus, recursion, and chaos; purple carries flow. Both the terminal app
-//! and `kaos visual` read this one palette. `/theme dark` and `/theme light`
-//! persist the choice in the Kaos config, and both interfaces read it back
-//! through [`mode`]. Pure std — these are just escape codes.
+//! Two modes with quiet frost-blue structure and three semantic colours. Green
+//! marks success, focus, recursion, and active work; blue carries flow,
+//! navigation, and information; red marks invalid, failed, or destructive
+//! states. Both the terminal app and `kaos visual` read this one palette.
+//! `/theme dark` and `/theme light` persist the choice in the Kaos config, and
+//! both interfaces read it back through [`mode`]. Pure std — these are just
+//! escape codes.
 
 // The four roles the one-shot CLI output uses. They resolve from the current
 // mode rather than being fixed, so `kaos scry`, `kaos auth` and the rest follow
 // `/theme` like everything else. Kept as functions, not constants, because the
 // mode is read from the config at run time.
 
-/// Headings, prompts, the sigil of chaos — the accent.
+/// Success, focus, recursion, active work, and the chaos star.
 #[allow(non_snake_case)]
 pub fn GREEN() -> (u8, u8, u8) {
     current().accent
 }
-/// Flow, operators, navigation, and live secondary data.
+/// Legacy colour name for the blue flow/information role.
 #[allow(non_snake_case)]
 pub fn PURPLE() -> (u8, u8, u8) {
     current().secondary
 }
-/// Compatibility name for the primary accent.
+/// Failure, invalid state, warnings, and destructive actions.
 #[allow(non_snake_case)]
 pub fn RED() -> (u8, u8, u8) {
-    GREEN()
+    current().danger
 }
 /// Rules and frames.
 #[allow(non_snake_case)]
@@ -42,14 +44,13 @@ pub fn BONE() -> (u8, u8, u8) {
     current().ink
 }
 
-// ── neutral modes with semantic accents ────────────────────────────────────
+// ── cool structure with semantic RGB roles ─────────────────────────────────
 
 /// Which way round the interface runs.
 ///
-/// The structural palette is deliberately neutral: shapes, glyphs and rules
-/// carry meaning through form and brightness. Green marks interaction and
-/// recursion; purple marks flow. One mode reverses the neutral figure and
-/// ground.
+/// Shape, glyph, and rule roles share one cold hue family and separate through
+/// brightness. Green, blue, and red are reserved for semantic state. One mode
+/// reverses the lightness of the figure and ground.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Mode {
     #[default]
@@ -82,7 +83,7 @@ impl Mode {
     }
 }
 
-/// The whole interface in five tones, so a mode is one value rather than a
+/// The whole interface in nine tones, so a mode is one value rather than a
 /// scattering of constants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Palette {
@@ -94,48 +95,48 @@ pub struct Palette {
     pub fill: (u8, u8, u8),
     /// Text, strokes, and every drawn symbol.
     pub ink: (u8, u8, u8),
-    /// One step back from the ink, for a second class of neutral emphasis
-    /// without introducing a third chromatic role.
+    /// One step back from the ink, for a second class of emphasis.
     pub mid: (u8, u8, u8),
     /// Secondary text and rules.
     pub faint: (u8, u8, u8),
-    /// Green, for what the eye should go to first — headings, selection,
-    /// recursion, the active tool, and the chaos star.
+    /// Green, for success, focus, recursion, active work, and the chaos star.
     pub accent: (u8, u8, u8),
-    /// Purple, for executable flow, navigation, live data, and range selections.
+    /// Blue, for executable flow, navigation, live data, and range selections.
     ///
     /// Named for its ROLE, not its hue: the palette's second chromatic voice.
     /// Keeping the role name lets future palettes change without lying to
     /// callers about what the colour means.
     pub secondary: (u8, u8, u8),
+    /// Red, for invalid source, failed work, warnings, and destructive actions.
+    pub danger: (u8, u8, u8),
 }
 
-/// The palette for a mode. Light is not a tint of dark — it is the inverse, so
-/// ink and ground swap ends.
+/// The palette for a mode. Surfaces and text remain cool and restrained while
+/// the RGB semantic roles carry state. Light reverses the luminance hierarchy.
 pub const fn palette(mode: Mode) -> Palette {
     match mode {
         Mode::Dark => Palette {
-            ground: (12, 12, 12),
-            chrome: (22, 22, 22),
-            fill: (30, 30, 30),
-            ink: (238, 238, 238),
-            mid: (190, 190, 190),
-            faint: (140, 140, 140),
-            // Bright enough to lead on the near-black ground; purple stays a
-            // distinct, slightly quieter second voice.
+            ground: (7, 21, 33),
+            chrome: (13, 33, 50),
+            fill: (20, 44, 64),
+            ink: (232, 247, 255),
+            mid: (167, 207, 227),
+            faint: (108, 154, 181),
             accent: (72, 214, 126),
-            secondary: (176, 112, 255),
+            secondary: (114, 183, 255),
+            danger: (255, 107, 122),
         },
         Mode::Light => Palette {
-            ground: (250, 250, 250),
-            chrome: (240, 240, 240),
-            fill: (255, 255, 255),
-            ink: (16, 16, 16),
-            mid: (70, 70, 70),
-            faint: (120, 120, 120),
-            // Deepened so both still read against white.
-            accent: (20, 122, 66),
-            secondary: (150, 86, 196),
+            ground: (242, 249, 253),
+            chrome: (228, 241, 248),
+            fill: (250, 253, 255),
+            ink: (11, 42, 61),
+            mid: (42, 89, 116),
+            faint: (75, 116, 139),
+            // Deep enough to remain readable against the icy page.
+            accent: (18, 116, 63),
+            secondary: (40, 108, 173),
+            danger: (180, 35, 53),
         },
     }
 }
@@ -199,9 +200,9 @@ pub fn dim(rgb: (u8, u8, u8), s: &str) -> String {
 pub fn green(s: &str) -> String {
     bold(current().accent, s)
 }
-/// Compatibility name for [`green`].
+/// Bold danger text.
 pub fn red(s: &str) -> String {
-    green(s)
+    bold(current().danger, s)
 }
 pub fn ash(s: &str) -> String {
     fg(current().faint, s)
@@ -244,7 +245,7 @@ pub fn compact_chaos_star_lines() -> [&'static str; 5] {
     ["↖ ↑ ↗", " ╲│╱ ", "←─•─→", " ╱│╲ ", "↙ ↓ ↘"]
 }
 
-/// The Chaos Star rendered in the bold primary green, ready for a banner.
+/// The Chaos Star rendered in bold green, ready for a banner.
 pub fn chaos_star_green() -> String {
     chaos_star_lines()
         .iter()
@@ -272,6 +273,30 @@ pub fn prompt() -> String {
 mod tests {
     use super::*;
 
+    fn relative_luminance((r, g, b): (u8, u8, u8)) -> f32 {
+        let linear = |channel: u8| {
+            let channel = f32::from(channel) / 255.0;
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+
+    fn contrast_ratio(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
+        let (bright, dark) = {
+            let (a, b) = (relative_luminance(a), relative_luminance(b));
+            if a > b {
+                (a, b)
+            } else {
+                (b, a)
+            }
+        };
+        (bright + 0.05) / (dark + 0.05)
+    }
+
     #[test]
     fn modes_parse_however_they_are_typed() {
         assert_eq!(Mode::parse("dark"), Some(Mode::Dark));
@@ -291,9 +316,9 @@ mod tests {
     }
 
     #[test]
-    fn the_neutral_tones_are_true_greys() {
-        // Structure carries meaning through brightness alone; only the two
-        // semantic colour roles are allowed to have a hue.
+    fn every_structural_role_belongs_to_the_frost_blue_family() {
+        // Structure reads through brightness and retains a restrained blue
+        // cast; semantic state is allowed to use the RGB roles below.
         for m in [Mode::Dark, Mode::Light] {
             let p = palette(m);
             for (name, (r, g, b)) in [
@@ -305,16 +330,15 @@ mod tests {
                 ("faint", p.faint),
             ] {
                 assert!(
-                    r == g && g == b,
-                    "{} of {m:?} is not grey: {r},{g},{b}",
-                    name
+                    b > r && b >= g && g >= r,
+                    "{name} of {m:?} is outside the frost-blue family: {r},{g},{b}"
                 );
             }
         }
     }
 
     #[test]
-    fn light_inverts_dark_rather_than_tinting_it() {
+    fn light_and_dark_keep_opposite_value_structures() {
         let (d, l) = (palette(Mode::Dark), palette(Mode::Light));
         // Ink and ground swap ends of the scale.
         assert!(d.ink.0 > d.ground.0, "dark should be light-on-dark");
@@ -322,33 +346,18 @@ mod tests {
     }
 
     #[test]
-    fn the_semantic_colours_are_green_and_purple() {
+    fn the_semantic_roles_are_green_blue_and_red() {
         for m in [Mode::Dark, Mode::Light] {
             let p = palette(m);
             let (r, g, b) = p.accent;
-            assert!(!(r == g && g == b), "{m:?} accent is grey, not an accent");
             assert!(g > r && g > b, "{m:?} accent {r},{g},{b} is not green");
             let (r, g, b) = p.secondary;
-            assert!(
-                !(r == g && g == b),
-                "{m:?} secondary is grey, not an accent"
-            );
-            assert!(b > r && r > g, "{m:?} secondary {r},{g},{b} is not purple");
-        }
-    }
-
-    #[test]
-    fn green_is_the_main_chromatic_voice() {
-        let luminance = |(r, g, b): (u8, u8, u8)| {
-            0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)
-        };
-        for m in [Mode::Dark, Mode::Light] {
-            let p = palette(m);
-            let contrast = |colour| (luminance(colour) - luminance(p.ground)).abs();
-            assert!(
-                contrast(p.accent) > contrast(p.secondary),
-                "{m:?} primary green should lead the secondary purple"
-            );
+            assert!(b > g && g > r, "{m:?} secondary {r},{g},{b} is not blue");
+            let (r, g, b) = p.danger;
+            assert!(r > g && r > b, "{m:?} danger {r},{g},{b} is not red");
+            assert_ne!(p.accent, p.secondary);
+            assert_ne!(p.accent, p.danger);
+            assert_ne!(p.secondary, p.danger);
         }
     }
 
@@ -356,12 +365,13 @@ mod tests {
     fn the_semantic_colours_read_against_their_ground() {
         for m in [Mode::Dark, Mode::Light] {
             let p = palette(m);
-            let lum = |(r, g, b): (u8, u8, u8)| {
-                0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)
-            };
-            for (name, colour) in [("accent", p.accent), ("secondary", p.secondary)] {
+            for (name, colour) in [
+                ("accent", p.accent),
+                ("secondary", p.secondary),
+                ("danger", p.danger),
+            ] {
                 assert!(
-                    (lum(colour) - lum(p.ground)).abs() > 40.0,
+                    contrast_ratio(colour, p.ground) >= 4.5,
                     "{m:?} {name} does not separate from the ground"
                 );
             }
@@ -370,13 +380,18 @@ mod tests {
 
     #[test]
     fn the_three_text_tones_are_distinguishable() {
-        // Neutral text still separates roles by brightness, so the steps
+        // Blue-tinted text still separates roles by brightness, so the steps
         // between its tones have to be real.
         for m in [Mode::Dark, Mode::Light] {
             let p = palette(m);
-            let step = |a: (u8, u8, u8), b: (u8, u8, u8)| (i16::from(a.0) - i16::from(b.0)).abs();
-            assert!(step(p.ink, p.mid) >= 40, "{m:?} ink/mid too close");
-            assert!(step(p.mid, p.faint) >= 40, "{m:?} mid/faint too close");
+            assert!(
+                contrast_ratio(p.ink, p.mid) >= 1.45,
+                "{m:?} ink/mid too close"
+            );
+            assert!(
+                contrast_ratio(p.mid, p.faint) >= 1.45,
+                "{m:?} mid/faint too close"
+            );
         }
     }
 
@@ -384,11 +399,11 @@ mod tests {
     fn ink_and_ground_stay_far_enough_apart_to_read() {
         for m in [Mode::Dark, Mode::Light] {
             let p = palette(m);
-            let gap = (i16::from(p.ink.0) - i16::from(p.ground.0)).abs();
-            assert!(gap > 180, "{m:?} contrast is only {gap}");
+            let gap = contrast_ratio(p.ink, p.ground);
+            assert!(gap >= 12.0, "{m:?} contrast is only {gap}");
             // Secondary text must still separate from the ground.
-            let faint_gap = (i16::from(p.faint.0) - i16::from(p.ground.0)).abs();
-            assert!(faint_gap > 60, "{m:?} faint contrast is only {faint_gap}");
+            let faint_gap = contrast_ratio(p.faint, p.ground);
+            assert!(faint_gap >= 4.5, "{m:?} faint contrast is only {faint_gap}");
         }
     }
 

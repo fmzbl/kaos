@@ -722,9 +722,29 @@ impl Desk {
     }
 
     pub(crate) fn session_active(&self, session: &str) -> bool {
+        self.session_task(session).is_some()
+    }
+
+    fn session_task(&self, session: &str) -> Option<&Task> {
         self.tasks
             .iter()
-            .any(|task| task.session.as_deref() == Some(session) && !task.state.terminal())
+            .find(|task| task.session.as_deref() == Some(session) && !task.state.terminal())
+    }
+
+    /// What the model has produced so far for this session's turn in flight.
+    ///
+    /// A chat turn is a child process streaming into a retained log, so the
+    /// answer exists long before it is finished. Showing only the delivered
+    /// reply meant watching a still window for however long the work took.
+    pub(crate) fn session_stream(&self, session: &str) -> Option<(Vec<String>, String)> {
+        let task = self.session_task(session)?;
+        let lines = task
+            .output
+            .iter()
+            .filter(|line| !line.starts_with("started") && !line.starts_with("complete"))
+            .cloned()
+            .collect();
+        Some((lines, task.timer()))
     }
 
     /// Completed chat replies not yet transferred into their durable sessions.

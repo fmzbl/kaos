@@ -44,7 +44,7 @@ use crate::rebis_workspace::{
 use crate::theme;
 
 // The terminal palette follows the configured mode (`/theme dark|light`).
-// Structure stays neutral grey; green marks focus and purple marks flow.
+// Green marks active/success, blue marks flow/information, and red marks danger.
 fn tone(rgb: (u8, u8, u8)) -> Color {
     Color::Rgb(rgb.0, rgb.1, rgb.2)
 }
@@ -67,8 +67,8 @@ fn C_ASH() -> Color {
 fn C_BONE() -> Color {
     tone(crate::theme::current().ink)
 }
-// The two chromatic roles are a primary green and secondary purple; neutral
-// structure still separates by brightness through the `mid` and `faint` tones.
+// Semantic RGB carries state; quiet structure still separates by brightness
+// through the `mid` and `faint` tones.
 /// The page the whole app is drawn on.
 fn c_ground() -> Color {
     tone(crate::theme::current().ground)
@@ -86,10 +86,14 @@ fn C_SYMBOL() -> Color {
 fn C_SECONDARY() -> Color {
     tone(crate::theme::current().secondary)
 }
-/// A finished run uses the brightest neutral tone.
+#[allow(non_snake_case)]
+fn C_DANGER() -> Color {
+    tone(crate::theme::current().danger)
+}
+/// A finished run uses success green.
 #[allow(non_snake_case)]
 fn C_DONE() -> Color {
-    tone(crate::theme::current().ink)
+    tone(crate::theme::current().accent)
 }
 /// Internal marker distinguishing a literal chat intent from `/code`'s CLI
 /// grammar (`[dir] [xK] task -- gate`). It is consumed before spawning.
@@ -261,7 +265,7 @@ fn render_footer_with_model(f: &mut Frame, area: Rect, status: Line<'_>, model: 
         Paragraph::new(Span::styled(
             badge,
             Style::new()
-                .fg(Color::Black)
+                .fg(c_ground())
                 .bg(C_ACCENT())
                 .add_modifier(Modifier::BOLD),
         ))
@@ -313,6 +317,31 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
+}
+
+/// Semantic colour for the machine-readable prefix used by retained run
+/// streams. Plain model prose has no role and keeps the normal ink.
+fn stream_tone(line: &str) -> Option<Color> {
+    let content = line.trim_start();
+    let boundary = content.find(char::is_whitespace);
+    let (tag, body) = boundary.map_or((content, ""), |at| {
+        (&content[..at], content[at..].trim_start())
+    });
+    let body = body.to_ascii_lowercase();
+    if ["failed", "error", "cancelled", "refused", "denied"]
+        .iter()
+        .any(|word| body.starts_with(word))
+    {
+        return Some(C_DANGER());
+    }
+    match tag {
+        "event" | "prompt" | "model" | "chat" | "firing" | "directive" => Some(C_SECONDARY()),
+        "answer" | "result" | "complete" | "received" | "reply" | "score" | "started"
+        | "resumed" | "input" => Some(C_ACCENT()),
+        "diagnostic" | "paused" | "awaiting" | "permission" | "cancelled" | "failed" | "error"
+        | "note" => Some(C_DANGER()),
+        _ => None,
+    }
 }
 
 /// Parse an ANSI-bearing string into a single styled `Line` (its first line). Used
@@ -2058,7 +2087,7 @@ impl App {
                         format!("/{}", command.display),
                         if index == selected {
                             Style::new()
-                                .fg(Color::Black)
+                                .fg(c_ground())
                                 .bg(C_SECONDARY())
                                 .add_modifier(Modifier::BOLD)
                         } else {
@@ -2273,7 +2302,7 @@ impl App {
                         Style::new().fg(C_ACCENT()),
                     )
                 } else {
-                    Span::styled(format!("  ✴ exited ({code})"), Style::new().fg(C_PRIMARY()))
+                    Span::styled(format!("  ✴ exited ({code})"), Style::new().fg(C_DANGER()))
                 };
                 self.push_line(Line::from(note));
                 self.push_line(Line::raw(""));
@@ -2322,7 +2351,7 @@ impl App {
                 } else {
                     Span::styled(
                         format!("  chat run #{chat_id} exited ({code})"),
-                        Style::new().fg(C_PRIMARY()),
+                        Style::new().fg(C_DANGER()),
                     )
                 };
                 self.push_line(Line::from(note));
@@ -2745,6 +2774,15 @@ impl App {
     /// Parse ANSI content into styled lines and append them (via [`Self::push_line`],
     /// so they land in the open fold's body when one is active).
     fn push_ansi_as_lines(&mut self, s: &str) {
+        if !s.contains('\u{1b}') {
+            if let Some(tone) = stream_tone(s) {
+                self.push_line(Line::from(Span::styled(
+                    s.to_string(),
+                    Style::new().fg(tone),
+                )));
+                return;
+            }
+        }
         match s.into_text() {
             Ok(text) => {
                 for line in text.lines {
@@ -5208,7 +5246,7 @@ impl App {
             self.pending = Some(args);
             self.push_line(Line::from(Span::styled(
                 "  ⚠ the adept will act on these files. grant full authority?",
-                primary_bold(),
+                Style::new().fg(C_DANGER()).add_modifier(Modifier::BOLD),
             )));
             self.push_line(Line::from(Span::styled(
                 "     [y] unbound — it may run shell (tests, git, anything)     [n] edits only",
@@ -5977,7 +6015,7 @@ fn highlight_pane_selection(buffer: &mut Buffer, area: Rect, selection: &PaneSel
             if let Some(cell) = buffer.cell_mut((x, y)) {
                 cell.set_style(
                     Style::new()
-                        .fg(Color::Black)
+                        .fg(c_ground())
                         .bg(C_SECONDARY())
                         .add_modifier(Modifier::BOLD),
                 );
@@ -6477,6 +6515,13 @@ fn draw_rebis_workspace(
                             RebisRunState::Complete => "✓ DONE".to_string(),
                             RebisRunState::Cancelled => "× CANCELLED".to_string(),
                         };
+                        let state_tone = match run.entry.state {
+                            RebisRunState::AwaitingPermission => C_SECONDARY(),
+                            RebisRunState::Queued => C_OX(),
+                            RebisRunState::Running if run.entry.paused => C_SECONDARY(),
+                            RebisRunState::Running | RebisRunState::Complete => C_ACCENT(),
+                            RebisRunState::Cancelled => C_DANGER(),
+                        };
                         let timer = rebis_run_timer(run.entry);
                         let duration = timer
                             .split_once(' ')
@@ -6491,11 +6536,11 @@ fn draw_rebis_workspace(
                             truncate(&label, area.width.saturating_sub(2) as usize),
                             if *index == selected {
                                 Style::new()
-                                    .fg(Color::Black)
+                                    .fg(c_ground())
                                     .bg(C_ACCENT())
                                     .add_modifier(Modifier::BOLD)
                             } else {
-                                Style::new().fg(C_BONE())
+                                Style::new().fg(state_tone)
                             },
                         ))
                     }
@@ -6591,7 +6636,7 @@ fn draw_rebis_workspace(
                         format!("/{}", command.display),
                         if index == selected {
                             Style::new()
-                                .fg(Color::Black)
+                                .fg(c_ground())
                                 .bg(C_SECONDARY())
                                 .add_modifier(Modifier::BOLD)
                         } else {
@@ -6633,11 +6678,11 @@ fn draw_rebis_workspace(
         Line::from(vec![
             Span::styled(
                 "✗ INVALID  ",
-                Style::new().fg(C_PRIMARY()).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_DANGER()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 truncate(&detail, rows[2].width.saturating_sub(11) as usize),
-                Style::new().fg(C_PRIMARY()),
+                Style::new().fg(C_DANGER()),
             ),
         ])
     } else {
@@ -6695,7 +6740,7 @@ fn draw_rebis_workspace(
                 ),
                 if workspace.mode == RebisMode::Insert {
                     Style::new()
-                        .fg(Color::Black)
+                        .fg(c_ground())
                         .bg(C_SECONDARY())
                         .add_modifier(Modifier::BOLD)
                 } else {
@@ -6818,7 +6863,7 @@ fn render_rebis_source(
                 style = style.bg(C_OX()).add_modifier(Modifier::BOLD);
             }
             if error == Some(index) {
-                style = style.fg(C_PRIMARY()).add_modifier(Modifier::UNDERLINED);
+                style = style.fg(C_DANGER()).add_modifier(Modifier::UNDERLINED);
             }
             if visual.is_some_and(|(start, end)| index >= start && index <= end) {
                 style = style.bg(C_SECONDARY()).add_modifier(Modifier::BOLD);
@@ -6926,7 +6971,7 @@ fn render_subtle_chaos_star(f: &mut Frame, area: Rect) {
 fn rebis_highlight_style(highlight: Highlight) -> Style {
     match highlight {
         // Symbols are the language's own words — macro names, parameters,
-        // deterministic mediators — and they carry the green. Prompt text is the
+        // deterministic mediators — and they carry green. Prompt text is the
         // content the program is *about*, so it stays plain ink: the eye should
         // find the structure, not be dragged into the strings.
         Highlight::Atom => Style::new().fg(C_SYMBOL()),
@@ -6941,13 +6986,13 @@ fn rebis_highlight_style(highlight: Highlight) -> Style {
         Highlight::Whitespace => Style::new().fg(C_BONE()),
         Highlight::Comment => Style::new().fg(C_ASH()).add_modifier(Modifier::ITALIC),
         Highlight::Invalid => Style::new()
-            .fg(C_SYMBOL())
+            .fg(C_DANGER())
             .add_modifier(Modifier::UNDERLINED),
     }
 }
 
-/// Operators and delimiters share one colour — purple — as the language
-/// legend in the top bar does.
+/// Operators and delimiters share blue, as the language legend in the top bar
+/// does.
 fn rebis_operator_style() -> Style {
     Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
 }
@@ -8586,13 +8631,35 @@ mod tests {
     }
 
     #[test]
-    fn symbols_are_green_and_operators_purple_in_the_terminal_editor() {
+    fn symbols_use_green_operators_use_blue_and_invalid_source_uses_red() {
         // The same scheme the visual editor pins: the two frontends must not
         // colour the same program differently.
         assert_eq!(rebis_highlight_style(Highlight::Atom).fg, Some(C_SYMBOL()));
         assert_eq!(rebis_operator_style().fg, Some(C_SECONDARY()));
         assert_eq!(rebis_highlight_style(Highlight::Prompt).fg, Some(C_BONE()));
+        assert_eq!(
+            rebis_highlight_style(Highlight::Invalid).fg,
+            Some(C_DANGER())
+        );
         assert_ne!(C_SYMBOL(), C_SECONDARY());
+    }
+
+    #[test]
+    fn retained_streams_use_green_blue_and_red_by_meaning() {
+        assert_eq!(stream_tone("complete    ✓ done"), Some(C_ACCENT()));
+        assert_eq!(
+            stream_tone("event       prompt started"),
+            Some(C_SECONDARY())
+        );
+        assert_eq!(
+            stream_tone("failed      provider unavailable"),
+            Some(C_DANGER())
+        );
+        assert_eq!(
+            stream_tone("model       failed · provider unavailable"),
+            Some(C_DANGER())
+        );
+        assert_eq!(stream_tone("ordinary model prose"), None);
     }
 
     #[test]

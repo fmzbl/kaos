@@ -95,27 +95,36 @@ impl Ray {
 
     /// A 24-bit ANSI tone for the TUI.
     ///
-    /// The interface is monochrome, so the rays separate by brightness rather
-    /// than by hue: each takes a step on a ramp between the current theme's
-    /// faint and ink. The ray *names* still carry the colour symbolism — this
-    /// is only how they are drawn.
+    /// Red, Green, and Blue use the interface's matching semantic roles. The
+    /// remaining rays stay on the quiet structural ramp so the app introduces
+    /// no unrelated fourth, fifth, or sixth UI hue.
     pub fn rgb(&self) -> (u8, u8, u8) {
         use Ray::*;
-        // Rung on the ramp, brightest for the principal ray.
+        let p = kaos_core::theme::current();
+        match self {
+            Red => return p.danger,
+            Green => return p.accent,
+            Blue => return p.secondary,
+            _ => {}
+        }
+        // Rung on the structural ramp for the non-RGB rays.
         let step: u8 = match self {
-            Red => 7,
-            Octarine => 6,
-            Orange => 5,
-            Yellow => 4,
-            Green => 3,
-            Blue => 2,
+            Octarine => 4,
+            Orange => 3,
+            Yellow => 2,
             Purple => 1,
             Black => 0,
+            Red | Green | Blue => unreachable!("RGB rays returned above"),
         };
-        let p = kaos_core::theme::current();
-        let (lo, hi) = (i16::from(p.faint.0), i16::from(p.ink.0));
-        let v = (lo + (hi - lo) * i16::from(step) / 7).clamp(0, 255) as u8;
-        (v, v, v)
+        let blend = |lo: u8, hi: u8| {
+            (i16::from(lo) + (i16::from(hi) - i16::from(lo)) * i16::from(step) / 4).clamp(0, 255)
+                as u8
+        };
+        (
+            blend(p.faint.0, p.ink.0),
+            blend(p.faint.1, p.ink.1),
+            blend(p.faint.2, p.ink.2),
+        )
     }
 
     /// Keywords that pull a task toward this ray. Crude but deterministic — a real
@@ -261,5 +270,31 @@ mod tests {
     #[test]
     fn unknown_task_falls_to_red() {
         assert_eq!(Ray::classify("zzz qqq"), Ray::Red);
+    }
+
+    #[test]
+    fn rgb_rays_use_the_matching_semantic_colours() {
+        let p = kaos_core::theme::current();
+        assert_eq!(Ray::Red.rgb(), p.danger);
+        assert_eq!(Ray::Green.rgb(), p.accent);
+        assert_eq!(Ray::Blue.rgb(), p.secondary);
+    }
+
+    #[test]
+    fn every_other_rendered_ray_stays_in_the_structural_family() {
+        for ray in [
+            Ray::Octarine,
+            Ray::Black,
+            Ray::Yellow,
+            Ray::Orange,
+            Ray::Purple,
+        ] {
+            let (r, g, b) = ray.rgb();
+            assert!(
+                b > g && g > r,
+                "{} rendered outside the structural blue family: {r},{g},{b}",
+                ray.name()
+            );
+        }
     }
 }

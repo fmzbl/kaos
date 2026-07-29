@@ -152,6 +152,16 @@ from exactly where it stopped (`Esc` leaves it paused). This is how one agent's
 output can feed another, and how a program waits for a supervisor's direction
 before continuing.
 
+The visual Chat tab shows the model's work as it arrives rather than only its
+finished answer: a turn is a child process streaming into a retained log, so the
+reply is on screen while it is still being written, with a running timer beside
+it. You can keep typing while that is happening. A message written mid-answer does
+not stop the turn in flight and does not open a second one beside it: it waits,
+shown under the stream as queued, and goes out as the next turn the moment the
+current one lands. Several of them go out together as one turn, in the order
+they were written. Nothing queued is in the transcript until it is actually
+asked.
+
 `/sigil chat` is distinct from ordinary `/chat`: it does not suspend the Rebis
 workspace. It opens a durable God Agent transcript in the right panel and binds
 to the selected unfinished run (or the newest unfinished run when the selection
@@ -282,13 +292,15 @@ examples, the value path, combination patterns, limits, and gotchas.
 Kaos keeps functions inside the whiteboard `o-[]-o` visual alphabet:
 
 ```text
-o "prompt"       prompt or value terminal
+⬡ "prompt"       prompt terminal with fitted text inside
 [M: code]        executable mediator
-~[f(x)]          named macro template
-[f]              expanded macro call — drawn as a parallelogram (a box in motion)
-&[port]          input port — drawn as an inlet, a box with a leftward point
-→ / ←            answer flow
-^                syntax inverter
+( )              one indentation — every ( ) in the source is one circle
+(~ f (x) …)      named macro template — a circle marked `~ f (x)`
+(f …)            expanded macro call — a circle marked with the callee's name
+(& port …)       input port — a circle marked `& port`
+(^ …)            syntax inverter — a circle marked `^`
+(-> A B)         answer flow — a plain untitled circle around the two forms it
+                 routes between, with the arrow drawn between them inside it
 ```
 
 For example, `(inspect "parser")` appears as:
@@ -320,7 +332,7 @@ base expression becomes exactly one selectable visual node. A postfix model
 binding is metadata on that node rather than a second shape, so it preserves
 the source/visual correspondence without inventing executable geometry.
 Select any form to edit its optional **MODEL OVERRIDE**; blank inherits the run
-default. Purple `/provider:model` badges remain visible on forms, and on the
+default. Blue `/provider:model` badges remain visible on forms, and on the
 rendered edge for a complete `->` or `<-` flow. Every visual node generates
 exactly one base expression plus its optional suffix. Kaos does not
 insert invisible `nothing` operands, quoted cycle markers, groups, calls, or
@@ -341,30 +353,61 @@ Source auto-drawing follows delimiters literally: every compose operand starts
 inside its circle, while a square contains its complete mediator expression
 and every branch. Nested boundaries retain their nearer content.
 
-The only link tool is purple `connect flow`. Click one circle/square block and
+The only link tool is blue `connect flow`. Click one circle/square block and
 then another to create one real `Forward(A, B)` expression node; reversing the
 direction loads and writes one explicit `Backflow` node. A loose triangle or
-sigil is not a flow endpoint, so drawn arrows occur only between indentation
-blocks. Coordinates, scale, movement within one boundary, panning, marquee
-bounds, camera projection, and 3D piece offsets remain presentation.
+hexagon/sigil is not a flow endpoint, so drawn arrows occur only between
+indentation blocks. Coordinates, scale, movement within one boundary, panning,
+marquee bounds, camera projection, and 3D piece offsets remain presentation.
 
 A mediator square is the one form drawn as a box. It grows around its mediator
-and branches. Every standalone symbol can also be scaled by hand: hovering reveals a
-green dashed scale outline, and dragging that outline changes its stored
-half-extents. A side changes one axis and a corner changes both. The centre
-stays put; for a square this means the walls travel without moving its held
-content. The walls stop at that content, which cannot be pushed outside its
-box. Dragging elsewhere on the box moves the box and its content together, and
-a block dropped across a wall is still grabbed as a block.
+and branches. Circle and square boundaries carry no interior `( )` or `[ ]`
+caption; their outlines already express indentation. Every standalone symbol
+can also be scaled by hand: hovering reveals a green dashed scale outline, and
+dragging that outline changes its stored half-extents. Holding **space** turns the pointer into a hand: drag anywhere, over a form or
+not, and the view moves instead of the drawing. Dragging with the **middle
+button** does the same without touching the keyboard.
 
-A compose form is the only circle: visually, each circle is one indentation.
+The grab band is a fixed number of pixels wide, so a wall is equally reachable
+at every zoom, and the centre stays put. Only the square sizes its two walls
+independently — a side changes one axis and a corner changes both — because a
+box is the one outline whose proportions carry no meaning. Every other form
+scales whole: one factor, taken from whichever axis was dragged further, applied
+to both, so a circle stays round and a hexagon stays a hexagon at any size.
+Resizing a form changes that form alone; what a boundary holds keeps its own
+position and its own size. The wall still stops at its contents, which cannot be
+pushed outside their box, so it widens freely and closes only as far as they
+allow. Dragging elsewhere on the box moves the box and its content together, and
+a block dropped across a wall is still grabbed as a block. While a piece inside
+is being dragged, the boundary holds the size it had, so it neither chases the
+piece nor collapses under it.
+
+Placing a form on top of a boundary draws it INSIDE, as that boundary's newest
+content, in the next place on its spiral rather than on top of whatever is
+already there — a click inside a circle is how you fill one in. Any form works,
+not only another boundary. Holding **Shift** while placing a circle or square
+draws it AROUND the boundary under the pointer instead, keeping that boundary's
+contents and taking its exact place in its parent's operand order. Both are one
+edit.
+
+A compose form is the only *unmarked* circle: visually, each circle is one
+indentation.
 It has the same nesting behaviour as the square, but dragging anywhere along
 its border changes one shared radius so it never becomes an oval. Its content
 is the minimum radius. Resizing scales the
 actual glyph, hit target, caption, edge clearance, 2D layout footprint, and 3D
 projection together. Hand-set size and positions are presentation; crossing a
-boundary is the deliberate structural edit. Prompts use triangle
-outlines, while `$`, `~`, `#`, `'`, `,`, `^`, and `%` appear as their own marks
+boundary is the deliberate structural edit. An indentation carries the sigil
+that opened it on its ring, keeping its interior clear for what it holds.
+A form shows one token on the canvas — the operator that opened it, or the
+first word of its text — and the panel beside the canvas holds the whole of it,
+editable. Nothing is lost by that: it is a smaller view of text that is still
+there, one click away. Sizing a form's complete payload to its own outline is
+what made its text grow with the form until it covered what was nested inside.
+Labels and outlines are therefore sized by the view, not by how much a boundary
+encloses. The implicit
+`program` form is a quiet triangle whose `program` label appears only while it
+is selected. `$`, `~`, `#`, `'`, `,`, `^`, and `%` appear as their own marks
 rather than circles.
 
 Drawing parsed source lays the syntax tree out as a left-to-right circuit:
@@ -372,14 +415,18 @@ nesting depth is the column, so a form sits one column left of its operands,
 and a size-aware row packing centres each form on the rows of the operands it
 drives. Column indentation includes the largest resized half-width on both
 sides, and row bands include resized heights, so formatted forms cannot overlap.
-Nested contents are packed from the innermost boundary outward on a compact
-Fibonacci spiral: item `n` uses radius `c√n` and successive golden angles, with
-the smallest `c` that separates every resized bound. Connections route as
+Nested contents are packed from the innermost boundary outward along one plain
+spiral: item `n` sits at radius `c·n` and angle `n` steps around, with the
+smallest `c` that separates every resized bound. Formatting sets every form to the
+least size it may honestly be drawn at — its own outline, or whatever its
+contents occupy — dropping any size set by hand, and closes each boundary onto
+what that needs. Formatting twice leaves the drawing exactly where formatting
+once put it. Connections route as
 right-angle traces only for flow operators between circle/square blocks, like a
 board wired stage to stage. This layout changes coordinates only.
 
-Selecting a node thickens every attached flow. Flow arrows keep their purple
-under selection because that hue carries direction. Connections default to the 90°
+Selecting a node thickens every attached flow. Flow arrows keep their blue
+under selection because that color carries direction. Connections default to the 90°
 routing; holding **Shift** while you complete a connection draws that one as a
 straight angled line instead (a per-edge, presentation-only choice). A flow form
 can be selected from any point along its rendered line, not only its midpoint
@@ -423,6 +470,16 @@ as a block only if that subgraph is itself an exact Rebis AST.
 The faint green eight-rayed chaos star in the lower-right canvas is chrome
 only. It is not a node, cannot be selected, never appears in generated Rebis,
 and has no runtime effect.
+
+### PDF export
+
+The visual header's **export PDF** action opens a native save dialog and writes
+the complete 2D mandala to one A4 page. Export uses vector paths and embedded
+text rather than a screenshot, fits the whole drawing independently of the
+current pan/zoom, and preserves the active theme, resized geometry, nesting
+paint order, full fitted captions, model bindings, and each operator's straight
+or right-angle route. The static program triangle remains anonymous, matching
+its unselected canvas state.
 
 ### Structural 3D projection
 

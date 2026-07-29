@@ -1,6 +1,7 @@
 //! kaos — the terminal app for the Pact.
 //!
-//! A green-led REPL with purple flow accents. Commands are `/slash`-prefixed;
+//! A cool REPL where green marks success, blue marks flow, and red marks failure.
+//! Commands are `/slash`-prefixed;
 //! type a bare intent to
 //! set the adept to work; use `/cast` for a one-shot rite; use `/help` for the
 //! grimoire. One-shot mode mirrors every command (`kaos bench 300 2026`,
@@ -102,7 +103,7 @@ fn attach_cmd(session: &mut Session, arg: &str) {
         }
         Err(e) => println!(
             "  {} {}",
-            fg(GREEN(), &format!("could not read {arg}:")),
+            fg(RED(), &format!("could not read {arg}:")),
             ash(&e.to_string())
         ),
     }
@@ -671,7 +672,7 @@ fn run_myth(session: &Session, sexpr: &str, task: &str) {
     if let Err(e) = session.model.readiness() {
         println!(
             "  {} {}",
-            fg(GREEN(), "\u{2734} the mind is unreachable \u{2014}"),
+            fg(RED(), "\u{2734} the mind is unreachable \u{2014}"),
             ash(&e)
         );
         return;
@@ -700,7 +701,7 @@ fn run_myth(session: &Session, sexpr: &str, task: &str) {
         // Cost exposure up front — an agentic leaf is a whole session, not one call.
         println!(
             "  {}  {}",
-            fg(PURPLE(), "\u{26a0} cost"),
+            fg(RED(), "\u{26a0} cost"),
             ash(&format!(
                 "up to {leaves} sessions \u{00d7} {steps} steps = ~{} model calls on {} ({} at a time). ^C to abort.",
                 leaves * steps,
@@ -738,7 +739,7 @@ fn run_myth(session: &Session, sexpr: &str, task: &str) {
         ),
         None => println!(
             "  {}",
-            fg(GREEN(), "\u{2734} no answer \u{2014} every branch fizzled")
+            fg(RED(), "\u{2734} no answer \u{2014} every branch fizzled")
         ),
     }
 }
@@ -2118,7 +2119,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
     if let Err(e) = spec.readiness() {
         println!(
             "  {} {}",
-            fg(GREEN(), "\u{2734} the mind is unreachable \u{2014}"),
+            fg(RED(), "\u{2734} the mind is unreachable \u{2014}"),
             ash(&e)
         );
         return;
@@ -2375,7 +2376,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
         } else {
             println!(
                 "  {}  {}",
-                fg(GREEN(), "\u{2734} the Weighing never passed"),
+                fg(RED(), "\u{2734} the Weighing never passed"),
                 ash(&format!(
                     "after {} attempt(s) \u{2014} the edits stand for your review; the gate says what remains",
                     outcome.attempts
@@ -2398,7 +2399,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
             Ok(()) => println!("\n  {}", bold(GREEN(), "\u{2734} the Work is done")),
             Err(e) => println!(
                 "\n  {} {}",
-                fg(GREEN(), "\u{2734} the Work falters \u{2014}"),
+                fg(RED(), "\u{2734} the Work falters \u{2014}"),
                 ash(&e)
             ),
         }
@@ -2495,7 +2496,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
             } else {
                 println!(
                     "  {}  {}",
-                    fg(GREEN(), "\u{2734} the forged Weighing never passed"),
+                    fg(RED(), "\u{2734} the forged Weighing never passed"),
                     ash(&format!(
                         "after {} attempt(s) \u{2014} the edits stand for review",
                         outcome.attempts
@@ -2574,7 +2575,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
     if let Some(err) = &session_out.error {
         println!(
             "  {} {}",
-            fg(GREEN(), "\u{2734} the Work falters \u{2014}"),
+            fg(RED(), "\u{2734} the Work falters \u{2014}"),
             ash(err)
         );
     } else if session_out.finished {
@@ -2586,7 +2587,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
     } else {
         println!(
             "  {}  {}",
-            fg(GREEN(), "\u{2734} budget spent"),
+            fg(RED(), "\u{2734} budget spent"),
             ash("the Work stands unfinished")
         );
     }
@@ -2671,7 +2672,7 @@ fn code_conclave(
                 let mark = if verified {
                     bold(GREEN(), "\u{2713} adept weighed true")
                 } else {
-                    fg(GREEN(), "\u{2717} adept false")
+                    fg(RED(), "\u{2717} adept false")
                 };
                 println!(
                     "  {} {}  {}",
@@ -2721,13 +2722,13 @@ fn code_conclave(
                 if gated {
                     println!(
                         "  {}  {}",
-                        fg(GREEN(), "\u{2734} nothing ships"),
+                        fg(RED(), "\u{2734} nothing ships"),
                         ash("no adept's diff passed the gate \u{2014} the project is untouched")
                     );
                 } else {
                     println!(
                         "  {}  {}",
-                        fg(GREEN(), "\u{2734} nothing ships"),
+                        fg(RED(), "\u{2734} nothing ships"),
                         ash("no adept finished with a diff")
                     );
                 }
@@ -2741,7 +2742,7 @@ fn code_conclave(
         }
         println!(
             "  {} {}",
-            fg(GREEN(), "\u{2734} the conclave falters \u{2014}"),
+            fg(RED(), "\u{2734} the conclave falters \u{2014}"),
             ash(&e.to_string())
         );
     }
@@ -2816,7 +2817,7 @@ fn render_step(n: usize, step: &Step) {
                 bone(&one_line(cmd, 84))
             );
             let (exit, tail) = bash_result(&step.observation);
-            let colour = if exit == "exit 0" { GREEN() } else { PURPLE() };
+            let colour = if exit == "exit 0" { GREEN() } else { RED() };
             let line = if tail.is_empty() {
                 exit.clone()
             } else {
@@ -2916,7 +2917,7 @@ fn render_step_detail(n: usize, step: &Step) {
         Tool::EditFile { find, replace, .. } => {
             println!("  {}", ash("the exact change:"));
             for l in find.lines() {
-                println!("    {}", fg(PURPLE(), &format!("- {l}")));
+                println!("    {}", fg(RED(), &format!("- {l}")));
             }
             for l in replace.lines() {
                 println!("    {}", fg(GREEN(), &format!("+ {l}")));
@@ -3003,10 +3004,7 @@ fn forge_cmd(arg: &str) {
     let (foi, verify) = match agent::write_demo_arena(&dir) {
         Ok(x) => x,
         Err(e) => {
-            println!(
-                "{}",
-                fg(GREEN(), &format!("could not raise the arena: {e}"))
-            );
+            println!("{}", fg(RED(), &format!("could not raise the arena: {e}")));
             return;
         }
     };
@@ -3096,7 +3094,7 @@ fn forge_cmd(arg: &str) {
     let verdict = match agent::solve(&dir, "fix add(a,b)", &foi_refs, &verify, &agents, &mut rng) {
         Ok(v) => v,
         Err(e) => {
-            println!("{}", fg(GREEN(), &format!("the Work falters \u{2014} {e}")));
+            println!("{}", fg(RED(), &format!("the Work falters \u{2014} {e}")));
             let _ = std::fs::remove_dir_all(&dir);
             return;
         }
@@ -3107,7 +3105,7 @@ fn forge_cmd(arg: &str) {
         let mark = if a.passed {
             bold(GREEN(), "weighed true \u{2713}")
         } else {
-            fg(GREEN(), "false \u{2717}")
+            fg(RED(), "false \u{2717}")
         };
         println!(
             "  {:<20} {}  {}",
@@ -3144,13 +3142,13 @@ fn forge_cmd(arg: &str) {
             if final_ok {
                 bold(GREEN(), "true")
             } else {
-                fg(GREEN(), "false")
+                fg(RED(), "false")
             }
         );
     } else {
         println!(
             "  {}  {}",
-            fg(GREEN(), "\u{2734} nothing ships"),
+            fg(RED(), "\u{2734} nothing ships"),
             ash(&format!(
                 "0/{} weighed true \u{2014} the gate holds",
                 verdict.k
@@ -3479,7 +3477,7 @@ fn model_cmd(session: &mut Session, arg: &str) {
                 ash("remembered"),
                 dim(ASH(), &path.display().to_string())
             ),
-            Err(error) => println!("  {} {}", fg(GREEN(), "✴ could not remember"), ash(&error)),
+            Err(error) => println!("  {} {}", fg(RED(), "✴ could not remember"), ash(&error)),
         }
     }
     if let Some(w) = warn {
@@ -3591,7 +3589,7 @@ fn render_sigil_block(sigil: &Sigil, ray: Ray) {
     );
 }
 
-/// The four factors of Carroll's equation, in a single line, green for emphasis.
+/// The four factors of Carroll's equation, in one restrained structural line.
 fn render_equation(eq: &kaos::equation::Equation, current: Current) {
     let cur = match current {
         Current::Inhibitory => "still",

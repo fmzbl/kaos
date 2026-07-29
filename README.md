@@ -475,6 +475,11 @@ soon as what you have typed parses; change the drawing and the source
 regenerates. Neither overwrites the other mid-keystroke, and source that does
 not yet parse is left alone rather than discarded.
 
+The header's **export PDF** action saves the complete planar mandala—not merely
+the visible viewport—as a one-page A4 vector document. It preserves the active
+semantic RGB theme, hand-set sizes, nesting order, full fitted labels, model
+bindings, and straight or right-angle operator routes.
+
 While a run is in flight each node wears a rotating dashed accent ring, driven
 by the run's own thread rather than a timer standing in for one.
 
@@ -502,12 +507,18 @@ selection, or the form at the caret, serially or in parallel; block runs carry
 the source's top-level imports and definitions just as terminal `/run block`
 does. Drawing source lays the syntax tree out as a left-to-right circuit:
 nesting depth is the column, resized symbol bounds determine indentation and
-non-overlapping row bands, and circle/square contents use compact golden-angle
-Fibonacci spirals. Nesting itself has no invented connector: a circle or square
-is the indentation. The only drawn connections are purple `->`/`<-` operators
-between circle/square blocks, routed as right-angle traces by default (calls are
-drawn as a parallelogram, a `(& port …)` input as an inlet). Selection thickens
-an attached flow without changing its purple directional role.
+non-overlapping row bands, and circle/square contents are packed along one
+compact spiral. Nesting itself has no invented connector: a circle or square
+is the indentation, and every `( )` written in the source is one circle on the
+canvas. The sigil that opened those parentheses — `$`, `^`, `%`, `~ f`, `& port`,
+or a callee's name — is written on that circle's own ring, so an operator names
+the indentation it governs instead of floating loose among the forms inside it.
+Prefix sigils that open nothing (`'`, `,`, `#`) stay marks at their own level.
+A flow expression is parenthesised like everything else, so it too is a circle —
+a plain untitled one around the two forms it routes between, with the blue arrow
+drawn between them inside it. That circle is what a surrounding arrow connects
+to, so nested flow reads as nested circles rather than one flattened chain. Selection thickens an attached flow without
+changing its blue directional role.
 Holding **Shift** while completing a connection
 draws that one as a straight angled line instead of the default 90° routing. A
 drawing's `edit as text` goes the other way. The sigil browser supports
@@ -515,7 +526,7 @@ draw/edit/chat actions for personal and embedded `std/` entries, with delete
 limited to personal sigils.
 
 Chat browses and resumes the same durable sessions `/resume` reads in the
-terminal app. User and model turns have separate green/purple cards; headings,
+terminal app. User and model turns have separate green/blue cards; headings,
 lists, quotes, and fenced code receive readable typography. Retained run output
 uses colored semantic tags (`EVENT`, `PROMPT`, `RESULT`, `PAUSED`, and so on)
 without changing the raw stream copied or written to disk. The **Actions** tab
@@ -551,18 +562,20 @@ Rebis or the 2D arrangement; camera movement and mode switching remain outside
 undo history.
 
 The whiteboard exposes every Rebis form. Compose alone uses a circle; prompts
-are triangles, and source sigils are drawn as their own marks without generic
-circular backplates:
+are text-bearing hexagons, `program` is an anonymous triangle until selected,
+and source sigils are drawn as their own marks without generic circular
+backplates:
 
 | draw | means | generates |
 |---|---|---|
-| `△` | prompt terminal | `"label"` |
+| `⬡` | prompt terminal, with its complete fitted text inside | `"label"` |
 | `◇` | symbol | `name` |
-| circle `( )` | ordered composition container | `(A B …)` |
+| circle `( )` | one indentation — a bare ordered composition | `(A B …)` |
+| circle marked `$`, `^`, `%`, `~ f`, `& port`, `f` | the same indentation, named by the sigil that opened it | `($ …)`, `(^ …)`, `(% …)`, `(~ f …)`, `(& port …)`, `(f …)` |
 | `[]` | mediator square | `([M] A B …)` |
-| parallelogram / inlet / hexagon | call / input / program | the matching structural form |
-| `→` | answer flow | `(-> A B)` (reverse drawing loads `<-`) |
-| `$`, `~`, `#`, `'`, `,`, `^`, `%` | the corresponding source sigil | its Rebis form |
+| `△` | program | the implicit top level |
+| circle with an arrow inside | answer flow | `(-> A B)` (reverse drawing loads `<-`) |
+| `'`, `,`, `#` | prefix sigils, which open no indentation | `'x`, `,x`, `(# m)` |
 
 An arrow means "this indentation block flows into that indentation block".
 Drawing a `←` is the same as drawing a `→` the other way, so there is nothing
@@ -570,7 +583,7 @@ extra to learn. The
 generated source updates live beside the canvas. Exact Rebis trees round-trip
 without approximation. The mandala is deliberately one-to-one: every visual
 object is one executable Rebis form and every ordered nesting is one AST edge.
-A postfix model binding is purple metadata on that existing object, not another
+A postfix model binding is blue metadata on that existing object, not another
 shape: select any form to edit its optional model override, and leave the field
 blank to inherit the run default. Complete flow arrows show the `/model` badge
 on their rendered edge.
@@ -593,10 +606,11 @@ There is no separate `father of` tool or gray structural arrow. Containment
 already says what that duplicate line would have said. Source auto-draw follows
 the delimiters literally: a compose's complete indentation is inside its
 circle, and a square contains its complete mediator expression plus every
-branch. Nested circles/squares retain their nearer content. Held content grows
-the boundary, moves with it, and sets its minimum resize size.
+branch. The boundaries themselves stay blank—there is no `[ ]` or `( )` label
+inside them. Nested circles/squares retain their nearer content. Held content
+grows the boundary, moves with it, and sets its minimum resize size.
 
-Purple `connect flow` is the only link tool. It creates an explicit `->`
+Blue `connect flow` is the only link tool. It creates an explicit `->`
 operator between two circle/square blocks; reversing the direction loads and
 writes `<-`. Flow cannot target a loose triangle or sigil, so arrows only exist
 between indentation blocks.
@@ -621,16 +635,22 @@ unavailable instead of waiting.
 
 Every standalone canvas symbol is resizable. Hover it to reveal a green dashed
 scale outline, then drag a side or corner; the glyph, hit target, caption, edge
-clearance, and 2D/3D footprint scale together. A compose circle uses one radial
-size so it cannot become an oval. A mediator square also sizes itself to the
-forms nested inside it: its centre stays put, its walls stop at its contents,
-and dragging elsewhere still moves the box and everything inside it together.
+clearance, and 2D/3D footprint scale together. Only the mediator square sizes its two
+walls independently; every other outline scales whole, on one shared factor, so
+a circle cannot become an oval and a hexagon cannot be stretched into something
+else. Resizing a form changes that form alone — its centre stays put, what it
+holds keeps its own position and size, its walls stop at its contents, and
+dragging elsewhere still moves the box and everything inside it together.
+Text-bearing outlines wrap their complete payload over the available interior
+and choose the largest font that fits; they never replace source text with an
+ellipsis. A larger hand-set shape therefore gives its label proportionally more
+room. The program triangle stays unlabelled until clicked.
 Size and positions are presentation; crossing a nesting boundary is the
 intentional gesture that changes generated structure.
 
 Right-drag draws a green marquee and selects every touched form, including a
 flow arrow when the marquee crosses its rendered line. `Ctrl`-click toggles
-individual forms in that block; a purple arrow can be toggled by clicking
+individual forms in that block; a blue arrow can be toggled by clicking
 anywhere along its rendered line. Delete removes the whole selected block in
 one undoable edit. `Ctrl-C` copies the selection's exact induced subgraph and
 `Ctrl-V` pastes it with fresh IDs, retained internal links, a visible cascading
@@ -660,14 +680,13 @@ window is native egui on OpenGL, so it needs no system webkit — see
 
 ## Theme
 
-Kaos is a neutral grey scale with green and purple semantic accents, in two
-modes. Green is the main color: it marks identity, focus, recursion, running
-state, and the chaos star. Purple is secondary and marks flow, navigation,
-live data, edits, and source ranges: it colors arrows in the terminal and the
-2D/3D mandala, terminal navigation and parallel state, and visual source
-ranges. Nesting needs no third structural-link color because its circle/square
-boundary is the relationship. Both the terminal app and `kaos visual` read the
-same palette.
+Kaos uses quiet frost-blue structure plus three semantic colors, in two modes.
+Green marks identity, focus, valid source, successful or active work, recursion,
+and the chaos star. Blue marks flow, navigation, models, live information,
+parallel state, and source ranges. Red is reserved for invalid source, failed
+or cancelled work, warnings, refusals, and destructive controls. Nesting needs
+no extra structural color because its circle/square boundary is the
+relationship. Both the terminal app and `kaos visual` read the same palette.
 
 ```text
 /theme dark     light on dark
@@ -675,7 +694,7 @@ same palette.
 /theme          report the current mode
 ```
 
-In light mode the app paints its own white page rather than inheriting the
+In light mode the app paints its own ice-blue page rather than inheriting the
 terminal's background, so a light theme is genuinely light in both interfaces.
 
 The choice is persisted in the Kaos config and read by **both** interfaces, so
