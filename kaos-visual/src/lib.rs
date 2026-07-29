@@ -21,8 +21,7 @@ use std::collections::BTreeSet;
 
 use kaos_core::tabs::{TabId, Tabs};
 use kaos_core::visual::{
-    Arrow, BorderGrab, Form, Mandala, Node, NodeId, Shape, SpatialLayout, Stroke, View, WorldRect,
-    NODE_R,
+    BorderGrab, Form, Mandala, Node, NodeId, Shape, SpatialLayout, Stroke, View, WorldRect,
 };
 use kaos_workspace::rebis_workspace::{
     handle_edit_key, highlights, EditKey, EditModifiers, Editor as SourceEditor,
@@ -55,6 +54,7 @@ struct Doc {
     view: View,
     canvas_mode: CanvasMode,
     camera: SpatialCamera,
+    spatial_axis: SpatialAxis,
     pending: Option<NodeId>,
     /// Last-selected node, used as the inspector's primary object.
     selected: Option<NodeId>,
@@ -68,10 +68,9 @@ struct Doc {
     /// thread, so the ring means work is actually in flight rather than
     /// standing in for it.
     running: std::collections::HashSet<NodeId>,
-    /// Connections the user chose to draw as a straight angled line instead of
-    /// the default right-angle trace. Keyed by the connection's own node — the
-    /// child of a father-of link, or the flow node itself. Presentation only,
-    /// like node positions; it never affects generated Rebis.
+    /// Flow operators the user chose to draw as a straight angled line instead
+    /// of the default right-angle trace. Presentation only, like node
+    /// positions; it never affects generated Rebis.
     angled: std::collections::HashSet<NodeId>,
     /// The editable source, kept in step with the drawing in both directions.
     text: String,
@@ -122,6 +121,51 @@ impl Default for SpatialCamera {
     }
 }
 
+/// Constraint used by the 3D move gizmo. `Free` moves in the camera plane;
+/// X/Y/Z follow the structural world's actual axes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+enum SpatialAxis {
+    #[default]
+    Free,
+    X,
+    Y,
+    Z,
+}
+
+impl SpatialAxis {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+        }
+    }
+
+    const fn component(self) -> Option<usize> {
+        match self {
+            Self::Free => None,
+            Self::X => Some(0),
+            Self::Y => Some(1),
+            Self::Z => Some(2),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum SpatialDrag {
+    #[default]
+    None,
+    Orbit,
+    Move {
+        id: NodeId,
+        axis: SpatialAxis,
+        pointer: Pos2,
+        original: [f64; 3],
+        scale: f32,
+    },
+}
+
 #[derive(Clone, Copy)]
 struct ProjectedNode {
     id: NodeId,
@@ -130,10 +174,31 @@ struct ProjectedNode {
     camera_depth: f32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum VisibleEdgeKind {
-    Father,
-    Flow,
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SpatialShadowStyle {
+    offset: Vec2,
+    softness: f32,
+    opacity: f32,
+}
+
+fn spatial_shadow_style(depth: usize, scale: f32, dark: bool) -> SpatialShadowStyle {
+    let lift = depth.min(8) as f32;
+    let scale = scale.clamp(0.55, 1.65);
+    SpatialShadowStyle {
+        // A fixed upper-left key light makes orbiting the structure readable:
+        // the graph turns while its studio light remains stable.
+        offset: Vec2::new(7.0 + lift * 1.65, 10.0 + lift * 2.55) * scale,
+        softness: (6.5 + lift * 1.55) * scale.sqrt(),
+        opacity: if dark { 0.78 } else { 0.48 },
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SpatialLayerPlate {
+    depth: usize,
+    centre: Pos2,
+    radius: Vec2,
+    camera_depth: f32,
 }
 
 /// A semantic connection shared by the planar and spatial renderers.
@@ -146,8 +211,6 @@ struct VisibleEdge {
     from: NodeId,
     to: NodeId,
     owner: NodeId,
-    source: Option<Arrow>,
-    kind: VisibleEdgeKind,
 }
 
 fn complete_flow(mandala: &Mandala, id: NodeId) -> bool {
@@ -164,23 +227,21 @@ fn resolved_flow_result(mandala: &Mandala, mut id: NodeId) -> NodeId {
     id
 }
 
-/// Project stored child-to-parent links into the semantic connections shown
-/// by both canvases. A complete flow is one source form, not two grey links
-/// plus a blue link: its operand links collapse into one blue edge.
+fn is_flow_boundary(mandala: &Mandala, id: NodeId) -> bool {
+    mandala
+        .node(id)
+        .is_some_and(|node| matches!(node.form, Form::Square | Form::Compose))
+}
+
+/// Project stored syntax links into the operator connections shown by both
+/// canvases.
+///
+/// Parent/operand structure is read from nesting, so it never receives a grey
+/// arrow. A complete `->`/`<-` is the only visible connection and is shown only
+/// between the square/circle blocks it routes; leaf forms remain arranged
+/// inside those blocks without a second, invented relationship.
 fn visible_edges(mandala: &Mandala) -> Vec<VisibleEdge> {
     let mut edges = Vec::new();
-    for arrow in mandala.arrows() {
-        if complete_flow(mandala, arrow.to) {
-            continue;
-        }
-        edges.push(VisibleEdge {
-            from: arrow.to,
-            to: resolved_flow_result(mandala, arrow.from),
-            owner: arrow.from,
-            source: Some(*arrow),
-            kind: VisibleEdgeKind::Father,
-        });
-    }
     for node in mandala.nodes() {
         if node.shape() != Shape::Arrow || !complete_flow(mandala, node.id) {
             continue;
@@ -194,22 +255,18 @@ fn visible_edges(mandala: &Mandala) -> Vec<VisibleEdge> {
         } else {
             (first, second)
         };
+        let from = resolved_flow_result(mandala, from);
+        let to = resolved_flow_result(mandala, to);
+        if !is_flow_boundary(mandala, from) || !is_flow_boundary(mandala, to) {
+            continue;
+        }
         edges.push(VisibleEdge {
-            from: resolved_flow_result(mandala, from),
-            to: resolved_flow_result(mandala, to),
+            from,
+            to,
             owner: node.id,
-            source: None,
-            kind: VisibleEdgeKind::Flow,
         });
     }
     edges
-}
-
-fn is_containment_edge(mandala: &Mandala, edge: &VisibleEdge) -> bool {
-    edge.kind == VisibleEdgeKind::Father
-        && edge
-            .source
-            .is_some_and(|source| mandala.contains_child(source.to, source.from))
 }
 
 #[derive(Clone, Copy)]
@@ -219,14 +276,31 @@ struct NodePaint {
     spin: f32,
     arrow_body: bool,
     recursive: bool,
+    volumetric: bool,
 }
 
 #[derive(Clone, Copy)]
 struct GlyphPaint {
     position: Pos2,
-    scale: f32,
+    /// Canvas/projection scale, independent of this symbol's hand-set size.
+    view_scale: f32,
+    /// Per-axis scale away from the symbol's natural geometry.
+    resize: Vec2,
     outline: UiStroke,
     hot: bool,
+}
+
+fn node_resize(mandala: &Mandala, node: &Node) -> Vec2 {
+    let (half_w, half_h) = mandala.extent(node.id);
+    let (base_w, base_h) = node.base_extent();
+    Vec2::new(
+        (half_w / base_w.max(f64::EPSILON)) as f32,
+        (half_h / base_h.max(f64::EPSILON)) as f32,
+    )
+}
+
+fn resize_weight(resize: Vec2) -> f32 {
+    (resize.x * resize.y).sqrt().max(0.1)
 }
 
 const fn node_outline_width(shape: Shape, emphasized: bool) -> f32 {
@@ -318,13 +392,14 @@ impl Doc {
         self.selected == Some(id) || self.selection.contains(&id)
     }
 
-    /// Select the whole block rooted at `id` — the node and all its operands,
-    /// recursively — so a single click almost always yields a valid block. The
-    /// clicked node stays the primary (inspector) selection.
+    /// Select the whole block rooted at `id` — its operands recursively plus
+    /// anything it explicitly holds as visual content. The clicked node stays
+    /// the primary (inspector) selection.
     fn select_only(&mut self, id: NodeId) {
         self.selection.clear();
         if self.mandala.node(id).is_some() {
             self.selection = self.mandala.subtree(id);
+            self.selection.extend(self.mandala.interior(id));
             self.selected = Some(id);
         } else {
             self.selected = None;
@@ -731,9 +806,6 @@ enum Tool {
     /// Click two shapes to link them with a flow node (`->` or `<-`). The node
     /// is created behind the arrow, so drawing the arrow *is* writing the form.
     Flow(Form),
-    /// Click a parent, then the child that becomes its next ordered operand.
-    /// This supplies operands to `[]`, `( )`, `$`, calls, quotes, and macros.
-    Father,
     /// Click a shape to select it.
     Select,
 }
@@ -754,6 +826,25 @@ struct PendingRun {
 
 /// An in-progress pointer gesture.
 #[derive(Clone, Copy, PartialEq)]
+struct HolderSnapshot {
+    id: NodeId,
+    centre: (f64, f64),
+    extent: (f64, f64),
+    circular: bool,
+}
+
+impl HolderSnapshot {
+    fn contains(self, x: f64, y: f64) -> bool {
+        let (dx, dy) = (x - self.centre.0, y - self.centre.1);
+        if self.circular {
+            dx * dx + dy * dy <= self.extent.0 * self.extent.0
+        } else {
+            dx.abs() <= self.extent.0 && dy.abs() <= self.extent.1
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
 enum Drag {
     None,
     /// Moving a shape. `grab` is the offset from the shape's centre, in world
@@ -761,9 +852,10 @@ enum Drag {
     Node {
         id: NodeId,
         grab: (f64, f64),
+        holder: Option<HolderSnapshot>,
     },
-    /// Dragging a container boundary to resize it. The centre stays put, so
-    /// the blocks inside do not move.
+    /// Dragging a symbol's dashed scale outline. The centre stays put; a visual
+    /// container's contents therefore stay still while its boundary changes.
     Resize(BorderGrab),
     /// Panning the canvas.
     Pan,
@@ -778,7 +870,7 @@ enum Drag {
 impl Drag {
     /// What a primary drag starting at this world point does.
     ///
-    /// A wall offered for resizing wins first, then whatever shape the point
+    /// A scale outline offered for resizing wins first, then whatever shape the point
     /// landed on, and bare canvas pans. `Mandala::resize_grab` is what keeps a
     /// block dropped across a wall grabbable as a block.
     fn beginning_at(mandala: &Mandala, wx: f64, wy: f64) -> Self {
@@ -788,9 +880,18 @@ impl Drag {
         match mandala.hit(wx, wy) {
             Some(id) => {
                 let (x, y) = mandala.node(id).map(|n| (n.x, n.y)).unwrap_or((wx, wy));
+                let holder = mandala.holder(id).and_then(|holder| {
+                    mandala.node(holder).map(|node| HolderSnapshot {
+                        id: holder,
+                        centre: (node.x, node.y),
+                        extent: mandala.extent(holder),
+                        circular: node.form == Form::Compose,
+                    })
+                });
                 Drag::Node {
                     id,
                     grab: (wx - x, wy - y),
+                    holder,
                 }
             }
             None => Drag::Pan,
@@ -946,6 +1047,7 @@ struct Editor {
     /// not a property of a drawing.
     tool: Tool,
     drag: Drag,
+    spatial_drag: SpatialDrag,
     /// Shared across drawing tabs, like an ordinary application clipboard.
     clipboard: Option<MandalaClipboard>,
     notice: Option<String>,
@@ -1019,6 +1121,7 @@ impl Editor {
             scratch: Doc::default(),
             tool: Tool::Select,
             drag: Drag::None,
+            spatial_drag: SpatialDrag::None,
             pending_run: None,
             run_notice: None,
             clipboard: None,
@@ -1460,19 +1563,372 @@ impl Editor {
     }
 }
 
-/// The colour an edge is drawn in.
+/// Operator arrows remain purple in both projections; selection changes their
+/// weight, never the hue carrying direction.
+pub(crate) const fn edge_colour(k: Ink) -> Color32 {
+    k.secondary
+}
+
+/// Semantic roles carried by the first column of a retained run stream.
 ///
-/// Selection is expressed as WEIGHT, and — for the grey `father of` links —
-/// as the accent. A flow keeps its red either way: the hue is what separates a
-/// flow from a structural link, and a selection is exactly when the drawing is
-/// being read closest. Both the 2D and 3D projections call this, so they
-/// cannot drift apart on colour.
-pub(crate) fn edge_colour(kind: VisibleEdgeKind, touches: bool, k: Ink) -> Color32 {
-    match (kind, touches) {
-        (VisibleEdgeKind::Flow, _) => k.secondary,
-        (VisibleEdgeKind::Father, true) => k.accent,
-        (VisibleEdgeKind::Father, false) => k.faint,
+/// The process deliberately emits plain text so it can be piped, copied, and
+/// saved without frontend markup. The visual projection can still recover the
+/// small vocabulary at the start of each line and spend colour on meaning
+/// rather than painting the entire transcript one undifferentiated grey.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamKind {
+    Signal,
+    Success,
+    Progress,
+    Caution,
+    Plain,
+}
+
+impl StreamKind {
+    const fn marker(self) -> &'static str {
+        match self {
+            Self::Signal => "◇",
+            Self::Success => "●",
+            Self::Progress => "→",
+            Self::Caution => "△",
+            Self::Plain => "·",
+        }
     }
+
+    const fn tone(self, k: Ink) -> Color32 {
+        match self {
+            Self::Signal | Self::Caution => k.secondary,
+            Self::Success | Self::Progress => k.accent,
+            Self::Plain => k.faint,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StreamLine<'a> {
+    tag: Option<&'a str>,
+    body: &'a str,
+    kind: StreamKind,
+}
+
+/// Split one machine-readable stream line into its visual label and content.
+///
+/// Only known prefixes become labels. Arbitrary provider output remains one
+/// intact body, so the renderer never mistakes the first word of an answer for
+/// metadata.
+fn stream_line(line: &str) -> StreamLine<'_> {
+    let trimmed = line.trim_end();
+    let content = trimmed.trim_start();
+    let boundary = content.find(char::is_whitespace);
+    let (candidate, rest) = boundary.map_or((content, ""), |at| {
+        (&content[..at], content[at..].trim_start())
+    });
+    let kind = match candidate {
+        "event" | "prompt" | "model" | "chat" | "firing" | "directive" => Some(StreamKind::Signal),
+        "answer" | "result" | "complete" | "received" | "reply" | "score" => {
+            Some(StreamKind::Success)
+        }
+        "started" | "resumed" | "input" => Some(StreamKind::Progress),
+        "diagnostic" | "paused" | "awaiting" | "permission" | "cancelled" | "failed" | "error"
+        | "note" => Some(StreamKind::Caution),
+        _ => None,
+    };
+    kind.map_or(
+        StreamLine {
+            tag: None,
+            body: trimmed,
+            kind: StreamKind::Plain,
+        },
+        |kind| StreamLine {
+            tag: Some(candidate),
+            body: rest,
+            kind,
+        },
+    )
+}
+
+/// Paint a retained output line as a compact semantic row.
+fn paint_stream_line(ui: &mut egui::Ui, line: &str, k: Ink) {
+    let parsed = stream_line(line);
+    ui.horizontal_top(|ui| {
+        if let Some(tag) = parsed.tag {
+            ui.add_sized(
+                [102.0, 18.0],
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "{} {}",
+                        parsed.kind.marker(),
+                        tag.to_ascii_uppercase()
+                    ))
+                    .monospace()
+                    .strong()
+                    .size(11.0)
+                    .color(parsed.kind.tone(k)),
+                ),
+            );
+        } else {
+            ui.add_space(102.0);
+        }
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(parsed.body)
+                    .monospace()
+                    .size(12.5)
+                    .color(if parsed.kind == StreamKind::Plain {
+                        k.faint
+                    } else {
+                        k.ink
+                    }),
+            )
+            .wrap(),
+        );
+    });
+}
+
+fn role_wash(tone: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(tone.r(), tone.g(), tone.b(), alpha)
+}
+
+/// A readable, selectable code surface shared by chat context and run detail.
+fn paint_code_panel(ui: &mut egui::Ui, text: &str, k: Ink, tone: Color32) {
+    egui::Frame::none()
+        .fill(k.fill)
+        .stroke(UiStroke::new(1.0, role_wash(tone, 86)))
+        .rounding(egui::Rounding::same(3.0))
+        .inner_margin(egui::Margin::symmetric(9.0, 7.0))
+        .show(ui, |ui| {
+            ui.set_min_width((ui.available_width() - 1.0).max(80.0));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(text)
+                        .monospace()
+                        .size(12.5)
+                        .color(k.ink),
+                )
+                .wrap(),
+            );
+        });
+}
+
+/// Source gets the same green/purple syntax roles as every editable Rebis
+/// surface, even when it is shown read-only inside a run.
+fn paint_rebis_panel(ui: &mut egui::Ui, source: &str, k: Ink) {
+    egui::Frame::none()
+        .fill(k.fill)
+        .stroke(UiStroke::new(1.0, role_wash(k.secondary, 86)))
+        .rounding(egui::Rounding::same(3.0))
+        .inner_margin(egui::Margin::symmetric(9.0, 7.0))
+        .show(ui, |ui| {
+            ui.set_min_width((ui.available_width() - 1.0).max(80.0));
+            let mut job = rebis_layout_job(source, k, 12.5, &|_| false, None);
+            job.wrap.max_width = ui.available_width();
+            ui.add(egui::Label::new(job).wrap());
+        });
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ChatBlock {
+    Prose(String),
+    Code { language: String, text: String },
+}
+
+/// Split only fenced code from prose. It is intentionally a tiny renderer,
+/// not a Markdown parser: headings, lists, and quotes are styled below, while
+/// everything else remains exactly the text the model returned.
+fn chat_blocks(text: &str) -> Vec<ChatBlock> {
+    let mut blocks = Vec::new();
+    let mut prose = Vec::new();
+    let mut code = Vec::new();
+    let mut language = String::new();
+    let mut in_code = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(after) = trimmed.strip_prefix("```") {
+            if in_code {
+                blocks.push(ChatBlock::Code {
+                    language: std::mem::take(&mut language),
+                    text: code.join("\n"),
+                });
+                code.clear();
+            } else {
+                if !prose.is_empty() {
+                    blocks.push(ChatBlock::Prose(prose.join("\n")));
+                    prose.clear();
+                }
+                language = after.trim().to_string();
+            }
+            in_code = !in_code;
+        } else if in_code {
+            code.push(line);
+        } else {
+            prose.push(line);
+        }
+    }
+    if in_code {
+        blocks.push(ChatBlock::Code {
+            language,
+            text: code.join("\n"),
+        });
+    } else if !prose.is_empty() {
+        blocks.push(ChatBlock::Prose(prose.join("\n")));
+    }
+    if blocks.is_empty() {
+        blocks.push(ChatBlock::Prose(String::new()));
+    }
+    blocks
+}
+
+fn paint_chat_prose(ui: &mut egui::Ui, prose: &str, k: Ink) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    for line in prose.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            ui.add_space(5.0);
+            continue;
+        }
+        let heading_marks = trimmed.chars().take_while(|c| *c == '#').count();
+        if (1..=3).contains(&heading_marks)
+            && trimmed
+                .chars()
+                .nth(heading_marks)
+                .is_some_and(char::is_whitespace)
+        {
+            let heading = trimmed[heading_marks..].trim_start();
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(heading)
+                        .strong()
+                        .size(16.0 - heading_marks as f32)
+                        .color(k.accent),
+                )
+                .wrap(),
+            );
+        } else if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            ui.horizontal_top(|ui| {
+                ui.colored_label(k.secondary, "◆");
+                ui.add(egui::Label::new(egui::RichText::new(item).size(13.5).color(k.ink)).wrap());
+            });
+        } else if let Some(quote) = trimmed.strip_prefix("> ") {
+            ui.horizontal_top(|ui| {
+                ui.colored_label(k.secondary, "│");
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(quote)
+                            .italics()
+                            .size(13.5)
+                            .color(k.faint),
+                    )
+                    .wrap(),
+                );
+            });
+        } else {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(line)
+                        .size(13.5)
+                        .line_height(Some(18.0))
+                        .color(k.ink),
+                )
+                .wrap(),
+            );
+        }
+    }
+}
+
+fn paint_chat_text(ui: &mut egui::Ui, text: &str, k: Ink) {
+    for block in chat_blocks(text) {
+        match block {
+            ChatBlock::Prose(prose) => paint_chat_prose(ui, &prose, k),
+            ChatBlock::Code { language, text } => {
+                if !language.is_empty() {
+                    ui.label(
+                        egui::RichText::new(language.to_ascii_uppercase())
+                            .monospace()
+                            .strong()
+                            .size(10.5)
+                            .color(k.secondary),
+                    );
+                }
+                paint_code_panel(ui, &text, k, k.secondary);
+            }
+        }
+    }
+}
+
+fn paint_chat_turn(ui: &mut egui::Ui, role: kaos_core::sessions::Role, text: &str, k: Ink) {
+    let (label, marker, tone) = match role {
+        kaos_core::sessions::Role::User => ("YOU", "●", k.accent),
+        kaos_core::sessions::Role::Model => ("MODEL", "◇", k.secondary),
+    };
+    let width = ui.available_width();
+    egui::Frame::none()
+        .fill(role_wash(tone, 13))
+        .stroke(UiStroke::new(1.0, role_wash(tone, 72)))
+        .rounding(egui::Rounding::same(4.0))
+        .inner_margin(egui::Margin::symmetric(11.0, 9.0))
+        .show(ui, |ui| {
+            ui.set_min_width((width - 24.0).max(120.0));
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(marker).monospace().strong().color(tone));
+                ui.label(
+                    egui::RichText::new(label)
+                        .monospace()
+                        .strong()
+                        .size(11.0)
+                        .color(tone),
+                );
+            });
+            ui.add_space(2.0);
+            paint_chat_text(ui, text, k);
+        });
+    ui.add_space(4.0);
+}
+
+fn run_state_tone(state: runs::State, paused: bool, k: Ink) -> Color32 {
+    match (state, paused) {
+        (runs::State::Complete, _) | (runs::State::Running, false) => k.accent,
+        (runs::State::AwaitingPermission, _)
+        | (runs::State::Running, true)
+        | (runs::State::Cancelled, _) => k.secondary,
+        (runs::State::Queued, _) => k.faint,
+    }
+}
+
+fn run_header_job(run: &runs::Run, expanded: bool, k: Ink) -> egui::text::LayoutJob {
+    let marker = if expanded { "▾" } else { "▸" };
+    let lane = if run.parallel() { "∥" } else { "│" };
+    let mut job = egui::text::LayoutJob::default();
+    let format = |color| egui::TextFormat {
+        font_id: FontId::monospace(12.5),
+        color,
+        ..egui::TextFormat::default()
+    };
+    job.append(
+        &format!("{marker} {lane} #{:<3} ", run.id),
+        0.0,
+        format(k.faint),
+    );
+    job.append(
+        &format!("{:<10}", run.state.label(run.paused)),
+        0.0,
+        format(run_state_tone(run.state, run.paused, k)),
+    );
+    job.append(
+        &format!(
+            "  {}  {:<7} {:<6}  ",
+            run.timer(),
+            run.scope.label(),
+            run.mode.label()
+        ),
+        0.0,
+        format(k.faint),
+    );
+    job.append(&run.preview(), 0.0, format(k.ink));
+    job
 }
 
 impl eframe::App for Editor {
@@ -2377,9 +2833,23 @@ impl Editor {
                 .max_height(ui.available_height() - 90.0)
                 .show(ui, |ui| {
                     for s in &list {
-                        let line = format!("{:>3} turns   {}", s.turns, s.title);
                         ui.horizontal(|ui| {
-                            if ui.selectable_label(false, line).clicked() {
+                            ui.label(
+                                egui::RichText::new(format!("{:>3}", s.turns))
+                                    .monospace()
+                                    .strong()
+                                    .color(k.accent),
+                            );
+                            ui.label(
+                                egui::RichText::new("turns")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(k.faint),
+                            );
+                            if ui
+                                .selectable_label(false, egui::RichText::new(&s.title).color(k.ink))
+                                .clicked()
+                            {
                                 resume = Some(s.id.clone());
                             }
                             if ui.small_button("forget").clicked() {
@@ -2412,7 +2882,18 @@ impl Editor {
             // The run notice is a long line; wrapping stops it pushing the
             // `sessions` button past the panel edge.
             ui.horizontal_wrapped(|ui| {
-                ui.colored_label(k.faint, chat.session.title());
+                ui.label(
+                    egui::RichText::new(chat.session.title())
+                        .strong()
+                        .size(15.0)
+                        .color(k.ink),
+                );
+                ui.label(
+                    egui::RichText::new(format!("◇ {}", chat.session.model))
+                        .monospace()
+                        .size(11.0)
+                        .color(k.secondary),
+                );
                 if let Some(run_id) = chat.run_id {
                     ui.colored_label(
                         k.accent,
@@ -2420,7 +2901,7 @@ impl Editor {
                     );
                 }
                 if chat_busy {
-                    ui.colored_label(k.accent, "● working");
+                    ui.colored_label(k.secondary, "◇ model working");
                 }
                 if ui.small_button("sessions").clicked() {
                     chat.browsing = true;
@@ -2438,38 +2919,46 @@ impl Editor {
                 .max_height(ui.available_height() - 60.0)
                 .show(ui, |ui| {
                     if let Some(run) = retained_run {
-                        ui.horizontal_top(|ui| {
-                            ui.colored_label(k.accent, "run");
-                            ui.vertical(|ui| {
-                                ui.monospace(format!(
-                                    "#{} · {} · {} · {} · {}",
-                                    run.id,
-                                    run.state.label(run.paused),
-                                    run.scope.label(),
-                                    run.mode.label(),
-                                    run.timer()
-                                ));
-                                egui::CollapsingHeader::new("source")
-                                    .id_salt(("chat_run_source", run.id))
-                                    .show(ui, |ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&run.source).monospace(),
-                                            )
-                                            .wrap(),
-                                        );
-                                    });
+                        egui::Frame::none()
+                            .fill(role_wash(k.accent, 9))
+                            .stroke(UiStroke::new(1.0, role_wash(k.accent, 64)))
+                            .rounding(egui::Rounding::same(4.0))
+                            .inner_margin(egui::Margin::symmetric(11.0, 9.0))
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("● RUN")
+                                            .monospace()
+                                            .strong()
+                                            .size(11.0)
+                                            .color(run_state_tone(run.state, run.paused, k)),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "#{} · {} · {} · {} · {}",
+                                            run.id,
+                                            run.state.label(run.paused),
+                                            run.scope.label(),
+                                            run.mode.label(),
+                                            run.timer()
+                                        ))
+                                        .monospace()
+                                        .color(k.ink),
+                                    );
+                                });
+                                egui::CollapsingHeader::new(
+                                    egui::RichText::new("SOURCE").monospace().color(k.secondary),
+                                )
+                                .id_salt(("chat_run_source", run.id))
+                                .show(ui, |ui| paint_rebis_panel(ui, &run.source, k));
                                 if !run.input.is_empty() {
-                                    egui::CollapsingHeader::new("record / input")
-                                        .id_salt(("chat_run_input", run.id))
-                                        .show(ui, |ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(&run.input).monospace(),
-                                                )
-                                                .wrap(),
-                                            );
-                                        });
+                                    egui::CollapsingHeader::new(
+                                        egui::RichText::new("RECORD / INPUT")
+                                            .monospace()
+                                            .color(k.accent),
+                                    )
+                                    .id_salt(("chat_run_input", run.id))
+                                    .show(ui, |ui| paint_code_panel(ui, &run.input, k, k.accent));
                                 }
                                 let hidden = run.output.len().saturating_sub(500);
                                 if hidden > 0 {
@@ -2479,26 +2968,13 @@ impl Editor {
                                     );
                                 }
                                 for line in run.output.iter().skip(hidden) {
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(line).monospace().color(k.faint),
-                                        )
-                                        .wrap(),
-                                    );
+                                    paint_stream_line(ui, line, k);
                                 }
                             });
-                        });
-                        ui.separator();
+                        ui.add_space(7.0);
                     }
                     for turn in &chat.session.turns {
-                        let (who, tone) = match turn.role {
-                            kaos_core::sessions::Role::User => ("you", k.ink),
-                            kaos_core::sessions::Role::Model => ("model", k.faint),
-                        };
-                        ui.horizontal_top(|ui| {
-                            ui.colored_label(tone, format!("{who:<6}"));
-                            ui.add(egui::Label::new(egui::RichText::new(&turn.text)).wrap());
-                        });
+                        paint_chat_turn(ui, turn.role, &turn.text, k);
                     }
                 });
         }
@@ -3251,24 +3727,36 @@ impl Editor {
         egui::SidePanel::left("palette")
             .exact_width(180.0)
             .show(ctx, |ui| {
-                ui.add_space(6.0);
-                ui.colored_label(self.ink.faint, "FORMS");
-                for (label, make, _) in Form::ALL {
-                    let form = make();
-                    let on = self.tool == Tool::Place(form.clone());
-                    if ui.selectable_label(on, *label).clicked() {
-                        self.tool = Tool::Place(form.clone());
-                        self.doc_mut().pending = None;
-                    }
-                }
-                ui.colored_label(
-                    self.ink.faint,
-                    "place →/← alone, then use `father of` to add its ordered children",
-                );
-                ui.add_space(10.0);
+                let forms_height = (ui.available_height() - 190.0).max(90.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("forms_palette_scroll")
+                    .auto_shrink([false, false])
+                    .max_height(forms_height)
+                    .show(ui, |ui| {
+                        ui.add_space(6.0);
+                        ui.colored_label(self.ink.faint, "FORMS");
+                        for (label, make, _) in Form::ALL {
+                            let form = make();
+                            // Flow is an operator between two indentation
+                            // blocks, so it is made by the two-click link tool,
+                            // never left as a disconnected arrow glyph.
+                            if matches!(form, Form::Forward | Form::Backflow) {
+                                continue;
+                            }
+                            let on = self.tool == Tool::Place(form.clone());
+                            if ui.selectable_label(on, *label).clicked() {
+                                self.tool = Tool::Place(form.clone());
+                                self.doc_mut().pending = None;
+                            }
+                        }
+                        ui.colored_label(
+                            self.ink.faint,
+                            "□ and ○ are indentation; dropping inside writes ordered nesting",
+                        );
+                    });
+                ui.separator();
                 ui.colored_label(self.ink.faint, "LINK");
-                ui.colored_label(self.ink.faint, "complete a flow between two forms");
-                ui.colored_label(self.ink.faint, "father of: parent, then children in order");
+                ui.colored_label(self.ink.faint, "flow operators connect □ / ○ blocks");
                 for (label, color, tool) in [
                     // One two-click shortcut. `(<- a b)` is `(-> b a)`, so the
                     // direction you see is the direction in the source.
@@ -3277,7 +3765,6 @@ impl Editor {
                         self.ink.secondary,
                         Tool::Flow(Form::Forward),
                     ),
-                    ("┈  father of", self.ink.faint, Tool::Father),
                     ("▹  select", self.ink.ink, Tool::Select),
                 ] {
                     if ui
@@ -3453,6 +3940,29 @@ impl Editor {
                                 }
                                 ui.colored_label(self.ink.faint, "parameters, space separated");
                             }
+                        }
+                        if text_editable {
+                            let mut model = node.model.clone().unwrap_or_default();
+                            ui.colored_label(
+                                self.ink.secondary,
+                                "MODEL OVERRIDE · optional /provider:model",
+                            );
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut model)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("ollama:qwen4:4b"),
+                                )
+                                .changed()
+                            {
+                                let model = model.replace(['\n', '\r'], "");
+                                let model = model.trim();
+                                let model = (!model.is_empty()).then(|| model.to_string());
+                                let doc = self.doc_mut();
+                                doc.checkpoint();
+                                doc.mandala.set_model(id, model);
+                            }
+                            ui.colored_label(self.ink.faint, "blank inherits the run default");
                         }
                         ui.colored_label(
                             self.ink.faint,
@@ -3784,19 +4294,9 @@ impl Editor {
             .show(ui, |ui| {
                 for (position, run) in self.runs.runs.iter().enumerate() {
                     let chosen = self.runs.selected == Some(run.id);
-                    let lane = if run.parallel() { "∥" } else { "│" };
-                    let marker = if run.expanded { "▾" } else { "▸" };
-                    let label = format!(
-                        "{marker} {lane} #{:<3} {:<12} {} {:<7} {}",
-                        run.id,
-                        run.state.label(run.paused),
-                        run.timer(),
-                        run.scope.label(),
-                        run.preview()
-                    );
                     ui.horizontal(|ui| {
                         if ui
-                            .selectable_label(chosen, egui::RichText::new(label).monospace())
+                            .selectable_label(chosen, run_header_job(run, run.expanded, k))
                             .clicked()
                         {
                             select = Some(run.id);
@@ -3916,27 +4416,21 @@ impl Editor {
                                     copy = true;
                                 }
                             });
-                            egui::CollapsingHeader::new(format!("source #{id}"))
-                                .id_salt(("run_source", id))
-                                .show(ui, |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(&run.source).monospace(),
-                                        )
-                                        .wrap(),
-                                    );
-                                });
+                            egui::CollapsingHeader::new(
+                                egui::RichText::new(format!("SOURCE #{id}"))
+                                    .monospace()
+                                    .color(k.secondary),
+                            )
+                            .id_salt(("run_source", id))
+                            .show(ui, |ui| paint_rebis_panel(ui, &run.source, k));
                             if !run.input.is_empty() {
-                                egui::CollapsingHeader::new(format!("input #{id}"))
-                                    .id_salt(("run_input", id))
-                                    .show(ui, |ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&run.input).monospace(),
-                                            )
-                                            .wrap(),
-                                        );
-                                    });
+                                egui::CollapsingHeader::new(
+                                    egui::RichText::new(format!("RECORD / INPUT #{id}"))
+                                        .monospace()
+                                        .color(k.accent),
+                                )
+                                .id_salt(("run_input", id))
+                                .show(ui, |ui| paint_code_panel(ui, &run.input, k, k.accent));
                             }
                             if run.output.is_empty() {
                                 ui.colored_label(
@@ -3959,22 +4453,7 @@ impl Editor {
                                 );
                             }
                             for line in run.output.iter().skip(hidden) {
-                                let tone =
-                                    if line.starts_with("result") || line.starts_with("complete") {
-                                        k.ink
-                                    } else if line.starts_with("diagnostic")
-                                        || line.starts_with("paused")
-                                    {
-                                        k.accent
-                                    } else {
-                                        k.faint
-                                    };
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(line).monospace().color(tone),
-                                    )
-                                    .wrap(),
-                                );
+                                paint_stream_line(ui, line, k);
                             }
                         });
                     ui.separator();
@@ -4402,7 +4881,7 @@ impl Editor {
                 let hint = if self.on_mandala()
                     && self.doc().canvas_mode == CanvasMode::Spatial
                 {
-                    "drag to orbit · arrows move · wheel to zoom · click selects · edit text in the side panel"
+                    "drag a piece to move · drag empty space to orbit · G/X/Y/Z constrain · wheel zoom"
                 } else {
                     "drag/pan · right-drag marquee · Ctrl-click toggles · Ctrl-C/V block · Delete · Ctrl-Z"
                 };
@@ -4416,19 +4895,9 @@ impl Editor {
                             Tool::Flow(_) => {
                                 format!("flow from #{} — click the destination · shift for an angled line", id.0)
                             }
-                            Tool::Father => format!(
-                                "father #{} — click its next child · shift for an angled line",
-                                id.0
-                            ),
                             Tool::Place(_) | Tool::Select => String::new(),
                         };
                         ui.colored_label(self.ink.ink, message);
-                    }
-                    if matches!(self.tool, Tool::Place(Form::Forward | Form::Backflow)) {
-                        ui.colored_label(
-                            self.ink.ink,
-                            "standalone arrow: place it, then link one child at a time",
-                        );
                     }
                 }
                 ui.separator();
@@ -4596,10 +5065,16 @@ impl Editor {
                 let (sx, sy) = local(p);
                 let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
                 let drag = Drag::beginning_at(&self.doc().mandala, wx, wy);
-                // Moving a shape and sizing a container both change the drawing;
+                // Moving or sizing a shape changes the drawing;
                 // panning only changes where it is looked at.
                 if !matches!(drag, Drag::Pan) {
                     self.doc_mut().checkpoint();
+                }
+                if let Drag::Node { id, .. } = drag {
+                    // Membership is reassigned at drop time. Releasing it
+                    // while it moves prevents its old boundary from expanding
+                    // forever to chase a block that is being pulled out.
+                    self.doc_mut().mandala.release(id);
                 }
                 self.drag = drag;
             }
@@ -4628,7 +5103,7 @@ impl Editor {
                         self.doc_mut().mandala.resize(grab.id, half_w, half_h);
                     }
                 }
-                Drag::Node { id, grab } => {
+                Drag::Node { id, grab, .. } => {
                     if let Some(p) = response.interact_pointer_pos() {
                         let (sx, sy) = local(p);
                         let (wx, wy) = self.doc_mut().view.to_world(sx, sy);
@@ -4670,6 +5145,31 @@ impl Editor {
             }
             self.drag = Drag::None;
         } else if response.drag_stopped_by(PointerButton::Primary) {
+            if let Drag::Node { id, holder, .. } = self.drag {
+                let position = self.doc().mandala.node(id).map(|node| (node.x, node.y));
+                if let Some((x, y)) = position {
+                    let previous = holder.map(|snapshot| snapshot.id);
+                    let destination = self
+                        .doc()
+                        .mandala
+                        .holder_at(id, x, y)
+                        .or_else(|| holder.filter(|old| old.contains(x, y)).map(|old| old.id));
+                    if let Some(container) = destination {
+                        // The visible indentation is the structural gesture.
+                        // Re-dropping within the same boundary merely moves the
+                        // piece; crossing into a new one reparents the complete
+                        // subtree before assigning its presentation membership.
+                        let nested = previous == Some(container)
+                            || self.doc_mut().mandala.reparent(container, id)
+                            || self.doc().mandala.children(container).contains(&id);
+                        if nested && self.doc_mut().mandala.hold(container, id) {
+                            self.doc_mut().mandala.make_room_for_container(container);
+                        }
+                    } else if previous.is_some() {
+                        self.doc_mut().mandala.detach(id);
+                    }
+                }
+            }
             self.drag = Drag::None;
         }
 
@@ -4736,15 +5236,94 @@ impl Editor {
         if !self.doc().running.is_empty() {
             ui.ctx().request_repaint();
         }
-        self.paint_2d(&painter, origin, ui.input(|i| i.time) as f32);
+        let hovered = match self.drag {
+            Drag::Resize(grab) => Some(grab.id),
+            Drag::None => response.hover_pos().and_then(|pointer| {
+                let (sx, sy) = local(pointer);
+                let (wx, wy) = self.doc().view.to_world(sx, sy);
+                self.doc()
+                    .mandala
+                    .resize_grab(wx, wy)
+                    .map(|grab| grab.id)
+                    .or_else(|| self.doc().mandala.hit(wx, wy))
+            }),
+            Drag::Node { .. } | Drag::Pan | Drag::Marquee { .. } => None,
+        };
+        self.paint_2d(&painter, origin, ui.input(|i| i.time) as f32, hovered);
     }
 
-    /// Orbitable structural projection of the same mandala.
+    /// Orbitable and minimally editable structural projection of the mandala.
     ///
-    /// This surface deliberately owns no graph mutations. It derives a fresh
-    /// layout every frame from the 2D source of truth, so switching modes,
-    /// orbiting, and zooming cannot alter generated Rebis or its undo history.
+    /// Empty-space drag orbits. Dragging a piece moves its presentation-only
+    /// 3D offset, optionally constrained to the world X/Y/Z gizmo. These
+    /// offsets participate in ordinary undo but never alter generated Rebis or
+    /// the hand-authored 2D arrangement.
     fn canvas_3d(&mut self, ui: &mut egui::Ui) {
+        let mut picked_axis = None;
+        let mut reset_pieces = false;
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("3D EDIT")
+                    .monospace()
+                    .strong()
+                    .color(self.ink.accent),
+            );
+            ui.colored_label(self.ink.faint, "move");
+            for axis in [
+                SpatialAxis::Free,
+                SpatialAxis::X,
+                SpatialAxis::Y,
+                SpatialAxis::Z,
+            ] {
+                if ui
+                    .selectable_label(self.doc().spatial_axis == axis, axis.label())
+                    .clicked()
+                {
+                    picked_axis = Some(axis);
+                }
+            }
+            if ui
+                .add_enabled(
+                    self.doc()
+                        .mandala
+                        .nodes()
+                        .iter()
+                        .any(|node| node.spatial_offset != [0.0; 3]),
+                    egui::Button::new("reset pieces"),
+                )
+                .clicked()
+            {
+                reset_pieces = true;
+            }
+            ui.colored_label(
+                self.ink.faint,
+                "drag piece · drag empty to orbit · wheel zoom",
+            );
+        });
+        if let Some(axis) = picked_axis {
+            self.doc_mut().spatial_axis = axis;
+            if let SpatialDrag::Move {
+                id,
+                pointer,
+                original,
+                scale,
+                ..
+            } = self.spatial_drag
+            {
+                self.spatial_drag = SpatialDrag::Move {
+                    id,
+                    axis,
+                    pointer,
+                    original,
+                    scale,
+                };
+            }
+        }
+        if reset_pieces {
+            self.doc_mut().checkpoint();
+            self.doc_mut().mandala.reset_spatial_offsets();
+        }
+
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         // A click that dismisses the right-click menu must only close it, never
         // also orbit or select. True coming into the frame; egui closes the
@@ -4758,12 +5337,39 @@ impl Editor {
                 self.doc_mut().camera.zoom = (self.doc().camera.zoom * factor).clamp(0.25, 4.0);
             }
         }
-        if !menu_open && response.dragged() {
-            let delta = ui.input(|input| input.pointer.delta());
-            let camera = &mut self.doc_mut().camera;
-            camera.yaw += delta.x * 0.008;
-            camera.pitch = (camera.pitch - delta.y * 0.008).clamp(-1.35, 1.35);
-            ui.ctx().request_repaint();
+
+        let shortcut_axis = ui.input(|input| {
+            use egui::Key;
+            if input.key_pressed(Key::G) {
+                Some(SpatialAxis::Free)
+            } else if input.key_pressed(Key::X) {
+                Some(SpatialAxis::X)
+            } else if input.key_pressed(Key::Y) {
+                Some(SpatialAxis::Y)
+            } else if input.key_pressed(Key::Z) {
+                Some(SpatialAxis::Z)
+            } else {
+                None
+            }
+        });
+        if let Some(axis) = shortcut_axis {
+            self.doc_mut().spatial_axis = axis;
+            if let SpatialDrag::Move {
+                id,
+                pointer,
+                original,
+                scale,
+                ..
+            } = self.spatial_drag
+            {
+                self.spatial_drag = SpatialDrag::Move {
+                    id,
+                    axis,
+                    pointer,
+                    original,
+                    scale,
+                };
+            }
         }
 
         // Arrow keys move the viewpoint through the space: up/down travel
@@ -4807,48 +5413,115 @@ impl Editor {
             ui.ctx().request_repaint();
         }
 
-        let layout = self.doc().mandala.spatial_layout();
-        let projected = project_spatial(&layout, response.rect, self.doc().camera);
+        let mut layout = self.doc().mandala.spatial_layout();
+        let mut projected = project_spatial(
+            &self.doc().mandala,
+            &layout,
+            response.rect,
+            self.doc().camera,
+        );
+
+        if !menu_open && response.drag_started() {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                let selected = self.doc().selected;
+                let gizmo_axis = selected
+                    .and_then(|id| projected.iter().find(|node| node.id == id))
+                    .and_then(|node| spatial_gizmo_hit(pointer, node.position, self.doc().camera));
+                let target = gizmo_axis
+                    .and(selected)
+                    .or_else(|| spatial_hit(&self.doc().mandala, &projected, pointer));
+                if let Some(id) = target {
+                    self.doc_mut().select_only(id);
+                    self.doc_mut().checkpoint();
+                    let original = self
+                        .doc()
+                        .mandala
+                        .node(id)
+                        .map(|node| node.spatial_offset)
+                        .unwrap_or([0.0; 3]);
+                    let scale = projected
+                        .iter()
+                        .find(|node| node.id == id)
+                        .map(|node| node.scale)
+                        .unwrap_or(1.0)
+                        .max(0.05);
+                    self.spatial_drag = SpatialDrag::Move {
+                        id,
+                        axis: gizmo_axis.unwrap_or(self.doc().spatial_axis),
+                        pointer,
+                        original,
+                        scale,
+                    };
+                } else {
+                    self.spatial_drag = SpatialDrag::Orbit;
+                }
+            }
+        }
+
+        let cancel_move = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        if cancel_move {
+            if let SpatialDrag::Move { id, original, .. } = self.spatial_drag {
+                self.doc_mut().mandala.set_spatial_offset(id, original);
+            }
+            self.spatial_drag = SpatialDrag::None;
+        } else if !menu_open && response.dragged() {
+            match self.spatial_drag {
+                SpatialDrag::Orbit => {
+                    let delta = ui.input(|input| input.pointer.delta());
+                    let camera = &mut self.doc_mut().camera;
+                    camera.yaw += delta.x * 0.008;
+                    camera.pitch = (camera.pitch - delta.y * 0.008).clamp(-1.35, 1.35);
+                    ui.ctx().request_repaint();
+                }
+                SpatialDrag::Move {
+                    id,
+                    axis,
+                    pointer: start,
+                    original,
+                    scale,
+                } => {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        let delta = pointer - start;
+                        let mut offset = original;
+                        if let Some(component) = axis.component() {
+                            let direction = spatial_axis_direction(self.doc().camera, axis);
+                            offset[component] += f64::from(delta.dot(direction) / scale);
+                        } else {
+                            let camera = self.doc().camera;
+                            let (cy, sy) = (camera.yaw.cos(), camera.yaw.sin());
+                            let (cp, sp) = (camera.pitch.cos(), camera.pitch.sin());
+                            let right = [cy, 0.0, sy];
+                            let down = [sp * sy, cp, -sp * cy];
+                            let dx = delta.x / scale;
+                            let dy = delta.y / scale;
+                            for component in 0..3 {
+                                offset[component] +=
+                                    f64::from(right[component] * dx + down[component] * dy);
+                            }
+                        }
+                        self.doc_mut().mandala.set_spatial_offset(id, offset);
+                        ui.ctx().request_repaint();
+                    }
+                }
+                SpatialDrag::None => {}
+            }
+        }
+        if response.drag_stopped() {
+            self.spatial_drag = SpatialDrag::None;
+        }
+
+        // Camera and object motion above change projection immediately in this
+        // same frame; recompute before hit testing and painting.
+        layout = self.doc().mandala.spatial_layout();
+        projected = project_spatial(
+            &self.doc().mandala,
+            &layout,
+            response.rect,
+            self.doc().camera,
+        );
         if !menu_open && response.clicked() {
             if let Some(pointer) = response.interact_pointer_pos() {
-                // Look up a projected node's on-screen centre by id.
-                let pos_of = |id: NodeId| {
-                    projected
-                        .iter()
-                        .find(|n| n.id == id)
-                        .map(|n| (n.position, n.scale))
-                };
-                let selected = projected
-                    .iter()
-                    .filter_map(|node| {
-                        let form = self.doc().mandala.node(node.id)?;
-                        if form.shape() == Shape::Arrow {
-                            // A complete flow is drawn as the arrow *between its
-                            // two children*, not at its own cone position, so
-                            // that midpoint is where it is clickable.
-                            let (point, scale) = self
-                                .doc()
-                                .mandala
-                                .flow_result(node.id)
-                                .and(match self.doc().mandala.children(node.id)[..] {
-                                    [a, b] => Some((a, b)),
-                                    _ => None,
-                                })
-                                .and_then(|(a, b)| Some((pos_of(a)?, pos_of(b)?)))
-                                .map(|((pa, sa), (pb, sb))| (pa + (pb - pa) * 0.5, (sa + sb) * 0.5))
-                                .unwrap_or((node.position, node.scale));
-                            let distance = point.distance(pointer);
-                            return (distance <= 20.0 * scale.max(0.6))
-                                .then_some((node.id, distance));
-                        }
-                        let scale = node.scale.max(0.6);
-                        let offset = (pointer - node.position) / scale;
-                        form.shape()
-                            .contains(f64::from(offset.x), f64::from(offset.y))
-                            .then_some((node.id, node.position.distance(pointer)))
-                    })
-                    .min_by(|left, right| left.1.total_cmp(&right.1))
-                    .map(|(id, _)| id);
+                let selected = spatial_hit(&self.doc().mandala, &projected, pointer);
                 if let Some(id) = selected {
                     self.doc_mut().select_only(id);
                 } else {
@@ -4860,14 +5533,24 @@ impl Editor {
         // Right-click opens a context menu: reset the camera to its default
         // orbit and framing.
         let mut reset_view = false;
+        let mut reset_offsets = false;
         response.context_menu(|ui| {
             if ui.button("reset view").clicked() {
                 reset_view = true;
                 ui.close_menu();
             }
+            if ui.button("reset piece positions").clicked() {
+                reset_offsets = true;
+                ui.close_menu();
+            }
         });
         if reset_view {
             self.doc_mut().camera = SpatialCamera::default();
+            ui.ctx().request_repaint();
+        }
+        if reset_offsets {
+            self.doc_mut().checkpoint();
+            self.doc_mut().mandala.reset_spatial_offsets();
             ui.ctx().request_repaint();
         }
 
@@ -4881,6 +5564,26 @@ impl Editor {
             &projected,
             ui.input(|input| input.time) as f32,
         );
+        paint_spatial_gizmo(
+            &painter,
+            response.rect.left_bottom() + Vec2::new(58.0, -58.0),
+            self.doc().camera,
+            self.ink,
+            34.0,
+        );
+        if let Some(selected) = self
+            .doc()
+            .selected
+            .and_then(|id| projected.iter().find(|node| node.id == id))
+        {
+            paint_spatial_gizmo(
+                &painter,
+                selected.position,
+                self.doc().camera,
+                self.ink,
+                62.0,
+            );
+        }
     }
 
     fn click(&mut self, wx: f64, wy: f64, additive: bool, angle: bool) {
@@ -4893,6 +5596,11 @@ impl Editor {
         }
         match (hit, self.tool.clone()) {
             // Clicked a shape.
+            (Some(id), Tool::Flow(_)) if !is_flow_boundary(&self.doc().mandala, id) => {
+                self.doc_mut().pending = None;
+                self.notice =
+                    Some("flow endpoints are indentation blocks: choose a circle or square".into());
+            }
             (Some(id), Tool::Flow(form)) => match self.doc_mut().pending {
                 None => self.doc_mut().pending = Some(id),
                 Some(from) => {
@@ -4910,22 +5618,6 @@ impl Editor {
                     self.doc_mut().pending = None;
                 }
             },
-            (Some(id), Tool::Father) => match self.doc_mut().pending {
-                None => self.doc_mut().pending = Some(id),
-                Some(father) => {
-                    if father != id {
-                        self.doc_mut().checkpoint();
-                    }
-                    if self.doc_mut().mandala.father_of(father, id) {
-                        self.doc_mut().mandala.make_room_for_container(father);
-                    }
-                    // The father-of link is keyed by its child node.
-                    if angle {
-                        self.doc_mut().angled.insert(id);
-                    }
-                    self.doc_mut().pending = None;
-                }
-            },
             (Some(id), _) => self.doc_mut().select_only(id),
             // Clicked empty canvas.
             (None, Tool::Place(form)) => {
@@ -4934,7 +5626,7 @@ impl Editor {
                 let id = self.doc_mut().mandala.add(form, text, wx, wy);
                 self.doc_mut().select_only(id);
             }
-            (None, Tool::Flow(_) | Tool::Father) => self.doc_mut().pending = None,
+            (None, Tool::Flow(_)) => self.doc_mut().pending = None,
             (None, Tool::Select) => self.doc_mut().clear_selection(),
         }
     }
@@ -4944,11 +5636,17 @@ impl Editor {
     /// Dashes are drawn as short arcs stepped around the circle and offset by
     /// the clock, so the ring turns. It reads as motion without animating the
     /// node itself, which must stay legible while it runs.
-    fn running_ring(&self, painter: &egui::Painter, centre: Pos2, zoom: f32, spin: f32) {
+    fn running_ring(
+        &self,
+        painter: &egui::Painter,
+        centre: Pos2,
+        radius: Vec2,
+        stroke_scale: f32,
+        spin: f32,
+    ) {
         const DASHES: usize = 12;
         const SEGMENTS: usize = 4;
-        let r = (NODE_R as f32 + 9.0) * zoom;
-        let stroke = UiStroke::new(2.2 * zoom, self.ink.accent);
+        let stroke = UiStroke::new(2.2 * stroke_scale, self.ink.accent);
         let arc = std::f32::consts::TAU / DASHES as f32;
         for dash in 0..DASHES {
             if dash % 2 == 1 {
@@ -4958,7 +5656,7 @@ impl Editor {
             let mut previous = None;
             for step in 0..=SEGMENTS {
                 let a = start + arc * step as f32 / SEGMENTS as f32;
-                let p = Pos2::new(centre.x + r * a.cos(), centre.y + r * a.sin());
+                let p = Pos2::new(centre.x + radius.x * a.cos(), centre.y + radius.y * a.sin());
                 if let Some(q) = previous {
                     painter.line_segment([q, p], stroke);
                 }
@@ -5023,10 +5721,12 @@ impl Editor {
         let k = self.ink;
         let GlyphPaint {
             position: centre,
-            scale: zoom,
+            view_scale: zoom,
+            resize,
             outline,
             hot,
         } = paint;
+        let glyph_scale = resize * zoom;
         let shape = node.shape();
         match shape {
             Shape::Circle => {
@@ -5036,7 +5736,9 @@ impl Editor {
             Shape::Triangle => {
                 let points = Shape::triangle_points()
                     .iter()
-                    .map(|(x, y)| Pos2::new(centre.x + x * zoom, centre.y + y * zoom))
+                    .map(|(x, y)| {
+                        Pos2::new(centre.x + x * glyph_scale.x, centre.y + y * glyph_scale.y)
+                    })
                     .collect();
                 painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
             }
@@ -5057,27 +5759,33 @@ impl Editor {
             Shape::Diamond => {
                 let points = Shape::diamond_points()
                     .iter()
-                    .map(|(x, y)| Pos2::new(centre.x + x * zoom, centre.y + y * zoom))
+                    .map(|(x, y)| {
+                        Pos2::new(centre.x + x * glyph_scale.x, centre.y + y * glyph_scale.y)
+                    })
                     .collect();
                 painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
             }
             Shape::Parallelogram => {
                 let points = Shape::parallelogram_points()
                     .iter()
-                    .map(|(x, y)| Pos2::new(centre.x + x * zoom, centre.y + y * zoom))
+                    .map(|(x, y)| {
+                        Pos2::new(centre.x + x * glyph_scale.x, centre.y + y * glyph_scale.y)
+                    })
                     .collect();
                 painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
             }
             Shape::Hexagon => {
                 let points = Shape::hexagon_points()
-                    .map(|(x, y)| centre + Vec2::new(x * zoom, y * zoom))
+                    .map(|(x, y)| centre + Vec2::new(x * glyph_scale.x, y * glyph_scale.y))
                     .to_vec();
                 painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
             }
             Shape::Amp => {
                 let points = Shape::inlet_points()
                     .iter()
-                    .map(|(x, y)| Pos2::new(centre.x + x * zoom, centre.y + y * zoom))
+                    .map(|(x, y)| {
+                        Pos2::new(centre.x + x * glyph_scale.x, centre.y + y * glyph_scale.y)
+                    })
                     .collect();
                 painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
             }
@@ -5087,7 +5795,7 @@ impl Editor {
                     .iter()
                     .map(|(x, y)| {
                         let x = if reverse { -*x } else { *x };
-                        Pos2::new(centre.x + x * zoom, centre.y + y * zoom)
+                        Pos2::new(centre.x + x * glyph_scale.x, centre.y + y * glyph_scale.y)
                     })
                     .collect();
                 painter.add(egui::Shape::convex_polygon(points, k.fill, outline));
@@ -5096,33 +5804,41 @@ impl Editor {
             // remains model-only (see Shape::contains), so compose alone owns
             // a circular outline.
             _ => {
-                let pen = UiStroke::new(5.0 * zoom, if hot { k.accent } else { k.ink });
+                let pen = UiStroke::new(
+                    5.0 * zoom * resize_weight(resize),
+                    if hot { k.accent } else { k.ink },
+                );
                 for stroke in shape.strokes() {
                     match stroke {
                         Stroke::Poly(points) => {
                             let points = points
                                 .iter()
-                                .map(|(x, y)| Pos2::new(centre.x + x * zoom, centre.y + y * zoom))
+                                .map(|(x, y)| {
+                                    Pos2::new(
+                                        centre.x + x * glyph_scale.x,
+                                        centre.y + y * glyph_scale.y,
+                                    )
+                                })
                                 .collect();
                             painter.add(egui::Shape::line(points, pen));
                         }
                         Stroke::Cubic(points) => {
                             let points = [
                                 Pos2::new(
-                                    centre.x + points[0].0 * zoom,
-                                    centre.y + points[0].1 * zoom,
+                                    centre.x + points[0].0 * glyph_scale.x,
+                                    centre.y + points[0].1 * glyph_scale.y,
                                 ),
                                 Pos2::new(
-                                    centre.x + points[1].0 * zoom,
-                                    centre.y + points[1].1 * zoom,
+                                    centre.x + points[1].0 * glyph_scale.x,
+                                    centre.y + points[1].1 * glyph_scale.y,
                                 ),
                                 Pos2::new(
-                                    centre.x + points[2].0 * zoom,
-                                    centre.y + points[2].1 * zoom,
+                                    centre.x + points[2].0 * glyph_scale.x,
+                                    centre.y + points[2].1 * glyph_scale.y,
                                 ),
                                 Pos2::new(
-                                    centre.x + points[3].0 * zoom,
-                                    centre.y + points[3].1 * zoom,
+                                    centre.x + points[3].0 * glyph_scale.x,
+                                    centre.y + points[3].1 * glyph_scale.y,
                                 ),
                             ];
                             painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
@@ -5138,6 +5854,114 @@ impl Editor {
         }
     }
 
+    /// Give indentation circles and mediator squares real volume in the 3D
+    /// projection. The structural renderer is painter-based rather than a mesh
+    /// engine, so a sphere is built from a shaded terminator/highlight and a
+    /// square from a projected back face plus four side faces. Both retain the
+    /// exact screen footprint used by hit testing and connections.
+    fn paint_3d_volume_body(&self, painter: &egui::Painter, node: &Node, paint: GlyphPaint) {
+        let k = self.ink;
+        let GlyphPaint {
+            position: centre,
+            view_scale: zoom,
+            outline,
+            hot,
+            ..
+        } = paint;
+        let mix = |from: Color32, to: Color32, amount: f32| {
+            let amount = amount.clamp(0.0, 1.0);
+            let channel = |a: u8, b: u8| {
+                (f32::from(a) + (f32::from(b) - f32::from(a)) * amount).round() as u8
+            };
+            Color32::from_rgb(
+                channel(from.r(), to.r()),
+                channel(from.g(), to.g()),
+                channel(from.b(), to.b()),
+            )
+        };
+        match node.shape() {
+            Shape::Circle => {
+                let radius = self.doc().mandala.extent(node.id).0 as f32 * zoom;
+                let dark = mix(k.fill, k.ground, 0.46);
+                let middle = mix(k.fill, k.accent, if hot { 0.24 } else { 0.11 });
+                let light = mix(k.ink, k.accent, 0.20);
+                painter.circle_filled(centre, radius, dark);
+                // The shifted middle disc creates a curved terminator; two
+                // smaller ellipses make the upper-left key light explicit.
+                painter.circle_filled(
+                    centre - Vec2::new(radius * 0.10, radius * 0.12),
+                    radius * 0.88,
+                    middle,
+                );
+                painter.add(egui::Shape::ellipse_filled(
+                    centre - Vec2::new(radius * 0.28, radius * 0.30),
+                    Vec2::new(radius * 0.32, radius * 0.20),
+                    role_wash(light, 105),
+                ));
+                painter.add(egui::Shape::ellipse_filled(
+                    centre + Vec2::new(radius * 0.24, radius * 0.30),
+                    Vec2::new(radius * 0.48, radius * 0.15),
+                    Color32::from_black_alpha(38),
+                ));
+                painter.circle_stroke(centre, radius, outline);
+                painter.circle_stroke(
+                    centre - Vec2::new(radius * 0.10, radius * 0.12),
+                    radius * 0.88,
+                    UiStroke::new((0.7 * zoom).max(0.7), role_wash(k.accent, 44)),
+                );
+            }
+            Shape::Square => {
+                let (half_w, half_h) = self.doc().mandala.extent(node.id);
+                let half = Vec2::new(half_w as f32, half_h as f32) * zoom;
+                let front = Rect::from_center_size(centre, half * 2.0);
+                let depth = (half.x.min(half.y) * 0.28).clamp(10.0, 34.0);
+                let extrusion = -spatial_axis_direction(self.doc().camera, SpatialAxis::Z) * depth;
+                let front_points = [
+                    front.left_top(),
+                    front.right_top(),
+                    front.right_bottom(),
+                    front.left_bottom(),
+                ];
+                let back_points = front_points.map(|point| point + extrusion);
+                let back_fill = mix(k.fill, k.ground, 0.55);
+                let front_fill = mix(k.fill, k.accent, if hot { 0.20 } else { 0.08 });
+                painter.add(egui::Shape::convex_polygon(
+                    back_points.to_vec(),
+                    back_fill,
+                    UiStroke::new(outline.width * 0.7, role_wash(outline.color, 150)),
+                ));
+                for side in 0..4 {
+                    let next = (side + 1) % 4;
+                    let amount = match side {
+                        0 => 0.22,
+                        1 => 0.38,
+                        2 => 0.55,
+                        _ => 0.45,
+                    };
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            back_points[side],
+                            back_points[next],
+                            front_points[next],
+                            front_points[side],
+                        ],
+                        mix(k.fill, k.ground, amount),
+                        UiStroke::new(0.8 * zoom.max(0.7), role_wash(k.faint, 120)),
+                    ));
+                }
+                painter.rect(front, 3.0 * zoom, front_fill, outline);
+                painter.line_segment(
+                    [
+                        front.left_top() + Vec2::new(3.0, 3.0) * zoom,
+                        front.right_top() + Vec2::new(-3.0, 3.0) * zoom,
+                    ],
+                    UiStroke::new(1.1 * zoom.max(0.7), role_wash(k.ink, 78)),
+                );
+            }
+            _ => self.paint_node_body(painter, node, paint),
+        }
+    }
+
     fn paint_graph_node(&self, painter: &egui::Painter, node: &Node, paint: NodePaint) {
         let NodePaint {
             position: centre,
@@ -5145,15 +5969,21 @@ impl Editor {
             spin,
             arrow_body,
             recursive,
+            volumetric,
         } = paint;
         let shape = node.shape();
         if shape == Shape::Arrow && !arrow_body {
             return;
         }
         let k = self.ink;
+        let resize = node_resize(&self.doc().mandala, node);
+        let symbol_weight = resize_weight(resize);
+        let symbol_scale = zoom * symbol_weight;
+        let (half_w, half_h) = self.doc().mandala.extent(node.id);
+        let screen_extent = Vec2::new(half_w as f32, half_h as f32) * zoom;
         let hot = self.doc().is_selected(node.id) || self.doc().pending == Some(node.id);
         let accented = hot || recursive || shape == Shape::Arrow;
-        // An arrow is red whatever else is true of it. Selecting a block must
+        // An arrow is purple whatever else is true of it. Selecting a block must
         // not repaint the one form whose colour carries its meaning; the
         // thicker outline below, and the accent ring for recursion, already
         // say everything selection needs to say.
@@ -5164,27 +5994,47 @@ impl Editor {
         } else {
             k.faint
         };
-        let outline = UiStroke::new(node_outline_width(shape, accented) * zoom, outline_color);
-        if recursive {
-            painter.circle_stroke(
-                centre,
-                (NODE_R as f32 + 8.0) * zoom,
-                UiStroke::new(1.0 * zoom, k.accent),
-            );
-        }
-        self.paint_node_body(
-            painter,
-            node,
-            GlyphPaint {
-                position: centre,
-                scale: zoom,
-                outline,
-                hot,
-            },
+        let outline = UiStroke::new(
+            node_outline_width(shape, accented) * symbol_scale,
+            outline_color,
         );
+        if recursive {
+            painter.add(egui::Shape::ellipse_stroke(
+                centre,
+                screen_extent + Vec2::splat(8.0 * symbol_scale),
+                UiStroke::new(symbol_scale, k.accent),
+            ));
+        }
+        let glyph = GlyphPaint {
+            position: centre,
+            view_scale: zoom,
+            resize,
+            outline,
+            hot,
+        };
+        if volumetric && matches!(shape, Shape::Circle | Shape::Square) {
+            self.paint_3d_volume_body(painter, node, glyph);
+        } else {
+            self.paint_node_body(painter, node, glyph);
+        }
 
         if self.doc().running.contains(&node.id) {
-            self.running_ring(painter, centre, zoom, spin);
+            self.running_ring(
+                painter,
+                centre,
+                screen_extent + Vec2::splat(9.0 * symbol_scale),
+                symbol_scale,
+                spin,
+            );
+        }
+        if let Some(model) = &node.model {
+            painter.text(
+                Pos2::new(centre.x, centre.y - screen_extent.y - 13.0 * symbol_scale),
+                Align2::CENTER_BOTTOM,
+                truncate_model(&format!("/{model}")),
+                FontId::monospace(9.0 * symbol_scale),
+                k.secondary,
+            );
         }
         if shape == Shape::Arrow {
             return;
@@ -5195,7 +6045,7 @@ impl Editor {
             return;
         }
         let caption = truncate(&caption);
-        let font = FontId::monospace(11.0 * zoom);
+        let font = FontId::monospace(11.0 * symbol_scale);
         match shape {
             Shape::Circle
             | Shape::Triangle
@@ -5207,13 +6057,82 @@ impl Editor {
             }
             _ => {
                 painter.text(
-                    Pos2::new(centre.x, centre.y + (NODE_R as f32 + 12.0) * zoom),
+                    Pos2::new(centre.x, centre.y + screen_extent.y + 12.0 * symbol_scale),
                     Align2::CENTER_CENTER,
                     caption,
                     font,
                     k.faint,
                 );
             }
+        }
+    }
+
+    fn paint_3d_layers(
+        &self,
+        painter: &egui::Painter,
+        layout: &SpatialLayout,
+        projected: &[ProjectedNode],
+    ) {
+        let k = self.ink;
+        let dark = k.ground.r() < 128;
+        let fill = k.fill.gamma_multiply(if dark { 0.34 } else { 0.18 });
+        let rim = k.faint.gamma_multiply(if dark { 0.28 } else { 0.20 });
+        let axis = k.faint.gamma_multiply(if dark { 0.16 } else { 0.12 });
+        for plate in spatial_layer_plates(&self.doc().mandala, layout, projected) {
+            painter.add(egui::Shape::ellipse_filled(
+                plate.centre,
+                plate.radius,
+                fill,
+            ));
+            painter.add(egui::Shape::ellipse_stroke(
+                plate.centre,
+                plate.radius,
+                UiStroke::new(1.0, rim),
+            ));
+            painter.line_segment(
+                [
+                    plate.centre - Vec2::new(plate.radius.x, 0.0),
+                    plate.centre + Vec2::new(plate.radius.x, 0.0),
+                ],
+                UiStroke::new(0.8, axis),
+            );
+            painter.text(
+                plate.centre - Vec2::new(plate.radius.x - 9.0, 0.0),
+                Align2::LEFT_BOTTOM,
+                format!("L{}", plate.depth),
+                FontId::monospace(8.0),
+                rim,
+            );
+        }
+    }
+
+    fn paint_3d_node_shadow(
+        &self,
+        painter: &egui::Painter,
+        node: &Node,
+        projected: ProjectedNode,
+        depth: usize,
+    ) {
+        let dark = self.ink.ground.r() < 128;
+        let style = spatial_shadow_style(depth, projected.scale, dark);
+        let (half_w, half_h) = self.doc().mandala.extent(node.id);
+        let footprint = Vec2::new(
+            (half_w as f32 * projected.scale * 0.78).max(10.0),
+            (half_h as f32 * projected.scale * 0.24).max(4.5),
+        );
+        // Broad penumbra first, tight contact shadow last. Several translucent
+        // ellipses give us a soft shadow without a texture or a second render
+        // target, and remain cheap enough to orbit continuously.
+        for (travel, spread, opacity) in
+            [(0.72, 1.00, 0.18), (0.88, 0.55, 0.28), (1.00, 0.12, 0.44)]
+        {
+            let radius =
+                footprint + Vec2::new(style.softness * spread, style.softness * spread * 0.42);
+            painter.add(egui::Shape::ellipse_filled(
+                projected.position + style.offset * travel,
+                radius,
+                Color32::BLACK.gamma_multiply(style.opacity * opacity),
+            ));
         }
     }
 
@@ -5226,15 +6145,17 @@ impl Editor {
     ) {
         let k = self.ink;
         let spin = time * 1.6;
-        self.chaos_star(painter);
-        painter.text(
-            painter.clip_rect().left_top() + Vec2::new(14.0, 14.0),
-            Align2::LEFT_TOP,
-            "STRUCTURAL 3D  ·  Z = nesting  ·  lifted arcs = recursion",
-            FontId::monospace(10.0),
-            k.faint,
-        );
+        let title =
+            "STRUCTURAL 3D  ·  drag pieces / empty space orbits  ·  G X Y Z constrain movement";
         if projected.is_empty() {
+            self.chaos_star(painter);
+            painter.text(
+                painter.clip_rect().left_top() + Vec2::new(14.0, 14.0),
+                Align2::LEFT_TOP,
+                title,
+                FontId::monospace(10.0),
+                k.faint,
+            );
             painter.text(
                 painter.clip_rect().center(),
                 Align2::CENTER_CENTER,
@@ -5245,14 +6166,16 @@ impl Editor {
             return;
         }
 
+        self.paint_3d_layers(painter, layout, projected);
         let find = |id: NodeId| projected.iter().find(|node| node.id == id);
         for edge in visible_edges(&self.doc().mandala) {
             let (Some(from), Some(to)) = (find(edge.from), find(edge.to)) else {
                 continue;
             };
-            let recursive = edge
-                .source
-                .is_some_and(|source| layout.recursive_edges.contains(&source));
+            let recursive = layout
+                .recursive_edges
+                .iter()
+                .any(|source| source.to == edge.owner);
             let delta = to.position - from.position;
             let length = delta.length();
             let direction = if length > 0.001 {
@@ -5260,19 +6183,31 @@ impl Editor {
             } else {
                 Vec2::RIGHT
             };
-            let start = from.position + direction * NODE_R as f32 * from.scale.min(1.0);
-            let end = to.position - direction * (NODE_R as f32 + 4.0) * to.scale.min(1.0);
-            let touches = match edge.kind {
-                VisibleEdgeKind::Father => {
-                    self.doc().is_selected(edge.from) && self.doc().is_selected(edge.owner)
-                }
-                VisibleEdgeKind::Flow => {
-                    let hot = self.doc().is_selected(edge.owner)
-                        || self.doc().pending == Some(edge.owner);
-                    hot || (self.doc().is_selected(edge.from) && self.doc().is_selected(edge.to))
-                }
-            };
-            let link_color = edge_colour(edge.kind, touches, k);
+            let from_extent = self.doc().mandala.extent(edge.from);
+            let to_extent = self.doc().mandala.extent(edge.to);
+            let from_extent = Vec2::new(from_extent.0 as f32, from_extent.1 as f32) * from.scale;
+            let to_extent = Vec2::new(to_extent.0 as f32, to_extent.1 as f32) * to.scale;
+            let start = from.position + direction * ray_to_extent(from_extent, direction);
+            let end =
+                to.position - direction * (ray_to_extent(to_extent, direction) + 4.0 * to.scale);
+            let hot = self.doc().is_selected(edge.owner) || self.doc().pending == Some(edge.owner);
+            let touches =
+                hot || (self.doc().is_selected(edge.from) && self.doc().is_selected(edge.to));
+            let link_color = edge_colour(k);
+            let depth = layout
+                .node(edge.from)
+                .map(|node| node.depth)
+                .unwrap_or_default()
+                .max(
+                    layout
+                        .node(edge.to)
+                        .map(|node| node.depth)
+                        .unwrap_or_default(),
+                );
+            let shadow =
+                spatial_shadow_style(depth, (from.scale + to.scale) * 0.5, k.ground.r() < 128);
+            let shadow_offset = shadow.offset * 0.38;
+            let shadow_color = Color32::BLACK.gamma_multiply(shadow.opacity * 0.34);
             if recursive {
                 let stroke = UiStroke::new(if touches { 2.8 } else { 2.2 }, link_color);
                 let lift = (start.distance(end) * 0.42).clamp(48.0, 150.0);
@@ -5292,6 +6227,26 @@ impl Editor {
                         end,
                     )
                 };
+                let shadow_points = [
+                    start + shadow_offset,
+                    control_a + shadow_offset,
+                    control_b + shadow_offset,
+                    end + shadow_offset,
+                ];
+                let shadow_stroke = UiStroke::new(stroke.width + 2.2, shadow_color);
+                painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                    shadow_points,
+                    false,
+                    Color32::TRANSPARENT,
+                    shadow_stroke,
+                ));
+                self.arrow_head(
+                    painter,
+                    end + shadow_offset,
+                    end - control_b,
+                    10.0,
+                    shadow_stroke,
+                );
                 painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
                     [start, control_a, control_b, end],
                     false,
@@ -5301,8 +6256,40 @@ impl Editor {
                 self.arrow_head(painter, end, end - control_b, 10.0, stroke);
             } else {
                 let stroke = UiStroke::new(if touches { 1.9 } else { 1.35 }, link_color);
+                let shadow_stroke = UiStroke::new(stroke.width + 1.8, shadow_color);
+                painter.line_segment([start + shadow_offset, end + shadow_offset], shadow_stroke);
+                self.arrow_head(
+                    painter,
+                    end + shadow_offset,
+                    end - start,
+                    8.0,
+                    shadow_stroke,
+                );
                 painter.line_segment([start, end], stroke);
                 self.arrow_head(painter, end, end - start, 8.0, stroke);
+            }
+            if let Some(model) = self
+                .doc()
+                .mandala
+                .node(edge.owner)
+                .and_then(|node| node.model.as_deref())
+            {
+                let scale = from.scale.min(to.scale).clamp(0.65, 1.3);
+                let label_position = start + (end - start) * 0.5 - Vec2::new(0.0, 8.0 * scale);
+                painter.text(
+                    label_position + Vec2::new(1.5, 2.0),
+                    Align2::CENTER_BOTTOM,
+                    truncate_model(&format!("/{model}")),
+                    FontId::monospace(9.0 * scale),
+                    shadow_color,
+                );
+                painter.text(
+                    label_position,
+                    Align2::CENTER_BOTTOM,
+                    truncate_model(&format!("/{model}")),
+                    FontId::monospace(9.0 * scale),
+                    k.secondary,
+                );
             }
         }
 
@@ -5310,6 +6297,19 @@ impl Editor {
         // Far forms first lets nearer forms cover their edges and produces a
         // stable depth cue without changing the underlying graph order.
         nodes.sort_by(|left, right| right.camera_depth.total_cmp(&left.camera_depth));
+        for projected_node in &nodes {
+            let Some(node) = self.doc().mandala.node(projected_node.id) else {
+                continue;
+            };
+            if node.shape() == Shape::Arrow && complete_flow(&self.doc().mandala, node.id) {
+                continue;
+            }
+            let depth = layout
+                .node(node.id)
+                .map(|node| node.depth)
+                .unwrap_or_default();
+            self.paint_3d_node_shadow(painter, node, *projected_node, depth);
+        }
         for projected_node in nodes {
             let Some(node) = self.doc().mandala.node(projected_node.id) else {
                 continue;
@@ -5328,14 +6328,16 @@ impl Editor {
                     spin,
                     arrow_body: true,
                     recursive,
+                    volumetric: true,
                 },
             );
             if let Some(spatial) = spatial {
+                let extent = self.doc().mandala.extent(node.id);
                 painter.text(
                     projected_node.position
                         + Vec2::new(
-                            NODE_R as f32 * projected_node.scale,
-                            -NODE_R as f32 * projected_node.scale,
+                            extent.0 as f32 * projected_node.scale,
+                            -extent.1 as f32 * projected_node.scale,
                         ),
                     Align2::LEFT_BOTTOM,
                     format!("z{}", spatial.depth),
@@ -5352,10 +6354,11 @@ impl Editor {
                         continue;
                     };
                     let scale = child.scale.clamp(0.65, 1.2);
+                    let extent = self.doc().mandala.extent(child_id);
                     let badge = child.position
                         + Vec2::new(
-                            -(NODE_R as f32 + 9.0) * scale,
-                            -(NODE_R as f32 + 9.0) * scale,
+                            -(extent.0 as f32 * child.scale + 9.0 * scale),
+                            -(extent.1 as f32 * child.scale + 9.0 * scale),
                         );
                     painter.circle_filled(badge, 8.0 * scale, k.fill);
                     painter.circle_stroke(badge, 8.0 * scale, UiStroke::new(1.0, k.accent));
@@ -5369,9 +6372,43 @@ impl Editor {
                 }
             }
         }
+        self.chaos_star(painter);
+        painter.text(
+            painter.clip_rect().left_top() + Vec2::new(14.0, 14.0),
+            Align2::LEFT_TOP,
+            title,
+            FontId::monospace(10.0),
+            k.faint,
+        );
     }
 
-    fn paint_2d(&self, painter: &egui::Painter, origin: Pos2, time: f32) {
+    fn paint_resize_outline(&self, painter: &egui::Painter, node: &Node, centre: Pos2, zoom: f32) {
+        if node.shape() == Shape::Arrow && complete_flow(&self.doc().mandala, node.id) {
+            return;
+        }
+        let extent = self.doc().mandala.extent(node.id);
+        let radius = Vec2::new(extent.0 as f32, extent.1 as f32) * zoom
+            + Vec2::splat((2.0 * zoom).clamp(1.0, 4.0));
+        let stroke = UiStroke::new(
+            (1.35 * zoom).clamp(0.9, 2.2),
+            self.ink.accent.gamma_multiply(0.82),
+        );
+        let dash = (9.0 * zoom).clamp(4.0, 13.0);
+        let gap = (6.0 * zoom).clamp(3.0, 10.0);
+        if node.form == Form::Compose {
+            dashed_ellipse(painter, centre, radius, dash, gap, stroke);
+        } else {
+            dashed_rect(
+                painter,
+                Rect::from_center_size(centre, radius * 2.0),
+                dash,
+                gap,
+                stroke,
+            );
+        }
+    }
+
+    fn paint_2d(&self, painter: &egui::Painter, origin: Pos2, time: f32, hovered: Option<NodeId>) {
         let spin = time * 1.6;
         let k = self.ink;
         let v = self.doc().view;
@@ -5383,21 +6420,15 @@ impl Editor {
         };
         self.chaos_star(painter);
 
-        // The semantic projection is shared with 3D: complete flows collapse
-        // into one directional blue edge, while father-of links remain grey.
-        // Edges and forms are drawn in two passes. Everything outside the boxes
-        // goes down first, then the boxes themselves, then the contents — edges
-        // included, or a box's own fill would paint over the arrows inside it.
+        // The semantic projection is shared with 3D: nesting supplies structure
+        // and complete flow operators become directional purple connections
+        // between circle/square blocks. Boundaries go down first, then those
+        // operator connections, then the content resting inside.
         let paint_edges = |want_interior: bool| {
             for edge in visible_edges(&self.doc().mandala) {
                 let interior = self.doc().mandala.is_inlined(edge.from)
                     && self.doc().mandala.is_inlined(edge.to);
                 if interior != want_interior {
-                    continue;
-                }
-                // A child drawn within its structural boundary needs no link
-                // to it: containment already says what that grey arrow would.
-                if is_containment_edge(&self.doc().mandala, &edge) {
                     continue;
                 }
                 let (Some(from), Some(to)) = (
@@ -5406,52 +6437,51 @@ impl Editor {
                 ) else {
                     continue;
                 };
-                let (touches, width, head) = match edge.kind {
-                    VisibleEdgeKind::Father => (
-                        self.doc().is_selected(edge.from) && self.doc().is_selected(edge.owner),
-                        1.8,
-                        10.0,
-                    ),
-                    VisibleEdgeKind::Flow => {
-                        let hot = self.doc().is_selected(edge.owner)
-                            || self.doc().pending == Some(edge.owner);
-                        (
-                            hot || (self.doc().is_selected(edge.from)
-                                && self.doc().is_selected(edge.to)),
-                            1.8,
-                            11.0,
-                        )
-                    }
-                };
-                let stroke = UiStroke::new(
-                    if touches {
-                        if edge.kind == VisibleEdgeKind::Flow {
-                            2.6
-                        } else {
-                            2.4
-                        }
-                    } else {
-                        width
-                    } * zoom,
-                    edge_colour(edge.kind, touches, k),
-                );
+                let hot =
+                    self.doc().is_selected(edge.owner) || self.doc().pending == Some(edge.owner);
+                let touches =
+                    hot || (self.doc().is_selected(edge.from) && self.doc().is_selected(edge.to));
+                let stroke = UiStroke::new(if touches { 2.6 } else { 1.8 } * zoom, edge_colour(k));
+                let from_extent = self.doc().mandala.extent(from.id);
+                let to_extent = self.doc().mandala.extent(to.id);
                 circuit_trace(
                     painter,
                     at(from.x, from.y),
                     at(to.x, to.y),
-                    NODE_R as f32 * zoom,
-                    head * zoom,
+                    [
+                        Vec2::new(from_extent.0 as f32, from_extent.1 as f32) * zoom,
+                        Vec2::new(to_extent.0 as f32, to_extent.1 as f32) * zoom,
+                    ],
+                    11.0 * zoom,
                     stroke,
                     self.doc().angled.contains(&edge.owner),
                 );
+                if let Some(model) = self
+                    .doc()
+                    .mandala
+                    .node(edge.owner)
+                    .and_then(|node| node.model.as_deref())
+                {
+                    let midpoint = at(from.x, from.y).lerp(at(to.x, to.y), 0.5);
+                    painter.text(
+                        midpoint - Vec2::new(0.0, 8.0 * zoom),
+                        Align2::CENTER_BOTTOM,
+                        truncate_model(&format!("/{model}")),
+                        FontId::monospace(9.0 * zoom),
+                        k.secondary,
+                    );
+                }
             }
         };
 
-        let paint_nodes = |pass: bool| {
+        let paint_nodes = |pass: bool, boundaries: bool| {
             for id in self.doc().mandala.paint_order(pass) {
                 let Some(n) = self.doc().mandala.node(id) else {
                     continue;
                 };
+                if matches!(n.form, Form::Square | Form::Compose) != boundaries {
+                    continue;
+                }
                 if n.shape() == Shape::Arrow && complete_flow(&self.doc().mandala, n.id) {
                     continue;
                 }
@@ -5465,15 +6495,28 @@ impl Editor {
                         spin,
                         arrow_body: true,
                         recursive: false,
+                        volumetric: false,
                     },
                 );
             }
         };
 
+        // Every visual boundary is a receiving surface. Paint outer and nested
+        // circle/square fills first, then all connections, then the symbols
+        // resting on them. In particular, a nested square can no longer cover
+        // the flow arrow belonging to its own source-written mediator.
+        paint_nodes(false, true);
+        paint_nodes(true, true);
         paint_edges(false);
-        paint_nodes(false);
         paint_edges(true);
-        paint_nodes(true);
+        paint_nodes(false, false);
+        paint_nodes(true, false);
+
+        if let Some(id) = hovered {
+            if let Some(node) = self.doc().mandala.node(id) {
+                self.paint_resize_outline(painter, node, at(node.x, node.y), zoom);
+            }
+        }
 
         if let Some(father) = self.doc().selected.or(self.doc().pending) {
             let children = self.doc().mandala.children(father);
@@ -5483,10 +6526,11 @@ impl Editor {
                 };
                 let centre = at(child.x, child.y);
                 let scale = zoom.clamp(0.65, 1.2);
+                let extent = self.doc().mandala.extent(child_id);
                 let badge = centre
                     + Vec2::new(
-                        -(NODE_R as f32 + 9.0) * scale,
-                        -(NODE_R as f32 + 9.0) * scale,
+                        -(extent.0 as f32 * zoom + 9.0 * scale),
+                        -(extent.1 as f32 * zoom + 9.0 * scale),
                     );
                 painter.circle_filled(badge, 8.0 * scale, k.fill);
                 painter.circle_stroke(badge, 8.0 * scale, UiStroke::new(1.0, k.accent));
@@ -5509,36 +6553,108 @@ impl Editor {
     }
 }
 
-/// Perspective projection for the derived structural model.
-///
-/// Camera math is kept outside the egui event handler so it stays a pure,
-/// testable transformation. Existing canvas placement supplies X/Y while
-/// structural depth supplies Z.
-/// The layout's centre of mass and largest extent, in world units. Shared by
-/// the projection and the fly controls so movement speed and framing scale
-/// with the graph.
+// Dashed scale guides are deliberately composed from ordinary line segments,
+// so they remain crisp under every canvas zoom without a texture dependency.
+fn dashed_segment(
+    painter: &egui::Painter,
+    from: Pos2,
+    to: Pos2,
+    dash: f32,
+    gap: f32,
+    stroke: UiStroke,
+) {
+    let delta = to - from;
+    let length = delta.length();
+    if length <= f32::EPSILON {
+        return;
+    }
+    let direction = delta / length;
+    let mut travelled = 0.0;
+    while travelled < length {
+        let end = (travelled + dash).min(length);
+        painter.line_segment(
+            [from + direction * travelled, from + direction * end],
+            stroke,
+        );
+        travelled += dash + gap;
+    }
+}
+
+fn dashed_rect(painter: &egui::Painter, rect: Rect, dash: f32, gap: f32, stroke: UiStroke) {
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    for index in 0..corners.len() {
+        dashed_segment(
+            painter,
+            corners[index],
+            corners[(index + 1) % corners.len()],
+            dash,
+            gap,
+            stroke,
+        );
+    }
+}
+
+fn dashed_ellipse(
+    painter: &egui::Painter,
+    centre: Pos2,
+    radius: Vec2,
+    dash: f32,
+    gap: f32,
+    stroke: UiStroke,
+) {
+    let circumference =
+        std::f32::consts::TAU * ((radius.x * radius.x + radius.y * radius.y) * 0.5).sqrt();
+    let periods = (circumference / (dash + gap)).round().max(6.0) as usize;
+    let dash_angle = std::f32::consts::TAU / periods as f32 * dash / (dash + gap).max(f32::EPSILON);
+    let period = std::f32::consts::TAU / periods as f32;
+    for index in 0..periods {
+        let start = index as f32 * period;
+        let mut previous = Pos2::new(
+            centre.x + radius.x * start.cos(),
+            centre.y + radius.y * start.sin(),
+        );
+        for step in 1..=4 {
+            let angle = start + dash_angle * step as f32 / 4.0;
+            let point = Pos2::new(
+                centre.x + radius.x * angle.cos(),
+                centre.y + radius.y * angle.sin(),
+            );
+            painter.line_segment([previous, point], stroke);
+            previous = point;
+        }
+    }
+}
+
 /// Draw a connection as a right-angle circuit trace between two node centres,
 /// with an arrowhead entering the target. The dominant axis decides whether the
 /// trace leaves horizontally (H–V–H) or vertically (V–H–V), so it reads like a
-/// board trace routed between components rather than a diagonal wire. `r` is the
-/// node radius (where the trace clears the shape) and `head` the arrow size.
+/// board trace routed between components rather than a diagonal wire. The two
+/// extents keep the trace outside resized symbols; `head` is the arrow size.
 fn circuit_trace(
     painter: &egui::Painter,
     from: Pos2,
     to: Pos2,
-    r: f32,
+    extents: [Vec2; 2],
     head: f32,
     stroke: UiStroke,
     angled: bool,
 ) {
+    let [from_extent, to_extent] = extents;
     let (dx, dy) = (to.x - from.x, to.y - from.y);
     if angled {
         // A straight diagonal line, drawn on request with Shift. Barbs sweep
         // back from the tip along the line.
         let len = (dx * dx + dy * dy).sqrt().max(1.0);
         let (ux, uy) = (dx / len, dy / len);
-        let p0 = Pos2::new(from.x + ux * r, from.y + uy * r);
-        let p1 = Pos2::new(to.x - ux * r, to.y - uy * r);
+        let from_clearance = ray_to_extent(from_extent, Vec2::new(ux, uy));
+        let to_clearance = ray_to_extent(to_extent, Vec2::new(ux, uy));
+        let p0 = Pos2::new(from.x + ux * from_clearance, from.y + uy * from_clearance);
+        let p1 = Pos2::new(to.x - ux * to_clearance, to.y - uy * to_clearance);
         painter.line_segment([p0, p1], stroke);
         for side in [-0.45f32, 0.45] {
             let (cs, sn) = (side.cos(), side.sin());
@@ -5549,8 +6665,8 @@ fn circuit_trace(
     }
     if dx.abs() >= dy.abs() {
         let dir = if dx >= 0.0 { 1.0 } else { -1.0 };
-        let p0 = Pos2::new(from.x + dir * r, from.y);
-        let p1 = Pos2::new(to.x - dir * r, to.y);
+        let p0 = Pos2::new(from.x + dir * from_extent.x, from.y);
+        let p1 = Pos2::new(to.x - dir * to_extent.x, to.y);
         let mid = (p0.x + p1.x) * 0.5;
         painter.line_segment([p0, Pos2::new(mid, p0.y)], stroke);
         painter.line_segment([Pos2::new(mid, p0.y), Pos2::new(mid, p1.y)], stroke);
@@ -5565,8 +6681,8 @@ fn circuit_trace(
         );
     } else {
         let dir = if dy >= 0.0 { 1.0 } else { -1.0 };
-        let p0 = Pos2::new(from.x, from.y + dir * r);
-        let p1 = Pos2::new(to.x, to.y - dir * r);
+        let p0 = Pos2::new(from.x, from.y + dir * from_extent.y);
+        let p1 = Pos2::new(to.x, to.y - dir * to_extent.y);
         let mid = (p0.y + p1.y) * 0.5;
         painter.line_segment([p0, Pos2::new(p0.x, mid)], stroke);
         painter.line_segment([Pos2::new(p0.x, mid), Pos2::new(p1.x, mid)], stroke);
@@ -5582,7 +6698,140 @@ fn circuit_trace(
     }
 }
 
+fn ray_to_extent(extent: Vec2, direction: Vec2) -> f32 {
+    let x = if direction.x.abs() <= f32::EPSILON {
+        f32::INFINITY
+    } else {
+        extent.x / direction.x.abs()
+    };
+    let y = if direction.y.abs() <= f32::EPSILON {
+        f32::INFINITY
+    } else {
+        extent.y / direction.y.abs()
+    };
+    x.min(y)
+}
+
+/// Screen direction of one world axis under the current orbit camera.
+fn spatial_axis_direction(camera: SpatialCamera, axis: SpatialAxis) -> Vec2 {
+    let (cy, sy) = (camera.yaw.cos(), camera.yaw.sin());
+    let sp = camera.pitch.sin();
+    let projected = match axis {
+        SpatialAxis::X => Vec2::new(cy, sp * sy),
+        SpatialAxis::Y => Vec2::new(0.0, camera.pitch.cos()),
+        SpatialAxis::Z => Vec2::new(sy, -sp * cy),
+        SpatialAxis::Free => Vec2::ZERO,
+    };
+    if projected.length_sq() <= 1e-5 {
+        Vec2::RIGHT
+    } else {
+        projected.normalized()
+    }
+}
+
+fn screen_segment_distance(point: Pos2, from: Pos2, to: Pos2) -> f32 {
+    let segment = to - from;
+    let length_sq = segment.length_sq();
+    if length_sq <= f32::EPSILON {
+        return point.distance(from);
+    }
+    let along = ((point - from).dot(segment) / length_sq).clamp(0.0, 1.0);
+    point.distance(from + segment * along)
+}
+
+fn spatial_gizmo_hit(pointer: Pos2, centre: Pos2, camera: SpatialCamera) -> Option<SpatialAxis> {
+    [SpatialAxis::X, SpatialAxis::Y, SpatialAxis::Z]
+        .into_iter()
+        .filter_map(|axis| {
+            let direction = spatial_axis_direction(camera, axis);
+            let distance = screen_segment_distance(
+                pointer,
+                centre + direction * 13.0,
+                centre + direction * 68.0,
+            );
+            (distance <= 8.0).then_some((axis, distance))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(axis, _)| axis)
+}
+
+fn paint_spatial_gizmo(
+    painter: &egui::Painter,
+    centre: Pos2,
+    camera: SpatialCamera,
+    k: Ink,
+    length: f32,
+) {
+    for (axis, tone) in [
+        (SpatialAxis::X, k.accent),
+        (SpatialAxis::Y, k.secondary),
+        (SpatialAxis::Z, k.ink),
+    ] {
+        let direction = spatial_axis_direction(camera, axis);
+        let end = centre + direction * length;
+        let stroke = UiStroke::new(2.0, tone);
+        painter.line_segment([centre, end], stroke);
+        let normal = Vec2::new(-direction.y, direction.x);
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                end,
+                end - direction * 9.0 + normal * 4.0,
+                end - direction * 9.0 - normal * 4.0,
+            ],
+            tone,
+            UiStroke::NONE,
+        ));
+        painter.text(
+            end + direction * 8.0,
+            Align2::CENTER_CENTER,
+            axis.label(),
+            FontId::monospace(10.0),
+            tone,
+        );
+    }
+    painter.circle_filled(centre, 4.0, k.fill);
+    painter.circle_stroke(centre, 4.0, UiStroke::new(1.0, k.faint));
+}
+
+fn spatial_hit(mandala: &Mandala, projected: &[ProjectedNode], pointer: Pos2) -> Option<NodeId> {
+    projected
+        .iter()
+        .filter_map(|projected_node| {
+            let node = mandala.node(projected_node.id)?;
+            // A complete flow is selected by its visible block-to-block edge,
+            // not by an invisible cone-tree handle.
+            if node.shape() == Shape::Arrow && complete_flow(mandala, node.id) {
+                return None;
+            }
+            let scale = projected_node.scale.max(0.6);
+            let resize = node_resize(mandala, node);
+            let offset = (pointer - projected_node.position) / scale;
+            node.shape()
+                .contains(
+                    f64::from(offset.x / resize.x.max(f32::EPSILON)),
+                    f64::from(offset.y / resize.y.max(f32::EPSILON)),
+                )
+                .then_some((
+                    node.id,
+                    projected_node.position.distance(pointer),
+                    projected_node.camera_depth,
+                ))
+        })
+        .min_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then_with(|| left.2.total_cmp(&right.2))
+        })
+        .map(|(id, _, _)| id)
+}
+
+/// Perspective projection for the derived structural model.
+///
+/// Camera math is kept outside the egui event handler so it stays a pure,
+/// testable transformation. Existing canvas placement supplies X/Y while
+/// structural depth supplies Z.
 fn project_spatial(
+    mandala: &Mandala,
     layout: &SpatialLayout,
     rect: Rect,
     camera: SpatialCamera,
@@ -5600,13 +6849,24 @@ fn project_spatial(
             f64::NEG_INFINITY,
         ),
         |(min_x, max_x, min_y, max_y, min_z, max_z), node| {
+            let extent = mandala.extent(node.id);
+            // Framing follows the derived structure, not hand-moved pieces.
+            // Otherwise every gizmo tick recentres/rescales the scene under
+            // the pointer, making direct manipulation feel rubbery.
+            let offset = mandala
+                .node(node.id)
+                .map(|node| node.spatial_offset)
+                .unwrap_or([0.0; 3]);
+            let base_x = node.x - offset[0];
+            let base_y = node.y - offset[1];
+            let base_z = node.z - offset[2];
             (
-                min_x.min(node.x),
-                max_x.max(node.x),
-                min_y.min(node.y),
-                max_y.max(node.y),
-                min_z.min(node.z),
-                max_z.max(node.z),
+                min_x.min(base_x - extent.0),
+                max_x.max(base_x + extent.0),
+                min_y.min(base_y - extent.1),
+                max_y.max(base_y + extent.1),
+                min_z.min(base_z),
+                max_z.max(base_z),
             )
         },
     );
@@ -5656,6 +6916,59 @@ fn project_spatial(
         .collect()
 }
 
+fn spatial_layer_plates(
+    mandala: &Mandala,
+    layout: &SpatialLayout,
+    projected: &[ProjectedNode],
+) -> Vec<SpatialLayerPlate> {
+    let mut depths = layout
+        .nodes
+        .iter()
+        .map(|node| node.depth)
+        .collect::<Vec<_>>();
+    depths.sort_unstable();
+    depths.dedup();
+
+    let mut plates = depths
+        .into_iter()
+        .filter_map(|depth| {
+            let mut count = 0usize;
+            let mut min = Pos2::new(f32::INFINITY, f32::INFINITY);
+            let mut max = Pos2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
+            let mut camera_depth = 0.0f32;
+            for spatial in layout.nodes.iter().filter(|node| node.depth == depth) {
+                let Some(node) = projected.iter().find(|node| node.id == spatial.id) else {
+                    continue;
+                };
+                let extent = mandala.extent(node.id);
+                let pad = Vec2::new(extent.0 as f32, extent.1 as f32) * node.scale;
+                min.x = min.x.min(node.position.x - pad.x);
+                min.y = min.y.min(node.position.y - pad.y);
+                max.x = max.x.max(node.position.x + pad.x);
+                max.y = max.y.max(node.position.y + pad.y);
+                camera_depth += node.camera_depth;
+                count += 1;
+            }
+            if count == 0 {
+                return None;
+            }
+            let centre = Pos2::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5 + 12.0);
+            Some(SpatialLayerPlate {
+                depth,
+                centre,
+                radius: Vec2::new(
+                    ((max.x - min.x) * 0.5 + 34.0).max(76.0),
+                    ((max.y - min.y) * 0.5 + 18.0).max(30.0),
+                ),
+                camera_depth: camera_depth / count as f32,
+            })
+        })
+        .collect::<Vec<_>>();
+    // Paint far receiving planes first, matching the node painter's order.
+    plates.sort_by(|left, right| right.camera_depth.total_cmp(&left.camera_depth));
+    plates
+}
+
 /// Paint and drive the shared screen-neutral Vim editor.
 ///
 /// egui supplies focus, pointer hit-testing, clipboard events, and pixels; all
@@ -5702,7 +7015,7 @@ pub(crate) fn matched_pair(
 
 /// One Rebis syntax colouring, shared by every text surface in the editor.
 ///
-/// Symbols carry the blue, operators and delimiters the red, prompt text stays
+/// Symbols carry the green, operators and delimiters the purple, prompt text stays
 /// ink. Extracted so the Source tab, the mandala's source box, and the run
 /// draft cannot drift into three different-looking editors.
 pub(crate) fn rebis_layout_job(
@@ -5719,16 +7032,17 @@ pub(crate) fn rebis_layout_job(
     job.wrap.max_width = f32::INFINITY;
     for (index, character) in source.chars().enumerate() {
         let tone = match syntax.get(index).copied().unwrap_or(SourceHighlight::Atom) {
-            // Operators and delimiters share one colour — the red — as the
+            // Operators and delimiters share one colour — purple — as the
             // language legend in the top bar does, parentheses included.
             SourceHighlight::Forward
             | SourceHighlight::Backflow
             | SourceHighlight::Mediate
             | SourceHighlight::Import
             | SourceHighlight::Invert
+            | SourceHighlight::Model
             | SourceHighlight::Parenthesis => ink.secondary,
             SourceHighlight::Whitespace | SourceHighlight::Comment => ink.faint,
-            // Symbols carry the blue; prompt text is content and stays ink.
+            // Symbols carry the green; prompt text is content and stays ink.
             SourceHighlight::Atom | SourceHighlight::Invalid => ink.accent,
             SourceHighlight::Prompt => ink.ink,
         };
@@ -6096,11 +7410,20 @@ fn default_text(form: &Form) -> String {
 
 /// Keep long captions from overflowing their shape on the canvas.
 fn truncate(label: &str) -> String {
-    const MAX: usize = 11;
-    if label.chars().count() <= MAX {
+    truncate_chars(label, 11)
+}
+
+/// Model selectors sit outside their shapes, so retain enough of the provider
+/// and model name to distinguish nearby per-block overrides.
+fn truncate_model(label: &str) -> String {
+    truncate_chars(label, 28)
+}
+
+fn truncate_chars(label: &str, max: usize) -> String {
+    if label.chars().count() <= max {
         return label.to_string();
     }
-    let head: String = label.chars().take(MAX - 1).collect();
+    let head: String = label.chars().take(max - 1).collect();
     format!("{head}…")
 }
 
@@ -6484,7 +7807,7 @@ mod tests {
     }
 
     #[test]
-    fn symbols_are_blue_and_operators_red_in_every_editor() {
+    fn symbols_are_green_and_operators_purple_in_every_editor() {
         // One layout function serves the Source tab, the mandala's source box,
         // and the run draft, so pinning it here pins all three.
         let k = crate::theme::Ink::load();
@@ -6492,19 +7815,77 @@ mod tests {
         let job = rebis_layout_job("(-> ab \"p\")", k, 14.0, &|_| false, None);
         let colour = |i: usize| job.sections[i].format.color;
         for (i, what) in [(0, "("), (1, "-"), (2, ">"), (10, ")")] {
-            assert_eq!(colour(i), k.secondary, "operator {what} must be red");
+            assert_eq!(colour(i), k.secondary, "operator {what} must be purple");
         }
         for i in [4, 5] {
-            assert_eq!(colour(i), k.accent, "a symbol must be blue");
+            assert_eq!(colour(i), k.accent, "a symbol must be green");
         }
         // The quote marks themselves are classified Atom by the shared
-        // highlighter, so they take the symbol red; the text between them is
+        // highlighter, so they take the symbol green; the text between them is
         // Prompt and stays ink.
         assert_eq!(colour(8), k.ink, "prompt text stays ink");
         for i in [7, 9] {
             assert_eq!(colour(i), k.accent, "quote marks follow the symbols");
         }
         assert_ne!(k.accent, k.secondary);
+    }
+
+    #[test]
+    fn retained_output_is_split_into_semantic_labels_without_changing_its_body() {
+        assert_eq!(
+            stream_line("event    prompt started · abstraction 2"),
+            StreamLine {
+                tag: Some("event"),
+                body: "prompt started · abstraction 2",
+                kind: StreamKind::Signal,
+            }
+        );
+        assert_eq!(
+            stream_line("complete    ✓ run finished"),
+            StreamLine {
+                tag: Some("complete"),
+                body: "✓ run finished",
+                kind: StreamKind::Success,
+            }
+        );
+        assert_eq!(
+            stream_line("paused      process exited 2"),
+            StreamLine {
+                tag: Some("paused"),
+                body: "process exited 2",
+                kind: StreamKind::Caution,
+            }
+        );
+        assert_eq!(
+            stream_line("provider prose remains intact"),
+            StreamLine {
+                tag: None,
+                body: "provider prose remains intact",
+                kind: StreamKind::Plain,
+            }
+        );
+    }
+
+    #[test]
+    fn visual_chat_separates_fenced_code_from_readable_prose() {
+        assert_eq!(
+            chat_blocks("A result:\n```rust\nfn main() {}\n```\nDone."),
+            vec![
+                ChatBlock::Prose("A result:".to_string()),
+                ChatBlock::Code {
+                    language: "rust".to_string(),
+                    text: "fn main() {}".to_string(),
+                },
+                ChatBlock::Prose("Done.".to_string()),
+            ]
+        );
+        assert_eq!(
+            chat_blocks("```\nunfinished"),
+            vec![ChatBlock::Code {
+                language: String::new(),
+                text: "unfinished".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -6530,22 +7911,11 @@ mod tests {
     }
 
     #[test]
-    fn a_flow_arrow_keeps_its_red_when_the_block_is_selected() {
-        // The hue is what separates a flow from a structural link. Selection is
-        // allowed to thicken an edge and to colour the otherwise-grey `father
-        // of` links, but repainting a flow would erase the one cue that says
-        // what it is — and it does so exactly when the drawing is being read
-        // closest.
+    fn a_flow_arrow_keeps_its_purple_when_the_block_is_selected() {
+        // Nesting has no line of its own. Purple is therefore reserved for the
+        // one remaining connection: an explicit flow operator.
         let k = crate::theme::Ink::load();
-        for touches in [false, true] {
-            assert_eq!(
-                edge_colour(VisibleEdgeKind::Flow, touches, k),
-                k.secondary,
-                "a flow must stay red with touches={touches}"
-            );
-        }
-        assert_eq!(edge_colour(VisibleEdgeKind::Father, false, k), k.faint);
-        assert_eq!(edge_colour(VisibleEdgeKind::Father, true, k), k.accent);
+        assert_eq!(edge_colour(k), k.secondary);
         assert_ne!(k.secondary, k.accent, "the two roles must be distinct");
     }
 
@@ -6869,44 +8239,24 @@ mod tests {
     }
 
     #[test]
-    fn visible_edges_collapse_a_complete_flow_to_one_directional_edge() {
+    fn visible_edges_are_only_flow_operators_between_boundaries() {
         let mut mandala = Mandala::new();
-        let left = mandala.add(Form::Prompt, "left", 0.0, 0.0);
-        let right = mandala.add(Form::Prompt, "right", 200.0, 0.0);
-        let flow = mandala.flow(left, right, Form::Forward).unwrap();
-        let parent = mandala.add(Form::Compose, "", 0.0, -200.0);
-        mandala.father_of(parent, flow);
+        let square = mandala.add(Form::Square, "", 0.0, 0.0);
+        let circle = mandala.add(Form::Compose, "", 200.0, 0.0);
+        let flow = mandala.flow(square, circle, Form::Forward).unwrap();
+        let leaf_a = mandala.add(Form::Prompt, "a", 0.0, 200.0);
+        let leaf_b = mandala.add(Form::Prompt, "b", 200.0, 200.0);
+        let _leaf_flow = mandala.flow(leaf_a, leaf_b, Form::Forward).unwrap();
+        // Stored syntax still has ordered operand relations, but none of those
+        // relations becomes an invented line.
+        mandala.father_of(circle, leaf_a);
 
         let edges = visible_edges(&mandala);
-        assert_eq!(
-            edges
-                .iter()
-                .filter(|edge| edge.kind == VisibleEdgeKind::Flow)
-                .count(),
-            1
-        );
-        assert_eq!(
-            edges
-                .iter()
-                .filter(|edge| edge.kind == VisibleEdgeKind::Father)
-                .count(),
-            1
-        );
-        let flow_edge = edges
-            .iter()
-            .find(|edge| edge.kind == VisibleEdgeKind::Flow)
-            .unwrap();
+        assert_eq!(edges.len(), 1);
+        let flow_edge = edges.first().unwrap();
         assert_eq!(
             (flow_edge.from, flow_edge.to, flow_edge.owner),
-            (left, right, flow)
-        );
-        let father_edge = edges
-            .iter()
-            .find(|edge| edge.kind == VisibleEdgeKind::Father)
-            .unwrap();
-        assert!(
-            is_containment_edge(&mandala, father_edge),
-            "the compose boundary replaces its direct father edge"
+            (square, circle, flow)
         );
     }
 
@@ -6934,6 +8284,50 @@ mod tests {
         assert!(doc.undo());
         assert_eq!(doc.mandala.nodes().len(), 3);
         assert_eq!(doc.mandala.arrows().len(), 2);
+    }
+
+    #[test]
+    fn selected_symbol_copy_paste_keeps_every_hand_set_size() {
+        let mut doc = Doc::default();
+        let circle = doc.mandala.add(Form::Compose, "", 0.0, 0.0);
+        let square = doc.mandala.add(Form::Square, "", 240.0, 0.0);
+        let prompt = doc.mandala.add(Form::Prompt, "large", 480.0, 0.0);
+        doc.mandala.resize(circle, 170.0, 100.0);
+        doc.mandala.resize(square, 190.0, 120.0);
+        doc.mandala.resize(prompt, 88.0, 64.0);
+        doc.select_many([circle, square, prompt], false);
+
+        let copied = doc.copied_selection().unwrap();
+        let pasted = doc.paste_graph(&copied, (28.0, 28.0));
+
+        assert_eq!(
+            doc.mandala.node(pasted[0]).unwrap().size,
+            Some((170.0, 170.0))
+        );
+        assert_eq!(
+            doc.mandala.node(pasted[1]).unwrap().size,
+            Some((190.0, 120.0))
+        );
+        assert_eq!(
+            doc.mandala.node(pasted[2]).unwrap().size,
+            Some((88.0, 64.0))
+        );
+    }
+
+    #[test]
+    fn selecting_and_copying_a_container_keeps_its_visual_content() {
+        let mut doc = Doc::default();
+        let circle = doc.mandala.add(Form::Compose, "", 0.0, 0.0);
+        let content = doc.mandala.add(Form::Prompt, "inside", 30.0, 0.0);
+        doc.mandala.hold(circle, content);
+        doc.select_only(circle);
+        assert_eq!(doc.selected_ids(), BTreeSet::from([circle, content]));
+
+        let copied = doc.copied_selection().unwrap();
+        let pasted = doc.paste_graph(&copied, (28.0, 28.0));
+
+        assert_eq!(pasted.len(), 2);
+        assert_eq!(doc.mandala.holder(pasted[1]), Some(pasted[0]));
     }
 
     #[test]
@@ -6979,10 +8373,13 @@ mod tests {
 
     #[test]
     fn spatial_projection_turns_nesting_depth_into_visible_separation() {
+        let mut mandala = Mandala::new();
+        let first = mandala.add(Form::Prompt, "first", 0.0, 0.0);
+        let second = mandala.add(Form::Prompt, "second", 0.0, 0.0);
         let layout = SpatialLayout {
             nodes: vec![
                 kaos_core::visual::SpatialNode {
-                    id: NodeId(1),
+                    id: first,
                     x: 0.0,
                     y: 0.0,
                     z: 0.0,
@@ -6990,7 +8387,7 @@ mod tests {
                     recursive: false,
                 },
                 kaos_core::visual::SpatialNode {
-                    id: NodeId(2),
+                    id: second,
                     x: 0.0,
                     y: 0.0,
                     z: 140.0,
@@ -7007,10 +8404,81 @@ mod tests {
             zoom: 1.0,
             pan: [0.0, 0.0, 0.0],
         };
-        let projected = project_spatial(&layout, rect, camera);
+        let projected = project_spatial(&mandala, &layout, rect, camera);
         assert_eq!(projected.len(), 2);
         assert_ne!(projected[0].position, projected[1].position);
         assert_ne!(projected[0].camera_depth, projected[1].camera_depth);
+    }
+
+    #[test]
+    fn the_3d_move_gizmo_exposes_each_world_axis_after_orbiting() {
+        let camera = SpatialCamera {
+            yaw: 0.71,
+            pitch: 0.43,
+            ..SpatialCamera::default()
+        };
+        let centre = Pos2::new(200.0, 180.0);
+        for axis in [SpatialAxis::X, SpatialAxis::Y, SpatialAxis::Z] {
+            let direction = spatial_axis_direction(camera, axis);
+            assert!((direction.length() - 1.0).abs() < 1e-5);
+            let pointer = centre + direction * 48.0;
+            assert_eq!(spatial_gizmo_hit(pointer, centre, camera), Some(axis));
+        }
+    }
+
+    #[test]
+    fn deeper_spatial_nodes_cast_longer_softer_shadows() {
+        let root = spatial_shadow_style(0, 1.0, true);
+        let nested = spatial_shadow_style(5, 1.0, true);
+        assert!(nested.offset.length() > root.offset.length());
+        assert!(nested.softness > root.softness);
+        assert!(root.opacity > spatial_shadow_style(0, 1.0, false).opacity);
+    }
+
+    #[test]
+    fn structural_depths_receive_separate_shadow_plates() {
+        let mut mandala = Mandala::new();
+        let first = mandala.add(Form::Prompt, "first", 0.0, 0.0);
+        let second = mandala.add(Form::Square, "", 0.0, 0.0);
+        let layout = SpatialLayout {
+            nodes: vec![
+                kaos_core::visual::SpatialNode {
+                    id: first,
+                    x: -100.0,
+                    y: 0.0,
+                    z: 0.0,
+                    depth: 0,
+                    recursive: false,
+                },
+                kaos_core::visual::SpatialNode {
+                    id: second,
+                    x: 100.0,
+                    y: 0.0,
+                    z: 300.0,
+                    depth: 1,
+                    recursive: false,
+                },
+            ],
+            recursive_edges: Vec::new(),
+        };
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let projected = project_spatial(&mandala, &layout, rect, SpatialCamera::default());
+        let plates = spatial_layer_plates(&mandala, &layout, &projected);
+
+        assert_eq!(plates.len(), 2);
+        assert_eq!(
+            plates
+                .iter()
+                .map(|plate| plate.depth)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 1])
+        );
+        assert!(plates
+            .iter()
+            .all(|plate| plate.radius.x >= 76.0 && plate.radius.y >= 30.0));
+        assert!(plates
+            .windows(2)
+            .all(|pair| pair[0].camera_depth >= pair[1].camera_depth));
     }
 
     #[test]

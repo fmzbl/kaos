@@ -248,7 +248,7 @@ pub(crate) fn install_theme(ctx: &egui::Context, k: Ink) {
     visuals.popup_shadow = egui::epaint::Shadow::NONE;
 
     // egui's defaults still carry unrelated colours in a few corners. Remove
-    // those so the shared deep-blue accent and its red second stay the only
+    // those so the shared green accent and its purple second stay the only
     // chromatic roles.
     visuals.hyperlink_color = k.accent;
     visuals.warn_fg_color = k.ink;

@@ -72,10 +72,12 @@ fn main() {
 
     const SIZE: usize = 900;
     // The pane's own dark palette, so the preview reads like the pane does.
-    let ground = (14u8, 14u8, 16u8);
-    let faint = (78u8, 82u8, 92u8);
-    let ink = (198u8, 202u8, 210u8);
-    let accent = (232u8, 118u8, 62u8);
+    let palette = kaos_core::theme::palette(kaos_core::theme::Mode::Dark);
+    let ground = palette.ground;
+    let faint = palette.faint;
+    let ink = palette.ink;
+    let accent = palette.accent;
+    let secondary = palette.secondary;
 
     let mut canvas = Canvas::new(SIZE, SIZE, ground);
     let centre = (SIZE as f32 / 2.0, SIZE as f32 / 2.0);
@@ -163,7 +165,7 @@ fn main() {
                 ..
             } => {
                 let base = match stream {
-                    kaos_visual::automata_preview::BinaryStream::Prompt => (92, 138, 204),
+                    kaos_visual::automata_preview::BinaryStream::Prompt => secondary,
                     kaos_visual::automata_preview::BinaryStream::Response => accent,
                 };
                 let weight = 0.35 + value as f32 / 255.0 * 0.65;

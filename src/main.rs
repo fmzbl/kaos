@@ -1,6 +1,7 @@
 //! kaos — the terminal app for the Pact.
 //!
-//! A red-themed REPL whose commands are `/slash`-prefixed. Type a bare intent to
+//! A green-led REPL with purple flow accents. Commands are `/slash`-prefixed;
+//! type a bare intent to
 //! set the adept to work; use `/cast` for a one-shot rite; use `/help` for the
 //! grimoire. One-shot mode mirrors every command (`kaos bench 300 2026`,
 //! `kaos cast "fix the deadlock"`, `kaos roster`, …).
@@ -71,11 +72,11 @@ fn attach_cmd(session: &mut Session, arg: &str) {
         if session.attachments.is_empty() {
             println!("  {}", ash("no files attached. /attach <path> to add one."));
         } else {
-            println!("  {}", bold(RED(), "ATTACHED"));
+            println!("  {}", bold(GREEN(), "ATTACHED"));
             for (p, c) in &session.attachments {
                 println!(
                     "    {} {}",
-                    fg((190, 150, 90), p),
+                    fg(PURPLE(), p),
                     dim(ASH(), &format!("({} bytes)", c.len()))
                 );
             }
@@ -93,7 +94,7 @@ fn attach_cmd(session: &mut Session, arg: &str) {
             session.attachments.retain(|(p, _)| p != arg);
             println!(
                 "  {} {} {}",
-                fg((90, 200, 110), "\u{2734} attached"),
+                fg(GREEN(), "\u{2734} attached"),
                 bone(arg),
                 dim(ASH(), &format!("({} bytes)", c.len()))
             );
@@ -101,7 +102,7 @@ fn attach_cmd(session: &mut Session, arg: &str) {
         }
         Err(e) => println!(
             "  {} {}",
-            fg(RED(), &format!("could not read {arg}:")),
+            fg(GREEN(), &format!("could not read {arg}:")),
             ash(&e.to_string())
         ),
     }
@@ -358,7 +359,7 @@ fn cast_live(session: &mut Session, task: &str) {
     println!("{}", rule(60));
     println!(
         "  {} {}  {}",
-        bold(RED(), "RITE"),
+        bold(GREEN(), "RITE"),
         bone(task),
         dim(ASH(), &format!("[{}]", session.model.label())),
     );
@@ -395,7 +396,10 @@ fn cast_live(session: &mut Session, task: &str) {
         Err(e) => {
             println!(
                 "{}",
-                fg(RED(), &format!("\u{2734} the charge fizzles \u{2014} {e}"))
+                fg(
+                    GREEN(),
+                    &format!("\u{2734} the charge fizzles \u{2014} {e}")
+                )
             );
         }
     }
@@ -426,7 +430,7 @@ fn scry(task: &str) {
 
     println!();
     println!("{}", rule(60));
-    println!("  {} {}", bold(RED(), "SCRY"), bone(task));
+    println!("  {} {}", bold(GREEN(), "SCRY"), bone(task));
     render_sigil_block(&sigil, ray);
     println!(
         "  {} {} {}",
@@ -446,7 +450,7 @@ fn scry(task: &str) {
     println!(
         "  {} {}",
         ash("forecast M (cold, no shared mind):"),
-        bold(RED(), &format!("{:.1}%", m * 100.0)),
+        bold(GREEN(), &format!("{:.1}%", m * 100.0)),
     );
 
     // The divination proper: the SECOND equation, Pm = P + (1−P)·M^(1/P), read as
@@ -466,7 +470,7 @@ fn scry(task: &str) {
             "    {}  {} {}  {}",
             dim(ASH(), &format!("P={p:.1}")),
             ash(&format!("\u{2192} Pm={pm:.2}")),
-            fg(RED(), &bar),
+            fg(GREEN(), &bar),
             dim(ASH(), &format!("(+{gain:.2})")),
         );
     }
@@ -510,7 +514,7 @@ fn auth_cmd(arg: &str) {
         "claude" | "claude-cli" | "cli"
     ) {
         println!();
-        println!("  {}", bold(RED(), "auth \u{2014} claude CLI"));
+        println!("  {}", bold(GREEN(), "auth \u{2014} claude CLI"));
         println!(
             "  {}",
             ash("the claude backend uses your claude.ai login, not an API key.")
@@ -527,10 +531,10 @@ fn auth_cmd(arg: &str) {
         match kaos::auth::forget(second) {
             Ok(var) => println!(
                 "  {} {}",
-                fg(RED(), "\u{2734} forgot"),
+                fg(GREEN(), "\u{2734} forgot"),
                 ash(&format!("{var} cleared from store and env"))
             ),
-            Err(e) => println!("  {} {}", fg(RED(), "\u{2734}"), ash(&e.to_string())),
+            Err(e) => println!("  {} {}", fg(GREEN(), "\u{2734}"), ash(&e.to_string())),
         }
         return;
     }
@@ -541,7 +545,7 @@ fn auth_cmd(arg: &str) {
             Ok((var, path)) => {
                 println!(
                     "  {} {}",
-                    bold(RED(), "\u{25c9} stored"),
+                    bold(GREEN(), "\u{25c9} stored"),
                     ash(&format!("{var} saved to {}", path.display()))
                 );
                 println!(
@@ -552,7 +556,7 @@ fn auth_cmd(arg: &str) {
                     )
                 );
             }
-            Err(e) => println!("  {} {}", fg(RED(), "\u{2734}"), ash(&e.to_string())),
+            Err(e) => println!("  {} {}", fg(GREEN(), "\u{2734}"), ash(&e.to_string())),
         }
         return;
     }
@@ -567,7 +571,7 @@ fn auth_cmd(arg: &str) {
             ),
             None => println!(
                 "  {} {}",
-                fg(RED(), "\u{2734}"),
+                fg(GREEN(), "\u{2734}"),
                 ash(&format!(
                     "unknown provider '{first}' \u{2014} openrouter | openai | anthropic | claude"
                 ))
@@ -578,11 +582,11 @@ fn auth_cmd(arg: &str) {
 
     // No args → the status board.
     println!();
-    println!("  {}", bold(RED(), "AUTH \u{2014} provider credentials"));
+    println!("  {}", bold(GREEN(), "AUTH \u{2014} provider credentials"));
     println!("{}", rule(64));
     for (name, var, live, saved) in kaos::auth::status() {
         let mark = if live {
-            fg((90, 200, 120), "\u{25cf} set  ")
+            fg(GREEN(), "\u{25cf} set  ")
         } else {
             dim(ASH(), "\u{25cb} unset")
         };
@@ -603,7 +607,7 @@ fn auth_cmd(arg: &str) {
     println!(
         "    {:<11} {}  {}",
         "claude",
-        fg((90, 200, 120), "\u{25cf} login"),
+        fg(GREEN(), "\u{25cf} login"),
         dim(
             ASH(),
             "claude.ai subscription \u{2014} `claude login`, no key"
@@ -636,7 +640,7 @@ fn conclave(session: &Session, task: &str) {
     println!();
     println!(
         "  {} {} {}",
-        bold(RED(), "CONCLAVE"),
+        bold(GREEN(), "CONCLAVE"),
         ash("for the"),
         bold(ray.rgb(), &format!("{} ray", ray.name())),
     );
@@ -660,20 +664,20 @@ fn run_myth(session: &Session, sexpr: &str, task: &str) {
     let node = match kaos::myth::parse(sexpr) {
         Ok(n) => n,
         Err(e) => {
-            println!("  {} {}", fg(RED(), "\u{2734} myth:"), ash(&e));
+            println!("  {} {}", fg(GREEN(), "\u{2734} myth:"), ash(&e));
             return;
         }
     };
     if let Err(e) = session.model.readiness() {
         println!(
             "  {} {}",
-            fg(RED(), "\u{2734} the mind is unreachable \u{2014}"),
+            fg(GREEN(), "\u{2734} the mind is unreachable \u{2014}"),
             ash(&e)
         );
         return;
     }
     println!("{}", rule(64));
-    println!("  {}  {}", bold(RED(), "myth"), dim(ASH(), sexpr));
+    println!("  {}  {}", bold(GREEN(), "myth"), dim(ASH(), sexpr));
     let task = format!("{}{}", attachment_block(session), task);
     // KAOS_AGENTIC turns every leaf into a real Conductor session (read/edit/bash in
     // an isolated copy) instead of a single completion — the myth *acts*. Its verdict
@@ -696,7 +700,7 @@ fn run_myth(session: &Session, sexpr: &str, task: &str) {
         // Cost exposure up front — an agentic leaf is a whole session, not one call.
         println!(
             "  {}  {}",
-            fg((210, 160, 60), "\u{26a0} cost"),
+            fg(PURPLE(), "\u{26a0} cost"),
             ash(&format!(
                 "up to {leaves} sessions \u{00d7} {steps} steps = ~{} model calls on {} ({} at a time). ^C to abort.",
                 leaves * steps,
@@ -729,12 +733,12 @@ fn run_myth(session: &Session, sexpr: &str, task: &str) {
     match verdict {
         Some(a) => println!(
             "  {} {}",
-            bold(RED(), "\u{25c9} verdict"),
+            bold(GREEN(), "\u{25c9} verdict"),
             bone(&kaos::solve::render_verdict(&a))
         ),
         None => println!(
             "  {}",
-            fg(RED(), "\u{2734} no answer \u{2014} every branch fizzled")
+            fg(GREEN(), "\u{2734} no answer \u{2014} every branch fizzled")
         ),
     }
 }
@@ -755,7 +759,7 @@ fn rebis_screen(arg: &str) {
         }
 
         if arg.trim().is_empty() {
-            println!("{}", kaos::theme::chaos_star_red());
+            println!("{}", kaos::theme::chaos_star_green());
             return;
         }
         let source = if std::path::Path::new(arg.trim()).is_file() {
@@ -787,7 +791,7 @@ fn myth_screen(session: &Session) {
     print!("\x1b[2J\x1b[H"); // clear + home
     let _ = io::stdout().flush();
     println!();
-    println!("  {}", bold(RED(), "THE MYTH \u{2014} weave a myth"));
+    println!("  {}", bold(GREEN(), "THE MYTH \u{2014} weave a myth"));
     println!("{}", rule(64));
     println!(
         "  {}",
@@ -798,27 +802,27 @@ fn myth_screen(session: &Session) {
     );
     println!(
         "    {}  {}",
-        bold((190, 150, 90), "fire         "),
+        bold(PURPLE(), "fire         "),
         ash("one model call")
     );
     println!(
         "    {}  {}",
-        bold((190, 150, 90), "(ask \"role\")  "),
+        bold(PURPLE(), "(ask \"role\")  "),
         ash("a call with an instruction   (a stage's job)")
     );
     println!(
         "    {}  {}",
-        bold((190, 150, 90), "(spread N X) "),
+        bold(PURPLE(), "(spread N X) "),
         ash("run X, N ways   (diverge)")
     );
     println!(
         "    {}  {}",
-        bold((190, 150, 90), "(gather G X) "),
+        bold(PURPLE(), "(gather G X) "),
         ash("collapse X via gate G   (converge)")
     );
     println!(
         "    {}  {}",
-        bold((190, 150, 90), "(pipe A B …) "),
+        bold(PURPLE(), "(pipe A B …) "),
         ash("each stage's answer feeds the next   (sequence)")
     );
     println!(
@@ -841,16 +845,16 @@ fn myth_screen(session: &Session) {
     }
     let mut input = kaos::input::Prompt::new();
     let sexpr = loop {
-        match input.read(&format!("  {} ", fg(RED(), "myth \u{25b8}"))) {
+        match input.read(&format!("  {} ", fg(GREEN(), "myth \u{25b8}"))) {
             kaos::input::Line::Eof => return,
             kaos::input::Line::Text(t) if t.trim().is_empty() => return,
             kaos::input::Line::Text(t) => match kaos::myth::parse(t.trim()) {
                 Ok(_) => break t.trim().to_string(),
-                Err(e) => println!("  {} {}", fg(RED(), "\u{2734}"), ash(&e)),
+                Err(e) => println!("  {} {}", fg(GREEN(), "\u{2734}"), ash(&e)),
             },
         }
     };
-    match input.read(&format!("  {} ", fg(RED(), "task \u{25b8}"))) {
+    match input.read(&format!("  {} ", fg(GREEN(), "task \u{25b8}"))) {
         kaos::input::Line::Text(t) if !t.trim().is_empty() => run_myth(session, &sexpr, t.trim()),
         _ => {}
     }
@@ -859,10 +863,10 @@ fn myth_screen(session: &Session) {
 /// /roster — the full Pact, by grade.
 fn print_roster(pact: &Pact) {
     println!();
-    println!("  {}", bold(RED(), "THE PACT"));
+    println!("  {}", bold(GREEN(), "THE PACT"));
     println!("{}", rule(60));
     for (n, line) in pact.roster().iter().enumerate() {
-        let colour = if n == 0 { RED() } else { ASH() };
+        let colour = if n == 0 { GREEN() } else { ASH() };
         println!("  {}", fg(colour, line));
     }
     println!("{}", rule(60));
@@ -883,12 +887,15 @@ fn print_egregore(pact: &Pact) {
     println!();
     println!(
         "  {}",
-        bold(RED(), "THE EGREGORE \u{2014} the Pact's shared mind")
+        bold(GREEN(), "THE EGREGORE \u{2014} the Pact's shared mind")
     );
     println!(
         "  {} {}",
         ash("awakeness"),
-        bold(RED(), &format!("{:.0}%", pact.egregore.awakeness() * 100.0)),
+        bold(
+            GREEN(),
+            &format!("{:.0}%", pact.egregore.awakeness() * 100.0)
+        ),
     );
     if pact.egregore.ledger.is_empty() {
         println!(
@@ -1200,13 +1207,27 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
         scope: &rebis_lang::ExecutionScope,
         call: usize,
     ) -> Result<Option<String>, String> {
+        self.try_fire_routed(prompt, None, scope, call)
+    }
+
+    fn try_fire_routed(
+        &self,
+        prompt: &str,
+        model_selector: Option<&str>,
+        scope: &rebis_lang::ExecutionScope,
+        call: usize,
+    ) -> Result<Option<String>, String> {
+        let selected_model = model_selector.map(Spec::parse);
+        let model = selected_model.as_ref().unwrap_or(self.model);
+        let model_key = model.canonical();
+        let checkpoint_prompt = format!("MODEL {model_key}\n{prompt}");
         let branch_seed = if scope.is_root() {
             String::new()
         } else {
             format!("|{scope}|{call}")
         };
         let mut sampling = kaos::backend::Sampling::seeded(hash_str(&format!(
-            "rebis-agent|{}{branch_seed}|{prompt}",
+            "rebis-agent|{}{branch_seed}|{model_key}|{prompt}",
             if self.chaos { "chaos" } else { "normal" },
         )));
         sampling.temperature = kaos::spiral::Polarity::Solar.temperature();
@@ -1215,11 +1236,20 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
         if let kaos::rebis_checkpoint::Replay::Hit(answer) =
-            self.journal.replay_scoped(scope, call, prompt)
+            self.journal.replay_scoped(scope, call, &checkpoint_prompt)
         {
             println!("checkpoint replayed · Rebis prompt {agent} already complete");
             let _ = std::io::stdout().flush();
             return Ok(answer);
+        }
+        if model.kind == Kind::Simulated {
+            return Err(
+                "simulated provider has no live model — bind this block or the session to a live model"
+                    .to_string(),
+            );
+        }
+        if let Err(error) = model.readiness() {
+            return Err(format!("model {} unavailable: {error}", model.canonical()));
         }
         let directive = self
             .directive_path
@@ -1250,13 +1280,13 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             effective_prompt.lines().next().unwrap_or("working")
         ));
         let timeout_s = rebis_timeout_s();
-        let model_label = self.model.label();
+        let model_label = model.label();
         if !self.allow_tools {
             println!("model    generating turn 1 · {model_label} · NORMAL · limit {timeout_s}s");
             let _ = std::io::stdout().flush();
             let system = kaos::conductor::rebis_agent_system_prompt();
             let response = loop {
-                match self.model.complete_sampled(
+                match model.complete_sampled(
                     &system,
                     &effective_prompt,
                     std::time::Duration::from_secs(timeout_s),
@@ -1289,7 +1319,12 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             let _ = std::io::stdout().flush();
             let answer = response.trim().to_string();
             kaos::fold::close();
-            return self.finish_prompt(scope, call, prompt, (!answer.is_empty()).then_some(answer));
+            return self.finish_prompt(
+                scope,
+                call,
+                &checkpoint_prompt,
+                (!answer.is_empty()).then_some(answer),
+            );
         }
 
         let root = match &self.worktrees {
@@ -1302,7 +1337,7 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
                  branches, or worktrees; Kaos reconciles working-tree edits at the square join."
             )
         });
-        if !self.chaos && self.model.kind == Kind::ClaudeCli {
+        if !self.chaos && model.kind == Kind::ClaudeCli {
             println!("model    direct Claude agent · {model_label} · native tools enabled");
             let task = format!(
                 "{}\n\nYou are operating directly in this workspace:\n{}\n\nUse your native \
@@ -1317,7 +1352,7 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
                 let response = kaos::backend::run_claude_agent_once_with_result(
                     &root,
                     &task,
-                    self.model.claude_tag(),
+                    model.claude_tag(),
                     |line| {
                         for rendered in kaos::backend::claude_event_lines(line) {
                             println!("{rendered}");
@@ -1343,7 +1378,12 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             };
             let answer = response.trim().to_string();
             kaos::fold::close();
-            return self.finish_prompt(scope, call, prompt, (!answer.is_empty()).then_some(answer));
+            return self.finish_prompt(
+                scope,
+                call,
+                &checkpoint_prompt,
+                (!answer.is_empty()).then_some(answer),
+            );
         }
 
         println!(
@@ -1387,7 +1427,7 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             let session = run_session_with_timeout(
                 &root,
                 &task,
-                self.model,
+                model,
                 sampling,
                 max_steps(),
                 timeout_s,
@@ -1432,7 +1472,12 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             }
         }
         kaos::fold::close();
-        self.finish_prompt(scope, call, prompt, (!answer.is_empty()).then_some(answer))
+        self.finish_prompt(
+            scope,
+            call,
+            &checkpoint_prompt,
+            (!answer.is_empty()).then_some(answer),
+        )
     }
 
     fn begin_parallel(
@@ -1644,16 +1689,6 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
         let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
     }
     let mut record = rebis_lang::Record::from_texts(&[input]);
-    if !dry {
-        if session.model.kind == Kind::Simulated {
-            eprintln!("rebis: bind a live mind with KAOS_MODEL, or use `run --dry`");
-            std::process::exit(2);
-        }
-        if let Err(error) = session.model.readiness() {
-            eprintln!("rebis: model unavailable: {error}");
-            std::process::exit(2);
-        }
-    }
     let mut stream = |event: &rebis_lang::ExecutionEvent| {
         use rebis_lang::{ExecutionEvent, FlowDirection};
         match event {
@@ -2083,7 +2118,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
     if let Err(e) = spec.readiness() {
         println!(
             "  {} {}",
-            fg(RED(), "\u{2734} the mind is unreachable \u{2014}"),
+            fg(GREEN(), "\u{2734} the mind is unreachable \u{2014}"),
             ash(&e)
         );
         return;
@@ -2096,7 +2131,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
     }
 
     println!();
-    println!("  {}  {}", bold(RED(), "CONDUCT"), bone(&task));
+    println!("  {}  {}", bold(GREEN(), "CONDUCT"), bone(&task));
     println!(
         "  {} {}   {} {}",
         ash("ground"),
@@ -2114,7 +2149,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
         println!(
             "  {} {}   {} {}",
             ash("conclave"),
-            bold(RED(), &format!("k={k} adepts, verified best-of-k")),
+            bold(GREEN(), &format!("k={k} adepts, verified best-of-k")),
             ash("gate"),
             dim(ASH(), gate),
         );
@@ -2122,7 +2157,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
         println!(
             "  {} {}   {} {}",
             ash("quorum"),
-            bold(RED(), "adaptive — grows only if the Weighing fails"),
+            bold(GREEN(), "adaptive — grows only if the Weighing fails"),
             ash(if divined { "gate (divined)" } else { "gate" }),
             dim(ASH(), verify_cmd.as_deref().unwrap_or("")),
         );
@@ -2331,10 +2366,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
         if outcome.verified {
             println!(
                 "  {}  {}",
-                bold(
-                    (90, 200, 110),
-                    "\u{2734} the Work is done \u{2014} weighed true"
-                ),
+                bold(GREEN(), "\u{2734} the Work is done \u{2014} weighed true"),
                 dim(
                     ASH(),
                     &format!("({} attempt(s); review with git diff)", outcome.attempts)
@@ -2343,7 +2375,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
         } else {
             println!(
                 "  {}  {}",
-                fg(RED(), "\u{2734} the Weighing never passed"),
+                fg(GREEN(), "\u{2734} the Weighing never passed"),
                 ash(&format!(
                     "after {} attempt(s) \u{2014} the edits stand for your review; the gate says what remains",
                     outcome.attempts
@@ -2363,10 +2395,10 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
                 println!("{rendered}");
             }
         }) {
-            Ok(()) => println!("\n  {}", bold((90, 200, 110), "\u{2734} the Work is done")),
+            Ok(()) => println!("\n  {}", bold(GREEN(), "\u{2734} the Work is done")),
             Err(e) => println!(
                 "\n  {} {}",
-                fg(RED(), "\u{2734} the Work falters \u{2014}"),
+                fg(GREEN(), "\u{2734} the Work falters \u{2014}"),
                 ash(&e)
             ),
         }
@@ -2409,7 +2441,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
             !out.starts_with("exit 0")
         };
         if forged {
-            println!("  {}", bold(RED(), "\u{2692} the gate is forged \u{2014} kaos_repro.py fails as the issue describes"));
+            println!("  {}", bold(GREEN(), "\u{2692} the gate is forged \u{2014} kaos_repro.py fails as the issue describes"));
             let gnosis = kaos::spiral::gnosis(&forge_session);
             // The Lost Sigil (G14): the metric is banished from the context.
             // The self is told a hidden Weighing judges it — never which file,
@@ -2455,7 +2487,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
                 println!(
                     "  {}  {}",
                     bold(
-                        (90, 200, 110),
+                        GREEN(),
                         "\u{2734} the Work is done \u{2014} weighed true by the forged gate"
                     ),
                     dim(ASH(), &format!("({} attempt(s))", outcome.attempts)),
@@ -2463,7 +2495,7 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
             } else {
                 println!(
                     "  {}  {}",
-                    fg(RED(), "\u{2734} the forged Weighing never passed"),
+                    fg(GREEN(), "\u{2734} the forged Weighing never passed"),
                     ash(&format!(
                         "after {} attempt(s) \u{2014} the edits stand for review",
                         outcome.attempts
@@ -2542,19 +2574,19 @@ fn code_task(session: &Session, arg: &str, raw_chat_task: bool) {
     if let Some(err) = &session_out.error {
         println!(
             "  {} {}",
-            fg(RED(), "\u{2734} the Work falters \u{2014}"),
+            fg(GREEN(), "\u{2734} the Work falters \u{2014}"),
             ash(err)
         );
     } else if session_out.finished {
         println!(
             "  {}  {}",
-            bold((90, 200, 110), "\u{2734} the Work is done"),
+            bold(GREEN(), "\u{2734} the Work is done"),
             ash(&session_out.final_message),
         );
     } else {
         println!(
             "  {}  {}",
-            fg(RED(), "\u{2734} budget spent"),
+            fg(GREEN(), "\u{2734} budget spent"),
             ash("the Work stands unfinished")
         );
     }
@@ -2637,9 +2669,9 @@ fn code_conclave(
                     open_fold = false;
                 }
                 let mark = if verified {
-                    bold((90, 200, 110), "\u{2713} adept weighed true")
+                    bold(GREEN(), "\u{2713} adept weighed true")
                 } else {
-                    fg(RED(), "\u{2717} adept false")
+                    fg(GREEN(), "\u{2717} adept false")
                 };
                 println!(
                     "  {} {}  {}",
@@ -2654,7 +2686,7 @@ fn code_conclave(
             ConclaveEvent::Adjourned { convened, k } => {
                 println!(
                 "  {}  {}",
-                bold(RED(), "\u{2734} the quorum adjourns"),
+                bold(GREEN(), "\u{2734} the quorum adjourns"),
                 dim(ASH(), &format!(
                     "the vote is beyond overturning after {convened}/{k} adepts \u{2014} the rest are never summoned"
                 )),
@@ -2674,7 +2706,7 @@ fn code_conclave(
                 };
                 println!(
                     "  {}  {}",
-                    bold((90, 200, 110), "\u{2734} SHIPPED"),
+                    bold(GREEN(), "\u{2734} SHIPPED"),
                     ash(&format!(
                     "adept {}'s {how} diff \u{2014} {votes}/{k} agreed, {files} file(s) written",
                     winner + 1,
@@ -2689,13 +2721,13 @@ fn code_conclave(
                 if gated {
                     println!(
                         "  {}  {}",
-                        fg(RED(), "\u{2734} nothing ships"),
+                        fg(GREEN(), "\u{2734} nothing ships"),
                         ash("no adept's diff passed the gate \u{2014} the project is untouched")
                     );
                 } else {
                     println!(
                         "  {}  {}",
-                        fg(RED(), "\u{2734} nothing ships"),
+                        fg(GREEN(), "\u{2734} nothing ships"),
                         ash("no adept finished with a diff")
                     );
                 }
@@ -2709,7 +2741,7 @@ fn code_conclave(
         }
         println!(
             "  {} {}",
-            fg(RED(), "\u{2734} the conclave falters \u{2014}"),
+            fg(GREEN(), "\u{2734} the conclave falters \u{2014}"),
             ash(&e.to_string())
         );
     }
@@ -2718,11 +2750,6 @@ fn code_conclave(
 /// Render one agent step live and *compressed*: file edits become a two-line
 /// `-/+` diff, writes a `+A -B` summary, and command runs show the command and a
 /// condensed result. Everything is one-lined and truncated so it streams tightly.
-const GREEN: (u8, u8, u8) = (90, 200, 110);
-const REMOVE: (u8, u8, u8) = (210, 70, 70);
-const AMBER: (u8, u8, u8) = (220, 150, 60);
-const AZURE: (u8, u8, u8) = (74, 124, 240);
-
 fn render_step(n: usize, step: &Step) {
     let idx = dim(ASH(), &format!("{n:>2}"));
     // The adept's narration — what it says it is doing — streams LIVE above the
@@ -2737,7 +2764,10 @@ fn render_step(n: usize, step: &Step) {
         {
             println!(
                 "     {}",
-                dim(AZURE, &format!("\u{263d} {}", trunc_line(line.trim(), 92)))
+                dim(
+                    GREEN(),
+                    &format!("\u{263d} {}", trunc_line(line.trim(), 92))
+                )
             );
         }
     }
@@ -2746,7 +2776,7 @@ fn render_step(n: usize, step: &Step) {
             println!(
                 "  {} {} {}",
                 idx,
-                fg(AZURE, "\u{25cb} read"),
+                fg(GREEN(), "\u{25cb} read"),
                 dim(ASH(), path)
             );
         }
@@ -2756,32 +2786,37 @@ fn render_step(n: usize, step: &Step) {
             replace,
         } => {
             // The change, as a REAL diff streamed inline (bounded; full in the fold).
-            println!("  {} {} {}", idx, bold(AMBER, "\u{00b1} edit"), bone(path));
-            inline_diff(find, '-', REMOVE);
-            inline_diff(replace, '+', GREEN);
+            println!(
+                "  {} {} {}",
+                idx,
+                bold(PURPLE(), "\u{00b1} edit"),
+                bone(path)
+            );
+            inline_diff(find, '-', PURPLE());
+            inline_diff(replace, '+', GREEN());
         }
         Tool::WriteFile { path, contents } => {
             // The conductor's observation already carries "+A -B" / "N lines".
             println!(
                 "  {} {} {}  {}",
                 idx,
-                bold(AMBER, "\u{271a} write"),
+                bold(PURPLE(), "\u{271a} write"),
                 bone(path),
-                dim(GREEN, &one_line(step.observation.trim(), 60)),
+                dim(GREEN(), &one_line(step.observation.trim(), 60)),
             );
             // A created/rewritten file shows its head inline, like a diff.
-            inline_diff(contents, '+', GREEN);
+            inline_diff(contents, '+', GREEN());
         }
         Tool::Bash { cmd } => {
             // Code execution: the command, then a condensed result.
             println!(
                 "  {} {} {}",
                 idx,
-                bold(RED(), "$"),
+                bold(GREEN(), "$"),
                 bone(&one_line(cmd, 84))
             );
             let (exit, tail) = bash_result(&step.observation);
-            let colour = if exit == "exit 0" { GREEN } else { REMOVE };
+            let colour = if exit == "exit 0" { GREEN() } else { PURPLE() };
             let line = if tail.is_empty() {
                 exit.clone()
             } else {
@@ -2799,7 +2834,7 @@ fn render_step(n: usize, step: &Step) {
             println!(
                 "  {} {} {}",
                 idx,
-                fg(AMBER, "\u{23f0} timer"),
+                fg(PURPLE(), "\u{23f0} timer"),
                 bone(&one_line(after, 12))
             );
             println!(
@@ -2810,7 +2845,7 @@ fn render_step(n: usize, step: &Step) {
         }
         Tool::Finish { message } => {
             // The final message is the deliverable — as long as it needs to be.
-            println!("  {} {}", idx, bold((90, 200, 110), "\u{2691} finish"));
+            println!("  {} {}", idx, bold(GREEN(), "\u{2691} finish"));
             for line in message.lines().filter(|l| !l.trim().is_empty()) {
                 println!("     {}", bone(line));
             }
@@ -2872,7 +2907,7 @@ fn render_step_detail(n: usize, step: &Step) {
         &format!("    \u{22ef} step {n} in full \u{2014} {title}"),
     ));
     if !step.thought.is_empty() {
-        println!("  {}", fg(AZURE, "\u{263d} complete model text:"));
+        println!("  {}", fg(GREEN(), "\u{263d} complete model text:"));
         for l in step.thought.lines() {
             println!("    {}", dim(ASH(), l));
         }
@@ -2881,10 +2916,10 @@ fn render_step_detail(n: usize, step: &Step) {
         Tool::EditFile { find, replace, .. } => {
             println!("  {}", ash("the exact change:"));
             for l in find.lines() {
-                println!("    {}", fg(REMOVE, &format!("- {l}")));
+                println!("    {}", fg(PURPLE(), &format!("- {l}")));
             }
             for l in replace.lines() {
-                println!("    {}", fg(GREEN, &format!("+ {l}")));
+                println!("    {}", fg(GREEN(), &format!("+ {l}")));
             }
         }
         Tool::WriteFile { contents, .. } => {
@@ -2896,7 +2931,7 @@ fn render_step_detail(n: usize, step: &Step) {
                 ))
             );
             for l in contents.lines() {
-                println!("    {}", fg(GREEN, &format!("+ {l}")));
+                println!("    {}", fg(GREEN(), &format!("+ {l}")));
             }
         }
         Tool::Bash { .. } => {
@@ -2968,7 +3003,10 @@ fn forge_cmd(arg: &str) {
     let (foi, verify) = match agent::write_demo_arena(&dir) {
         Ok(x) => x,
         Err(e) => {
-            println!("{}", fg(RED(), &format!("could not raise the arena: {e}")));
+            println!(
+                "{}",
+                fg(GREEN(), &format!("could not raise the arena: {e}"))
+            );
             return;
         }
     };
@@ -2978,7 +3016,7 @@ fn forge_cmd(arg: &str) {
     println!();
     println!(
         "  {}  {}",
-        bold(RED(), "FORGE"),
+        bold(GREEN(), "FORGE"),
         dim(
             ASH(),
             "the Conclave mends real files; the tests weigh the heart"
@@ -2998,7 +3036,7 @@ fn forge_cmd(arg: &str) {
             "the tests must pass \u{2014} nothing unweighed ships"
         )
     );
-    println!("  {} {}", ash("before"), fg(RED(), before.trim()));
+    println!("  {} {}", ash("before"), fg(GREEN(), before.trim()));
     println!("{}", rule(64));
 
     // Convene the adepts.
@@ -3058,7 +3096,7 @@ fn forge_cmd(arg: &str) {
     let verdict = match agent::solve(&dir, "fix add(a,b)", &foi_refs, &verify, &agents, &mut rng) {
         Ok(v) => v,
         Err(e) => {
-            println!("{}", fg(RED(), &format!("the Work falters \u{2014} {e}")));
+            println!("{}", fg(GREEN(), &format!("the Work falters \u{2014} {e}")));
             let _ = std::fs::remove_dir_all(&dir);
             return;
         }
@@ -3067,13 +3105,13 @@ fn forge_cmd(arg: &str) {
     // Each adept's verdict at the scales.
     for a in &verdict.attempts {
         let mark = if a.passed {
-            bold((90, 200, 110), "weighed true \u{2713}")
+            bold(GREEN(), "weighed true \u{2713}")
         } else {
-            fg(RED(), "false \u{2717}")
+            fg(GREEN(), "false \u{2717}")
         };
         println!(
             "  {:<20} {}  {}",
-            bold(RED(), &a.adept),
+            bold(GREEN(), &a.adept),
             mark,
             dim(ASH(), &a.note)
         );
@@ -3084,7 +3122,7 @@ fn forge_cmd(arg: &str) {
         let after = std::fs::read_to_string(dir.join("sol.py")).unwrap_or_default();
         println!(
             "  {}  {} {}",
-            bold((90, 200, 110), "\u{2734} SHIPPED"),
+            bold(GREEN(), "\u{2734} SHIPPED"),
             dim(
                 ASH(),
                 &format!("{}/{} weighed true", verdict.passed, verdict.k)
@@ -3104,15 +3142,15 @@ fn forge_cmd(arg: &str) {
             "  {} {}",
             ash("feather:"),
             if final_ok {
-                bold((90, 200, 110), "true")
+                bold(GREEN(), "true")
             } else {
-                fg(RED(), "false")
+                fg(GREEN(), "false")
             }
         );
     } else {
         println!(
             "  {}  {}",
-            fg(RED(), "\u{2734} nothing ships"),
+            fg(GREEN(), "\u{2734} nothing ships"),
             ash(&format!(
                 "0/{} weighed true \u{2014} the gate holds",
                 verdict.k
@@ -3129,7 +3167,7 @@ fn models_cmd(session: &Session, arg: &str) {
     let bound = session.model.canonical();
     let mark = |c: &str| {
         if c == bound {
-            bold(RED(), "\u{2734} ")
+            bold(GREEN(), "\u{2734} ")
         } else {
             "  ".to_string()
         }
@@ -3140,7 +3178,10 @@ fn models_cmd(session: &Session, arg: &str) {
     println!();
     println!(
         "  {}",
-        bold(RED(), "THE MINDS \u{2014} every model the Pact can summon")
+        bold(
+            GREEN(),
+            "THE MINDS \u{2014} every model the Pact can summon"
+        )
     );
     println!(
         "  {}",
@@ -3181,7 +3222,7 @@ fn models_cmd(session: &Session, arg: &str) {
         println!(
             "  {}{}  {}",
             mark(tok),
-            bold(RED(), &format!("{tok:<24}")),
+            bold(GREEN(), &format!("{tok:<24}")),
             dim(ASH(), desc)
         );
     }
@@ -3194,7 +3235,7 @@ fn models_cmd(session: &Session, arg: &str) {
         if keyed("ANTHROPIC_API_KEY") {
             dim(ASH(), "\u{2014} ANTHROPIC_API_KEY set")
         } else {
-            fg(RED(), "\u{2014} needs ANTHROPIC_API_KEY")
+            fg(GREEN(), "\u{2014} needs ANTHROPIC_API_KEY")
         },
     );
     for tok in [
@@ -3217,7 +3258,7 @@ fn models_cmd(session: &Session, arg: &str) {
             dim(ASH(), "\u{2014} OPENAI_API_KEY set")
         } else {
             fg(
-                RED(),
+                GREEN(),
                 "\u{2014} needs OPENAI_API_KEY (OPENAI_BASE_URL for compatibles)",
             )
         },
@@ -3237,7 +3278,7 @@ fn models_cmd(session: &Session, arg: &str) {
         if keyed("OPENROUTER_API_KEY") {
             dim(ASH(), "\u{2014} OPENROUTER_API_KEY set")
         } else {
-            fg(RED(), "\u{2014} needs OPENROUTER_API_KEY")
+            fg(GREEN(), "\u{2014} needs OPENROUTER_API_KEY")
         },
     );
     for (tok, desc) in [
@@ -3302,7 +3343,7 @@ fn models_cmd(session: &Session, arg: &str) {
     println!(
         "  {}{}  {}",
         mark("sim"),
-        bold(RED(), &format!("{:<24}", "sim")),
+        bold(GREEN(), &format!("{:<24}", "sim")),
         dim(
             ASH(),
             "offline simulation \u{2014} the equation decides, no model"
@@ -3318,7 +3359,10 @@ fn openrouter_catalog(mark: &dyn Fn(&str) -> String) {
     println!();
     println!(
         "  {}",
-        bold(RED(), "THE ROUTER \u{2014} every mind behind openrouter.ai")
+        bold(
+            GREEN(),
+            "THE ROUTER \u{2014} every mind behind openrouter.ai"
+        )
     );
     print!("  {}", dim(ASH(), "consulting the catalog\u{2026}"));
     io::stdout().flush().ok();
@@ -3327,7 +3371,10 @@ fn openrouter_catalog(mark: &dyn Fn(&str) -> String) {
         Err(e) => {
             println!(
                 "\r  {}",
-                fg(RED(), &format!("\u{2734} the catalog would not open: {e}"))
+                fg(
+                    GREEN(),
+                    &format!("\u{2734} the catalog would not open: {e}")
+                )
             );
             return;
         }
@@ -3380,7 +3427,11 @@ fn openrouter_catalog(_mark: &dyn Fn(&str) -> String) {
 fn model_cmd(session: &mut Session, arg: &str) {
     let arg = arg.trim();
     if arg.is_empty() {
-        println!("  {} {}", ash("bound"), bold(RED(), &session.model.label()));
+        println!(
+            "  {} {}",
+            ash("bound"),
+            bold(GREEN(), &session.model.label())
+        );
         // Which HTTP providers hold a key.
         let mut ready = Vec::new();
         if std::env::var("ANTHROPIC_API_KEY").is_ok() {
@@ -3414,7 +3465,11 @@ fn model_cmd(session: &mut Session, arg: &str) {
     let warn = spec.readiness().err();
     let canonical = spec.canonical();
     session.model = spec;
-    println!("  {} {}", ash("bound"), bold(RED(), &session.model.label()));
+    println!(
+        "  {} {}",
+        ash("bound"),
+        bold(GREEN(), &session.model.label())
+    );
     // The fullscreen app handles `/model` locally; this path covers the classic
     // prompt and `kaos model …`. Tests must never rewrite the developer's config.
     if cfg!(not(test)) {
@@ -3424,13 +3479,13 @@ fn model_cmd(session: &mut Session, arg: &str) {
                 ash("remembered"),
                 dim(ASH(), &path.display().to_string())
             ),
-            Err(error) => println!("  {} {}", fg(RED(), "✴ could not remember"), ash(&error)),
+            Err(error) => println!("  {} {}", fg(GREEN(), "✴ could not remember"), ash(&error)),
         }
     }
     if let Some(w) = warn {
         println!(
             "  {} {}",
-            fg(RED(), "\u{2734} but"),
+            fg(GREEN(), "\u{2734} but"),
             ash(&format!(
                 "{w} \u{2014} the mind will not answer until it is set"
             ))
@@ -3441,7 +3496,7 @@ fn model_cmd(session: &mut Session, arg: &str) {
 /// /banish — laughter scatters the work. The Pact reconvenes from nothing.
 fn banish_session(session: &mut Session) {
     session.pact = Pact::convene();
-    println!("  {}", bold(RED(), "HA HA HA \u{2014} banished."));
+    println!("  {}", bold(GREEN(), "HA HA HA \u{2014} banished."));
     println!(
         "  {}",
         dim(
@@ -3456,7 +3511,7 @@ fn banish_session(session: &mut Session) {
 fn render_rite(rite: &Rite) {
     println!();
     println!("{}", rule(62));
-    println!("  {} {}", bold(RED(), "RITE"), bone(&rite.task));
+    println!("  {} {}", bold(GREEN(), "RITE"), bone(&rite.task));
     render_sigil_block(&rite.sigil, rite.ray);
     println!(
         "  {}",
@@ -3466,9 +3521,9 @@ fn render_rite(rite: &Rite) {
 
     for (n, att) in rite.attempts.iter().enumerate() {
         let verb = if att.charge.fired {
-            bold((90, 200, 110), "CHARGED TRUE")
+            bold(GREEN(), "CHARGED TRUE")
         } else {
-            fg(RED(), "fizzled")
+            fg(GREEN(), "fizzled")
         };
         println!(
             "  {} {} {} {}",
@@ -3481,7 +3536,7 @@ fn render_rite(rite: &Rite) {
         println!(
             "      {} {}",
             ash("M ="),
-            bold(RED(), &format!("{:.1}%", att.charge.magic_factor * 100.0)),
+            bold(GREEN(), &format!("{:.1}%", att.charge.magic_factor * 100.0)),
         );
         if !att.charge.fired && n + 1 < rite.attempts.len() {
             println!(
@@ -3498,7 +3553,7 @@ fn render_rite(rite: &Rite) {
     if let (true, Some(last)) = (rite.succeeded, rite.final_attempt()) {
         println!(
             "  {}  {} {} {}",
-            bold((90, 200, 110), "\u{2734} WEIGHED TRUE \u{2014} shipped"),
+            bold(GREEN(), "\u{2734} WEIGHED TRUE \u{2014} shipped"),
             ash("by"),
             bold(rite.ray.rgb(), &last.adept_name),
             dim(ASH(), &format!("on life {}", rite.attempts.len())),
@@ -3506,7 +3561,7 @@ fn render_rite(rite: &Rite) {
     } else {
         println!(
             "  {}  {}",
-            fg(RED(), "\u{2734} the heart was not weighed true"),
+            fg(GREEN(), "\u{2734} the heart was not weighed true"),
             ash("\u{2014} the work was not shipped (no false positives pass the gate)"),
         );
     }
@@ -3523,7 +3578,7 @@ fn render_sigil_block(sigil: &Sigil, ray: Ray) {
             &format!("{} \u{2014} {}", ray.name(), ray.sphere())
         ),
         ash("sigil"),
-        bold(RED(), &sigil.glyph()),
+        bold(GREEN(), &sigil.glyph()),
     );
     println!(
         "  {} {}   {} {}   {} {}",
@@ -3532,11 +3587,11 @@ fn render_sigil_block(sigil: &Sigil, ray: Ray) {
         ash("compressed"),
         bone(&format!("{:.0}%", sigil.compression() * 100.0)),
         ash("\u{2192} A ="),
-        bold(RED(), &format!("{:.2}", sigil.awareness())),
+        bold(GREEN(), &format!("{:.2}", sigil.awareness())),
     );
 }
 
-/// The four factors of Carroll's equation, in a single line, red for emphasis.
+/// The four factors of Carroll's equation, in a single line, green for emphasis.
 fn render_equation(eq: &kaos::equation::Equation, current: Current) {
     let cur = match current {
         Current::Inhibitory => "still",
@@ -3561,11 +3616,11 @@ fn render_equation(eq: &kaos::equation::Equation, current: Current) {
 
 fn banner(session: &Session) {
     println!();
-    println!("{}", chaos_star_red());
+    println!("{}", chaos_star_green());
     println!();
     println!(
         "  {}  {}",
-        bold(RED(), "\u{2734} kaos"),
+        bold(GREEN(), "\u{2734} kaos"),
         dim(ASH(), "\u{2014} the Pact convenes."),
     );
     println!(
@@ -3585,7 +3640,7 @@ fn banner(session: &Session) {
 
 fn print_help() {
     println!();
-    println!("  {}", bold(RED(), "GRIMOIRE \u{2014} commands"));
+    println!("  {}", bold(GREEN(), "GRIMOIRE \u{2014} commands"));
     let cmds: &[(&str, &str)] = &[
         ("/cast <intent>", "cast the Work (or just speak it)"),
         (
@@ -3640,7 +3695,7 @@ fn print_help() {
         ("/quit", "close the temple"),
     ];
     for (c, d) in cmds {
-        println!("    {}  {}", bold(RED(), &format!("{:<32}", c)), ash(d));
+        println!("    {}  {}", bold(GREEN(), &format!("{:<32}", c)), ash(d));
     }
     println!();
     println!(
@@ -3654,7 +3709,10 @@ fn print_help() {
 
 fn print_rays() {
     println!();
-    println!("  {}", bold(RED(), "THE EIGHT MAGICS \u{2014} Liber Kaos"));
+    println!(
+        "  {}",
+        bold(GREEN(), "THE EIGHT MAGICS \u{2014} Liber Kaos")
+    );
     for ray in Ray::all() {
         println!(
             "    {} {}",

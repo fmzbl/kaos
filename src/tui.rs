@@ -1,7 +1,7 @@
 //! The fullscreen app — a ratatui terminal UI for the Pact.
 //!
 //! A scrollable transcript, an input line with arrow-key history, a status bar, and
-//! the red Chaos Star on the splash. Commands are executed by re-invoking the `kaos`
+//! the green Chaos Star on the splash. Commands are executed by re-invoking the `kaos`
 //! binary in one-shot mode as a **subprocess**, whose themed ANSI output is streamed
 //! back through a pipe and rendered into the transcript with `ansi-to-tui`. That way
 //! ratatui owns the screen (the subprocess writes to a pipe, never the terminal), and
@@ -44,7 +44,7 @@ use crate::rebis_workspace::{
 use crate::theme;
 
 // The terminal palette follows the configured mode (`/theme dark|light`).
-// Structure stays neutral grey; deep blue marks focus and red marks flow.
+// Structure stays neutral grey; green marks focus and purple marks flow.
 fn tone(rgb: (u8, u8, u8)) -> Color {
     Color::Rgb(rgb.0, rgb.1, rgb.2)
 }
@@ -52,7 +52,7 @@ fn c_ink() -> Color {
     tone(crate::theme::current().ink)
 }
 #[allow(non_snake_case)]
-fn C_RED() -> Color {
+fn C_PRIMARY() -> Color {
     tone(crate::theme::current().accent)
 }
 #[allow(non_snake_case)]
@@ -67,14 +67,14 @@ fn C_ASH() -> Color {
 fn C_BONE() -> Color {
     tone(crate::theme::current().ink)
 }
-// The accents. With colour gone these separate by brightness instead of hue,
-// which is why the palette carries a `mid` tone between ink and faint.
+// The two chromatic roles are a primary green and secondary purple; neutral
+// structure still separates by brightness through the `mid` and `faint` tones.
 /// The page the whole app is drawn on.
 fn c_ground() -> Color {
     tone(crate::theme::current().ground)
 }
 #[allow(non_snake_case)]
-fn C_GOLD() -> Color {
+fn C_ACCENT() -> Color {
     tone(crate::theme::current().accent)
 }
 /// Rebis symbols — the language's own words, in the main accent.
@@ -86,7 +86,7 @@ fn C_SYMBOL() -> Color {
 fn C_SECONDARY() -> Color {
     tone(crate::theme::current().secondary)
 }
-/// A finished run. Formerly green; now simply the brightest tone.
+/// A finished run uses the brightest neutral tone.
 #[allow(non_snake_case)]
 fn C_DONE() -> Color {
     tone(crate::theme::current().ink)
@@ -244,8 +244,8 @@ fn missing_command_argument(query: &str, command: CommandSpec) -> bool {
         && query.trim_end() == command.insert.trim_end()
 }
 
-fn red_bold() -> Style {
-    Style::new().fg(C_RED()).add_modifier(Modifier::BOLD)
+fn primary_bold() -> Style {
+    Style::new().fg(C_PRIMARY()).add_modifier(Modifier::BOLD)
 }
 
 /// Render a status line while reserving the right edge for the selected model.
@@ -262,7 +262,7 @@ fn render_footer_with_model(f: &mut Frame, area: Rect, status: Line<'_>, model: 
             badge,
             Style::new()
                 .fg(Color::Black)
-                .bg(C_GOLD())
+                .bg(C_ACCENT())
                 .add_modifier(Modifier::BOLD),
         ))
         .alignment(Alignment::Right),
@@ -1067,11 +1067,11 @@ impl App {
     fn splash(&mut self) {
         self.push_line(Line::raw(""));
         for l in theme::chaos_star_lines() {
-            self.push_line(Line::from(Span::styled(l.to_string(), red_bold())));
+            self.push_line(Line::from(Span::styled(l.to_string(), primary_bold())));
         }
         self.push_line(Line::raw(""));
         self.push_line(Line::from(vec![
-            Span::styled("✴ kaos", red_bold()),
+            Span::styled("✴ kaos", primary_bold()),
             Span::styled("  — the Pact convenes.", Style::new().fg(C_ASH())),
         ]));
         self.push_line(Line::from(Span::styled(
@@ -1711,7 +1711,7 @@ impl App {
                 })
                 .count();
             self.push_line(Line::from(vec![
-                Span::styled("↶ unqueued ", Style::new().fg(C_GOLD())),
+                Span::styled("↶ unqueued ", Style::new().fg(C_ACCENT())),
                 Span::styled(label.clone(), Style::new().fg(C_BONE())),
             ]));
             if let Some(workspace) = &mut self.rebis {
@@ -1974,7 +1974,8 @@ impl App {
         // screen, a viewport follows the cursor instead of clipping its tail.
         const PROMPT: &str = "✴ ❯ ";
         let full_w = f.area().width.max(1) as usize;
-        let mut input_cells: Vec<(char, Style)> = PROMPT.chars().map(|c| (c, red_bold())).collect();
+        let mut input_cells: Vec<(char, Style)> =
+            PROMPT.chars().map(|c| (c, primary_bold())).collect();
         let bone = Style::new().fg(C_BONE());
         input_cells.extend(self.input.chars().map(|c| (c, bone)));
         let input_rows = hard_wrap(&input_cells, full_w);
@@ -2000,7 +2001,7 @@ impl App {
         // Title bar.
         let mind = crate::provider::Spec::parse(&self.model).label();
         let title = Line::from(vec![
-            Span::styled("✴ kaos", red_bold()),
+            Span::styled("✴ kaos", primary_bold()),
             Span::raw("   "),
             Span::styled(format!("mind:{mind}"), Style::new().fg(C_ASH())),
         ]);
@@ -2080,7 +2081,7 @@ impl App {
         // Status bar: the yolo question takes precedence, then the live spinner.
         let status = if self.pending.is_some() {
             Line::from(vec![
-                Span::styled("grant full authority?  ", red_bold()),
+                Span::styled("grant full authority?  ", primary_bold()),
                 Span::styled(
                     "[y] unbound   [n] edits only   [Esc] cancel",
                     Style::new().fg(C_ASH()),
@@ -2108,7 +2109,7 @@ impl App {
                     return Line::from(vec![
                         Span::styled(
                             "Ⅱ paused  ",
-                            Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD),
+                            Style::new().fg(C_ACCENT()).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(job.label.clone(), Style::new().fg(C_BONE())),
                         Span::styled(
@@ -2142,7 +2143,7 @@ impl App {
                 let room = (rows[3].width as usize).saturating_sub(head.chars().count() + 3);
                 let act = truncate(&self.activity, room.max(4));
                 Line::from(vec![
-                    Span::styled(format!("{frame} "), red_bold()),
+                    Span::styled(format!("{frame} "), primary_bold()),
                     Span::styled(job.label.clone(), Style::new().fg(C_BONE())),
                     Span::styled(format!("  {secs}s"), Style::new().fg(C_OX())),
                     Span::styled(parallel, Style::new().fg(C_SECONDARY())),
@@ -2180,7 +2181,7 @@ impl App {
                 let above = self.scroll;
                 let below = max_scroll.saturating_sub(self.scroll);
                 Line::from(vec![
-                    Span::styled("\u{25b2} scrollback ", red_bold()),
+                    Span::styled("\u{25b2} scrollback ", primary_bold()),
                     Span::styled(
                         format!("{above} above · {below} below — PgDn / End to return to live"),
                         Style::new().fg(C_ASH()),
@@ -2269,10 +2270,10 @@ impl App {
                 } else if resumable {
                     Span::styled(
                         "  Ⅱ paused · p retries the unfinished prompt",
-                        Style::new().fg(C_GOLD()),
+                        Style::new().fg(C_ACCENT()),
                     )
                 } else {
-                    Span::styled(format!("  ✴ exited ({code})"), Style::new().fg(C_RED()))
+                    Span::styled(format!("  ✴ exited ({code})"), Style::new().fg(C_PRIMARY()))
                 };
                 self.push_line(Line::from(note));
                 self.push_line(Line::raw(""));
@@ -2321,7 +2322,7 @@ impl App {
                 } else {
                     Span::styled(
                         format!("  chat run #{chat_id} exited ({code})"),
-                        Style::new().fg(C_RED()),
+                        Style::new().fg(C_PRIMARY()),
                     )
                 };
                 self.push_line(Line::from(note));
@@ -2334,7 +2335,7 @@ impl App {
             } else {
                 Span::styled(
                     format!("  ∥ run #{id} paused ({code}) · p retries"),
-                    Style::new().fg(C_GOLD()),
+                    Style::new().fg(C_ACCENT()),
                 )
             };
             self.push_line(Line::from(note));
@@ -2830,7 +2831,7 @@ impl App {
                     let selected = Some(i) == sel_idx;
                     let caret = if f.collapsed { "▸" } else { "▾" };
                     let head_style = if selected {
-                        red_bold()
+                        primary_bold()
                     } else {
                         Style::new().fg(C_OX()).add_modifier(Modifier::BOLD)
                     };
@@ -4646,7 +4647,9 @@ impl App {
         }
         self.push_line(Line::from(vec![Span::styled(
             "sessions",
-            Style::default().fg(C_RED()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(C_PRIMARY())
+                .add_modifier(Modifier::BOLD),
         )]));
         for (i, s) in list.iter().enumerate().take(30) {
             self.push_line(Line::from(format!(
@@ -4682,11 +4685,13 @@ impl App {
                 self.sel_fold = None;
                 self.push_line(Line::from(vec![Span::styled(
                     format!("resumed {}  ({})", found.id, session.title()),
-                    Style::default().fg(C_RED()).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(C_PRIMARY())
+                        .add_modifier(Modifier::BOLD),
                 )]));
                 for turn in &session.turns {
                     let (tag, colour) = match turn.role {
-                        crate::sessions::Role::User => ("you", C_RED()),
+                        crate::sessions::Role::User => ("you", C_PRIMARY()),
                         crate::sessions::Role::Model => ("model", C_ASH()),
                     };
                     for (i, line) in turn.text.lines().enumerate() {
@@ -4754,7 +4759,7 @@ impl App {
     /// Echo a submitted/dequeued line into the transcript as the prompt row.
     fn echo_prompt(&mut self, line: &str) {
         self.push_line(Line::from(vec![
-            Span::styled("✴ ❯ ", red_bold()),
+            Span::styled("✴ ❯ ", primary_bold()),
             Span::styled(line.to_string(), Style::new().fg(C_BONE())),
         ]));
         self.follow = true;
@@ -5203,7 +5208,7 @@ impl App {
             self.pending = Some(args);
             self.push_line(Line::from(Span::styled(
                 "  ⚠ the adept will act on these files. grant full authority?",
-                red_bold(),
+                primary_bold(),
             )));
             self.push_line(Line::from(Span::styled(
                 "     [y] unbound — it may run shell (tests, git, anything)     [n] edits only",
@@ -6270,10 +6275,10 @@ fn draw_rebis_workspace(
     let modified = if workspace.editor.dirty() { " [+]" } else { "" };
     let title_spans = if config_document {
         vec![
-            Span::styled("⚙ CONFIG", red_bold()),
+            Span::styled("⚙ CONFIG", primary_bold()),
             Span::raw("   "),
             Span::styled(workspace.path_label(), Style::new().fg(C_ASH())),
-            Span::styled(modified, Style::new().fg(C_GOLD())),
+            Span::styled(modified, Style::new().fg(C_ACCENT())),
         ]
     } else {
         let mut spans = vec![
@@ -6281,7 +6286,7 @@ fn draw_rebis_workspace(
                 "o-[]-o",
                 Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  REBIS", red_bold()),
+            Span::styled("  REBIS", primary_bold()),
             Span::raw("   "),
         ];
         for symbol in rebis_workspace::REBIS_SYMBOLS {
@@ -6290,7 +6295,7 @@ fn draw_rebis_workspace(
         spans.extend([
             Span::raw("  "),
             Span::styled(workspace.path_label(), Style::new().fg(C_ASH())),
-            Span::styled(modified, Style::new().fg(C_GOLD())),
+            Span::styled(modified, Style::new().fg(C_ACCENT())),
         ]);
         spans
     };
@@ -6317,7 +6322,7 @@ fn draw_rebis_workspace(
             } else {
                 " SOURCE "
             },
-            Style::new().fg(C_GOLD()),
+            Style::new().fg(C_ACCENT()),
         ));
     let editor_inner = editor_block.inner(editor_area);
     f.render_widget(editor_block, editor_area);
@@ -6349,7 +6354,7 @@ fn draw_rebis_workspace(
         let graph_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::new().fg(if workspace.graph_focus {
-                C_GOLD()
+                C_ACCENT()
             } else {
                 C_OX()
             }))
@@ -6375,7 +6380,7 @@ fn draw_rebis_workspace(
                 .iter()
                 .map(|line| {
                     let style = if line.starts_with("you     ") {
-                        Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD)
+                        Style::new().fg(C_ACCENT()).add_modifier(Modifier::BOLD)
                     } else if line.starts_with("system  ") || line == "GOD CHANNEL" {
                         Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
                     } else {
@@ -6402,9 +6407,9 @@ fn draw_rebis_workspace(
                 .border_style(Style::new().fg(if workspace.sigil_chat_busy() {
                     C_SECONDARY()
                 } else {
-                    C_GOLD()
+                    C_ACCENT()
                 }))
-                .title(Span::styled(input_title, Style::new().fg(C_GOLD())));
+                .title(Span::styled(input_title, Style::new().fg(C_ACCENT())));
             let input_inner = input_block.inner(chat_areas[1]);
             f.render_widget(input_block, chat_areas[1]);
             f.render_widget(
@@ -6429,7 +6434,7 @@ fn draw_rebis_workspace(
                     let style = if line.starts_with("o-[]-o") {
                         Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
                     } else if matches!(line.as_str(), "REGION TREE" | "DIRECTED FLOW") {
-                        Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD)
+                        Style::new().fg(C_ACCENT()).add_modifier(Modifier::BOLD)
                     } else if line.contains('→') || line.contains('←') {
                         Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
                     } else if line.contains('[') {
@@ -6487,7 +6492,7 @@ fn draw_rebis_workspace(
                             if *index == selected {
                                 Style::new()
                                     .fg(Color::Black)
-                                    .bg(C_GOLD())
+                                    .bg(C_ACCENT())
                                     .add_modifier(Modifier::BOLD)
                             } else {
                                 Style::new().fg(C_BONE())
@@ -6522,7 +6527,7 @@ fn draw_rebis_workspace(
                                     .fg(if *kind == RebisRunSectionKind::Agent {
                                         C_SECONDARY()
                                     } else {
-                                        C_GOLD()
+                                        C_ACCENT()
                                     })
                                     .add_modifier(Modifier::BOLD)
                             } else {
@@ -6541,7 +6546,7 @@ fn draw_rebis_workspace(
                 })
                 .collect::<Vec<_>>();
             let border = if workspace.graph_focus {
-                C_GOLD()
+                C_ACCENT()
             } else {
                 C_OX()
             };
@@ -6552,7 +6557,7 @@ fn draw_rebis_workspace(
                         .border_style(Style::new().fg(border))
                         .title(Span::styled(
                             " RUNS · j/k RUN · c CHAT · ↑/↓ SCROLL · ⇧↓ TAIL · Pg SCROLL · Tab OPEN ",
-                            Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD),
+                            Style::new().fg(C_ACCENT()).add_modifier(Modifier::BOLD),
                         )),
                 ),
                 area,
@@ -6628,11 +6633,11 @@ fn draw_rebis_workspace(
         Line::from(vec![
             Span::styled(
                 "✗ INVALID  ",
-                Style::new().fg(C_RED()).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_PRIMARY()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 truncate(&detail, rows[2].width.saturating_sub(11) as usize),
-                Style::new().fg(C_RED()),
+                Style::new().fg(C_PRIMARY()),
             ),
         ])
     } else {
@@ -6659,7 +6664,7 @@ fn draw_rebis_workspace(
                 } else {
                     "/"
                 },
-                red_bold(),
+                primary_bold(),
             ),
             Span::styled(workspace.command.clone(), Style::new().fg(C_BONE())),
         ])
@@ -6706,7 +6711,7 @@ fn draw_rebis_workspace(
             ),
             Span::styled(
                 queued,
-                Style::new().fg(C_GOLD()).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_ACCENT()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 truncate(&workspace.message, message_width),
@@ -6797,7 +6802,11 @@ fn render_rebis_source(
         let mut spans = vec![
             Span::styled(
                 format!("{:>number_width$} ", row + 1),
-                Style::new().fg(if row == cursor_row { C_GOLD() } else { C_OX() }),
+                Style::new().fg(if row == cursor_row {
+                    C_ACCENT()
+                } else {
+                    C_OX()
+                }),
             ),
             Span::styled("│", Style::new().fg(C_OX())),
         ];
@@ -6809,7 +6818,7 @@ fn render_rebis_source(
                 style = style.bg(C_OX()).add_modifier(Modifier::BOLD);
             }
             if error == Some(index) {
-                style = style.fg(C_RED()).add_modifier(Modifier::UNDERLINED);
+                style = style.fg(C_PRIMARY()).add_modifier(Modifier::UNDERLINED);
             }
             if visual.is_some_and(|(start, end)| index >= start && index <= end) {
                 style = style.bg(C_SECONDARY()).add_modifier(Modifier::BOLD);
@@ -6870,7 +6879,7 @@ fn render_chaos_star(f: &mut Frame, area: Rect) {
         for (column, glyph) in line.chars().take(star_width as usize).enumerate() {
             if !glyph.is_whitespace() {
                 f.render_widget(
-                    Paragraph::new(Line::from(Span::styled(glyph.to_string(), red_bold()))),
+                    Paragraph::new(Line::from(Span::styled(glyph.to_string(), primary_bold()))),
                     Rect::new(star_area.x + column as u16, star_area.y + row as u16, 1, 1),
                 );
             }
@@ -6896,7 +6905,7 @@ fn render_subtle_chaos_star(f: &mut Frame, area: Rect) {
     }
     let left = area.right().saturating_sub(width + 1);
     let top = area.bottom().saturating_sub(height + 1);
-    let style = Style::new().fg(C_RED()).add_modifier(Modifier::DIM);
+    let style = Style::new().fg(C_PRIMARY()).add_modifier(Modifier::DIM);
     let buffer = f.buffer_mut();
     for (row, line) in star.into_iter().enumerate() {
         for (column, glyph) in line.chars().enumerate() {
@@ -6917,7 +6926,7 @@ fn render_subtle_chaos_star(f: &mut Frame, area: Rect) {
 fn rebis_highlight_style(highlight: Highlight) -> Style {
     match highlight {
         // Symbols are the language's own words — macro names, parameters,
-        // deterministic mediators — and they carry the blue. Prompt text is the
+        // deterministic mediators — and they carry the green. Prompt text is the
         // content the program is *about*, so it stays plain ink: the eye should
         // find the structure, not be dragged into the strings.
         Highlight::Atom => Style::new().fg(C_SYMBOL()),
@@ -6926,6 +6935,7 @@ fn rebis_highlight_style(highlight: Highlight) -> Style {
         | Highlight::Mediate
         | Highlight::Import
         | Highlight::Invert
+        | Highlight::Model
         | Highlight::Backflow
         | Highlight::Parenthesis => rebis_operator_style(),
         Highlight::Whitespace => Style::new().fg(C_BONE()),
@@ -6936,7 +6946,7 @@ fn rebis_highlight_style(highlight: Highlight) -> Style {
     }
 }
 
-/// Operators and delimiters share one colour — the red — as the language
+/// Operators and delimiters share one colour — purple — as the language
 /// legend in the top bar does.
 fn rebis_operator_style() -> Style {
     Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
@@ -7827,7 +7837,7 @@ mod tests {
             .unwrap();
         let centre = &terminal.backend().buffer()[(16, 6)];
         assert_eq!(centre.symbol(), "•");
-        assert_eq!(centre.fg, C_RED());
+        assert_eq!(centre.fg, C_PRIMARY());
         assert!(centre.modifier.contains(Modifier::DIM));
 
         terminal
@@ -8559,7 +8569,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("( ) [ ] ~ # ' , $ % ^ & -> <- ; \""));
+        assert!(screen.contains("( ) [ ] ~ # ' , $ % ^ & / -> <- ; \""));
 
         let operator_style = rebis_operator_style();
         for highlight in [
@@ -8567,6 +8577,7 @@ mod tests {
             Highlight::Mediate,
             Highlight::Import,
             Highlight::Invert,
+            Highlight::Model,
             Highlight::Backflow,
             Highlight::Parenthesis,
         ] {
@@ -8575,7 +8586,7 @@ mod tests {
     }
 
     #[test]
-    fn symbols_are_blue_and_operators_red_in_the_terminal_editor() {
+    fn symbols_are_green_and_operators_purple_in_the_terminal_editor() {
         // The same scheme the visual editor pins: the two frontends must not
         // colour the same program differently.
         assert_eq!(rebis_highlight_style(Highlight::Atom).fg, Some(C_SYMBOL()));
@@ -9939,7 +9950,7 @@ mod tests {
 
         let mut cells = "✴ ❯ "
             .chars()
-            .map(|character| (character, red_bold()))
+            .map(|character| (character, primary_bold()))
             .collect::<Vec<_>>();
         cells.extend(prompt.chars().map(|character| (character, Style::new())));
         let rows = hard_wrap(&cells, 32);

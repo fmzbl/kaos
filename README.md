@@ -104,7 +104,19 @@ Rebis programs are made from a small set of structural forms:
 | `(~ name (args) body)` | Define a structural macro; its parameters are its variables. |
 | `(# module)` | Import definitions without executing the module. |
 | `'form` and `,value` | Quote a macro-template program and splice caller syntax. |
+| `E/provider:model` | Optionally route every model call in expression `E` through that model. |
 | `; comment` | Comment to end of line, except inside a quoted prompt. |
+
+Model bindings are lexical. An inner suffix overrides its parent only for that
+subtree; after it finishes, execution restores the parent, and an unbound form
+uses the session model selected by `/model`. Write the suffix adjacent to a
+closing quote or `)`, as in `"draft"/ollama:qwen4:4b`,
+`(-> "a" "b")/claude:opus5`, or
+`(["judge"] "a" "b")/openrouter:anthropic/claude-opus-4`. Kaos parses each
+selector through the same provider registry as `/model`; the binding changes
+routing only and adds no model call. Availability is checked for the effective
+model when a call actually fires, so an unused session default does not block a
+fully bound program.
 
 Macro parameters hold Rebis syntax, not pre-evaluated strings. Passing a quoted
 prompt therefore keeps it executable after substitution:
@@ -489,11 +501,13 @@ records, and draws source onto a canvas. It can run the program, a text
 selection, or the form at the caret, serially or in parallel; block runs carry
 the source's top-level imports and definitions just as terminal `/run block`
 does. Drawing source lays the syntax tree out as a left-to-right circuit:
-nesting depth is the column, a tidy row packing stacks subtrees, and
-connections route as right-angle traces between the shapes (calls are drawn as
-a parallelogram, a `(& port …)` input as an inlet). Selecting a node turns its
-attached `father of` connections deep blue and thickens every attached edge;
-flow arrows keep their red, since that is the colour carrying direction.
+nesting depth is the column, resized symbol bounds determine indentation and
+non-overlapping row bands, and circle/square contents use compact golden-angle
+Fibonacci spirals. Nesting itself has no invented connector: a circle or square
+is the indentation. The only drawn connections are purple `->`/`<-` operators
+between circle/square blocks, routed as right-angle traces by default (calls are
+drawn as a parallelogram, a `(& port …)` input as an inlet). Selection thickens
+an attached flow without changing its purple directional role.
 Holding **Shift** while completing a connection
 draws that one as a straight angled line instead of the default 90° routing. A
 drawing's `edit as text` goes the other way. The sigil browser supports
@@ -501,7 +515,11 @@ draw/edit/chat actions for personal and embedded `std/` entries, with delete
 limited to personal sigils.
 
 Chat browses and resumes the same durable sessions `/resume` reads in the
-terminal app. The **Actions** tab exposes the remaining terminal capabilities
+terminal app. User and model turns have separate green/purple cards; headings,
+lists, quotes, and fenced code receive readable typography. Retained run output
+uses colored semantic tags (`EVENT`, `PROMPT`, `RESULT`, `PAUSED`, and so on)
+without changing the raw stream copied or written to disk. The **Actions** tab
+exposes the remaining terminal capabilities
 as typed UI: code, cast, conclave, scry, roster, egregore, models, credential
 status/store/forget, help, attachments, tool authority, and serial/parallel task
 history. These use one streamed process supervisor, so cancellation and output
@@ -515,7 +533,7 @@ can adopt the same behaviour without a second implementation.
 
 The header's **View** dropdown chooses **2D · Edit** or **3D · Structure**. 2D
 remains the editable source of truth. 3D is an orbitable, zoomable structural
-reading you can also move through with the arrow keys. It is a cone tree
+editor you can also move through with the arrow keys. It is a cone tree
 derived from the syntax rather than the flat drawing extruded: each nesting
 layer is its own plane, and every form fans its operands onto a golden ring
 around itself in the next one, so structure occupies real volume. Invalid shared
@@ -523,8 +541,14 @@ forms stay single so the structural error remains visible instead of being
 copied into several expressions. Recursive
 back-edges rise above the graph as lifted curves and recursive components gain
 a small helical separation, so recursion reads as a loop instead of a crossing
-line. Flow forms become explicit arrow-glyph nodes in 3D. Camera movement and
-mode switching never change Rebis or enter undo history; use 2D to edit.
+line. Compose boundaries render as shaded spheres and mediator boundaries as
+extruded boxes. Each structural layer has a faint receiving plane; pieces and
+operator connections cast clear fixed-light shadows whose distance and
+penumbra grow with nesting. Drag a piece to move its 3D-only offset, drag empty
+space to orbit, or constrain movement with the on-object X/Y/Z gizmo and
+`G`/`X`/`Y`/`Z`. These offsets are undoable presentation state and never change
+Rebis or the 2D arrangement; camera movement and mode switching remain outside
+undo history.
 
 The whiteboard exposes every Rebis form. Compose alone uses a circle; prompts
 are triangles, and source sigils are drawn as their own marks without generic
@@ -540,11 +564,16 @@ circular backplates:
 | `→` | answer flow | `(-> A B)` (reverse drawing loads `<-`) |
 | `$`, `~`, `#`, `'`, `,`, `^`, `%` | the corresponding source sigil | its Rebis form |
 
-An arrow means "this answer flows into that shape". Drawing a `←` is the same
-as drawing a `→` the other way, so there is nothing extra to learn. The
+An arrow means "this indentation block flows into that indentation block".
+Drawing a `←` is the same as drawing a `→` the other way, so there is nothing
+extra to learn. The
 generated source updates live beside the canvas. Exact Rebis trees round-trip
 without approximation. The mandala is deliberately one-to-one: every visual
-object is one Rebis expression and every structural link is one AST edge.
+object is one executable Rebis form and every ordered nesting is one AST edge.
+A postfix model binding is purple metadata on that existing object, not another
+shape: select any form to edit its optional model override, and leave the field
+blank to inherit the run default. Complete flow arrows show the `/model` badge
+on their rendered edge.
 Incomplete forms, several roots, shared children, cycles, invalid names, and
 wrong arities remain visible as errors; Kaos never repairs them with invisible
 expressions. The source panel says `exact · 1:1` only when the drawing is a
@@ -552,24 +581,25 @@ valid Rebis AST. Its `open in editor` action opens that exact snapshot.
 `Ctrl-Z` and `Ctrl-Shift-Z` undo and redo semantic drawing edits per tab; camera
 movement is deliberately excluded.
 
-Composition comes only from the two link tools. Blue `connect flow` creates an
-explicit Rebis flow form between two shapes; the Forms palette also lets you
-place an incomplete `→` or `←` alone, then use grey `father of` to add its
-ordered children one at a time. Its grey arrow therefore reads father → child.
-Children receive positions `1..n` under each parent: link order supplies the
-default, and the selected form's `CHILD ORDER` controls can change those
-numbers without moving the cells. Numbers are local to their parent, not
-global node labels.
-Position is presentation only: moving, overlapping, or drawing one shape inside
-another never links them or changes the program. The same blue/grey distinction
-is retained in 2D and 3D.
+Circle/square indentation is the compositional gesture. Drop a form into a
+circle or square to make it that block's next ordered operand; move it within
+the same boundary to rearrange only the drawing; pull its centre beyond the
+boundary to detach it. Crossing into another boundary reparents the complete
+subtree. The selected form's `CHILD ORDER` controls can change positions
+`1..n` without moving cells. Numbers are local to their block, never global
+node labels.
 
-A compose circle encloses every operand connected to it and every form below
-those operands. It grows to keep them all within the circumference, moves them
-as a group when dragged, and can be resized from any point on its border while
-remaining perfectly circular. Its contents set the minimum radius. This visual
-containment comes from `father of` links only; overlap still creates no
-structure.
+There is no separate `father of` tool or gray structural arrow. Containment
+already says what that duplicate line would have said. Source auto-draw follows
+the delimiters literally: a compose's complete indentation is inside its
+circle, and a square contains its complete mediator expression plus every
+branch. Nested circles/squares retain their nearer content. Held content grows
+the boundary, moves with it, and sets its minimum resize size.
+
+Purple `connect flow` is the only link tool. It creates an explicit `->`
+operator between two circle/square blocks; reversing the direction loads and
+writes `<-`. Flow cannot target a loose triangle or sigil, so arrows only exist
+between indentation blocks.
 
 Rebis's `->` is binary and folds left, so `(-> a b "label")` means "a flows to b
 flows to label". A square provides the direct representation of mediated
@@ -589,15 +619,18 @@ thing — evidence for scoring, supplied before the run starts. Ports need a liv
 mode: a dry run is evaluated without an input seam and reports the port
 unavailable instead of waiting.
 
-A mediator square sizes itself to the code inside it, and can also be sized by
-hand: press and hold just inside a wall and drag. The box's centre stays put, so
-its contents do not move, and the walls stop at those contents. Dragging the box
-anywhere else still moves it and everything inside it together. The size is
-presentation, like every coordinate — the generated source is unchanged.
+Every standalone canvas symbol is resizable. Hover it to reveal a green dashed
+scale outline, then drag a side or corner; the glyph, hit target, caption, edge
+clearance, and 2D/3D footprint scale together. A compose circle uses one radial
+size so it cannot become an oval. A mediator square also sizes itself to the
+forms nested inside it: its centre stays put, its walls stop at its contents,
+and dragging elsewhere still moves the box and everything inside it together.
+Size and positions are presentation; crossing a nesting boundary is the
+intentional gesture that changes generated structure.
 
-Right-drag draws a deep-blue marquee and selects every touched form, including a
+Right-drag draws a green marquee and selects every touched form, including a
 flow arrow when the marquee crosses its rendered line. `Ctrl`-click toggles
-individual forms in that block; a blue arrow can be toggled by clicking
+individual forms in that block; a purple arrow can be toggled by clicking
 anywhere along its rendered line. Delete removes the whole selected block in
 one undoable edit. `Ctrl-C` copies the selection's exact induced subgraph and
 `Ctrl-V` pastes it with fresh IDs, retained internal links, a visible cascading
@@ -606,8 +639,9 @@ clipboard as Rebis source. **Run selection** executes the exact induced
 subgraph as a block. An incomplete selection is reported rather than inferred.
 The source panel's **format** button rewrites the written source in canonical
 indented form (only when it parses, so a half-typed program is never mangled),
-and **format drawing** re-lays the graph out as a circuit, snapping a
-hand-dragged mandala back onto the grid in one undoable edit.
+and **format drawing** re-lays the graph as a size-aware circuit, repacking each
+circle or square from the inside out on the smallest non-overlapping
+golden-angle spiral in one undoable edit.
 
 Loading is the exact inverse of generating: every parsed form—including macros,
 imports, quotes, `$`, and `^`—has a canvas node and returns to Rebis source
@@ -626,12 +660,14 @@ window is native egui on OpenGL, so it needs no system webkit — see
 
 ## Theme
 
-Kaos is a neutral grey scale with deep-blue and red semantic accents, in two
-modes. Deep blue marks focus, recursion, running state, and the chaos star. Red
-marks flow, navigation, live data, and source ranges: it colors arrows in the
-terminal and the 2D/3D mandala, terminal navigation and parallel state, and
-visual source ranges; structural `father of` links remain grey. Both the
-terminal app and `kaos visual` read the same palette.
+Kaos is a neutral grey scale with green and purple semantic accents, in two
+modes. Green is the main color: it marks identity, focus, recursion, running
+state, and the chaos star. Purple is secondary and marks flow, navigation,
+live data, edits, and source ranges: it colors arrows in the terminal and the
+2D/3D mandala, terminal navigation and parallel state, and visual source
+ranges. Nesting needs no third structural-link color because its circle/square
+boundary is the relationship. Both the terminal app and `kaos visual` read the
+same palette.
 
 ```text
 /theme dark     light on dark

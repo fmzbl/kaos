@@ -28,7 +28,7 @@ list filters as you type; Up/Down scroll it, Tab completes, and Enter executes.
 A Rebis file may contain multiple top-level forms like a Lisp file. Kaos parses
 them as one implicit program scope, so a top-level `~` definition is available
 to later forms without a redundant outer group.
-A new unnamed workspace initially shows only the transient red Chaos Star in
+A new unnamed workspace initially shows only the transient green Chaos Star in
 the left source pane while the normal right-hand panel remains visible. The
 first key, paste, click, or wheel event dismisses it; that event is consumed, so
 it inserts no text and performs no command, motion, mode change, or other
@@ -47,15 +47,33 @@ run.
 
 Session-level Kaos commands are also available without leaving Rebis. `/model`
 shows the current model, `/model MODEL` changes it and remembers the selection
-in the Kaos config for later sessions. `/config` opens that complete file in the
-editor (`:w` saves and `:q` returns); `/config restore` restores all non-secret
+in the Kaos config for later sessions. A program can optionally override that
+default for one expression subtree with an adjacent postfix selector:
+
+```rebis
+"Draft locally"/ollama:qwen4:4b
+(-> "Investigate" "Write the report")/claude:opus5
+(["Judge both"] "one" "two")/openrouter:anthropic/claude-opus-4
+```
+
+Nested suffixes override the surrounding selector only until their subtree
+finishes; unbound forms use the session model. Kaos resolves the selector with
+the same provider registry and credentials as `/model`. It changes routing
+only—no extra model call or prompt is introduced. Provider readiness is checked
+per effective call, so an unavailable session default does not prevent a
+program whose model-calling subtrees all have usable bindings.
+
+`/config` opens that complete file in the editor (`:w` saves and `:q` returns);
+`/config restore` restores all non-secret
 defaults without touching provider credentials. Restart Kaos to apply edits.
 `/new` starts a fresh
 conversation sigil, `/clear` clears its visible transcript, and `/quit` exits
 Kaos. Model
 choices use the same filtered Up/Down, Tab, and Enter autocomplete as chat mode.
-In the source editor, bare `/` is ordinary source text, so qualified imports
-such as `(# std/loops)` need no escape. `Ctrl-V` still inserts the next
+In the source editor, `/` is ordinary source input rather than a palette
+command. The parser recognizes `/provider:model` only when it is adjacent to a
+closing quote or `)`; slashes inside qualified imports such as
+`(# std/loops)` remain part of the module name. `Ctrl-V` still inserts the next
 character literally. Chat keeps bare `/` as its command prefix.
 
 ```rebis
@@ -83,7 +101,9 @@ The integrated editor uses direct mode by default: each quoted prompt receives
 exactly one tool agent that can inspect the launch directory and perform
 requested file edits and commands after the run-level authority gate — a native
 Claude agent when the selected model is the Claude CLI, a single node-scoped
-Conductor agent on every other backend. `/chaos on` gives each prompt a full
+Conductor agent on every other backend. A postfix selector chooses that same
+execution path with its local model for every prompt beneath it. `/chaos on`
+gives each prompt a full
 Kaos pipeline agent instead; `/chaos off` returns to direct mode. The
 non-interactive CLI is completion-only by default: `--allow-tools` enables
 direct tool agents, and adding `--chaos` selects the pipeline. `--dry` performs
@@ -97,7 +117,7 @@ repeats the previous query. Press `Ctrl-K` for Kaos commands such as `/search`,
 `/format`, `/run`, `/tree`, and `/mandala`. Vim `:` remains
 reserved for `:w`, `:e`, `:q`, `:q!`, and `:wq`.
 The top bar shows the complete Rebis punctuation set horizontally—symbols only:
-`( ) [ ] ~ # ' , $ & ^ -> <- ; "`. Structural operators and delimiters use one shared
+`( ) [ ] ~ # ' , $ % & ^ / -> <- ; "`. Structural operators and delimiters use one shared
 operator color in both that legend and source text.
 Semicolons begin line comments only outside quoted prompts. Inside `"..."`, a
 semicolon is ordinary prompt text, including in multiline strings and after an
@@ -295,61 +315,71 @@ language.
 
 ### Exact visual AST rules
 
-The mandala is a one-to-one visual abstraction of Rebis. Every parsed
-expression becomes exactly one selectable visual node, including `->` and
-`<-`, which appear as their rendered arrow in 2D and as an explicit arrow
-node in 3D. Every visual node generates exactly one expression. Kaos does not
+The mandala is a one-to-one visual abstraction of Rebis forms. Every parsed
+base expression becomes exactly one selectable visual node. A postfix model
+binding is metadata on that node rather than a second shape, so it preserves
+the source/visual correspondence without inventing executable geometry.
+Select any form to edit its optional **MODEL OVERRIDE**; blank inherits the run
+default. Purple `/provider:model` badges remain visible on forms, and on the
+rendered edge for a complete `->` or `<-` flow. Every visual node generates
+exactly one base expression plus its optional suffix. Kaos does not
 insert invisible `nothing` operands, quoted cycle markers, groups, calls, or
 program roots.
 
-An ordinary `father of` link from `A` to `B` makes `B` the next ordered
-operand of `A`. Click the father first and the child second; the grey arrow is
-drawn father → child. Children receive one-based positions `1..=n` per parent;
-link creation order supplies the default, while the selected form's `CHILD
-ORDER` controls can change the numbers without moving cells. Operand order is
-never inferred from screen position.
-For `(A B C)`, select `father of` and click the parent with `A`, the same
-parent with `B`, then the same parent with `C`; the three links become the
-ordered children. A standalone `→` or `←` is ordered the same way: place the
-arrow, then link its first child and second child in sequence. To make a flow
-with the blue shortcut, click its first operand and then its second operand.
-The `arrow` tool is a typed shorthand: drawing from `A` to `B` creates one
-real `Forward(A, B)` expression node. A `<-` loaded from source remains one
-explicit `Backflow` expression node.
+A circle or square is an indentation boundary, and crossing that boundary is
+the compositional gesture. Dropping `B` into `A` makes `B` the next ordered
+operand of `A`; moving it within the same boundary changes only coordinates;
+pulling it out detaches it; moving it into another boundary reparents its whole
+subtree. Children receive one-based positions `1..=n` per block. Drop order
+supplies the default, while the selected form's `CHILD ORDER` controls can
+change the numbers without moving cells. Operand order is never inferred from
+screen position.
 
-These are the only compositional gestures. Coordinates are presentation:
-proximity, overlap, apparent containment, movement, panning, marquee bounds,
-and camera projection never create source structure. Flow arrows are blue;
-`father of` edges are neutral grey.
+There is no separate `father of` tool and no gray parent line. The boundary
+already expresses nesting, so another edge would duplicate the same fact.
+Source auto-drawing follows delimiters literally: every compose operand starts
+inside its circle, while a square contains its complete mediator expression
+and every branch. Nested boundaries retain their nearer content.
 
-A mediator square is the one form drawn as a box, and the box takes whatever
-size the mediator code inside it needs. Its size can also be set by hand:
-press and hold within 8 world units inside a wall and drag. The centre stays
-put and the grabbed walls travel — a side wall changes the width, a corner
-both — so nothing drawn inside moves. The walls stop at the contents, which
-can never be pushed outside the box that holds them. Dragging anywhere else on
-the box still moves the box and its contents together, and a block dropped
-across a wall is still grabbed as a block. A hand-set size is presentation
-like every coordinate: the same source is generated either way.
+The only link tool is purple `connect flow`. Click one circle/square block and
+then another to create one real `Forward(A, B)` expression node; reversing the
+direction loads and writes one explicit `Backflow` node. A loose triangle or
+sigil is not a flow endpoint, so drawn arrows occur only between indentation
+blocks. Coordinates, scale, movement within one boundary, panning, marquee
+bounds, camera projection, and 3D piece offsets remain presentation.
 
-A compose form is the only circle. Every one of its ordered operands, and each
-operand's subtree, is drawn inside that circumference. The circle grows around
-all of them, dragging it carries them together, and dragging anywhere along its
-border changes one shared radius so it never becomes an oval. Its contents are
-the minimum size. Prompts use triangle outlines, while `$`, `~`, `#`, `'`, `,`,
-`^`, and `%` appear as their own marks rather than circles.
+A mediator square is the one form drawn as a box. It grows around its mediator
+and branches. Every standalone symbol can also be scaled by hand: hovering reveals a
+green dashed scale outline, and dragging that outline changes its stored
+half-extents. A side changes one axis and a corner changes both. The centre
+stays put; for a square this means the walls travel without moving its held
+content. The walls stop at that content, which cannot be pushed outside its
+box. Dragging elsewhere on the box moves the box and its content together, and
+a block dropped across a wall is still grabbed as a block.
+
+A compose form is the only circle: visually, each circle is one indentation.
+It has the same nesting behaviour as the square, but dragging anywhere along
+its border changes one shared radius so it never becomes an oval. Its content
+is the minimum radius. Resizing scales the
+actual glyph, hit target, caption, edge clearance, 2D layout footprint, and 3D
+projection together. Hand-set size and positions are presentation; crossing a
+boundary is the deliberate structural edit. Prompts use triangle
+outlines, while `$`, `~`, `#`, `'`, `,`, `^`, and `%` appear as their own marks
+rather than circles.
 
 Drawing parsed source lays the syntax tree out as a left-to-right circuit:
 nesting depth is the column, so a form sits one column left of its operands,
-and a tidy row packing centres each form on the rows of the operands it drives,
-so subtrees stack without overlapping. The grid cell is golden — columns are φ×
-the row pitch. Connections route as right-angle traces between the shapes, like
-a board wired stage to stage. This layout changes coordinates only.
+and a size-aware row packing centres each form on the rows of the operands it
+drives. Column indentation includes the largest resized half-width on both
+sides, and row bands include resized heights, so formatted forms cannot overlap.
+Nested contents are packed from the innermost boundary outward on a compact
+Fibonacci spiral: item `n` uses radius `c√n` and successive golden angles, with
+the smallest `c` that separates every resized bound. Connections route as
+right-angle traces only for flow operators between circle/square blocks, like a
+board wired stage to stage. This layout changes coordinates only.
 
-Selecting a node thickens every attached edge and turns its `father of`
-connections deep blue, so its neighbourhood reads as one connected object. Flow
-arrows keep their red under selection: the hue is what distinguishes a flow from
-a structural link, and a selection is exactly when the drawing is read closest. Connections default to the 90°
+Selecting a node thickens every attached flow. Flow arrows keep their purple
+under selection because that hue carries direction. Connections default to the 90°
 routing; holding **Shift** while you complete a connection draws that one as a
 straight angled line instead (a per-edge, presentation-only choice). A flow form
 can be selected from any point along its rendered line, not only its midpoint
@@ -361,7 +391,8 @@ Two format controls sit above the source panel. **format** reparses what is
 written and rewrites it in canonical indented form; it acts only on source that
 parses, so a half-typed program is left alone. **format drawing** re-lays the
 mandala out with the standard circuit layout — deriving each node's column from
-its own structural depth — so a hand-dragged graph returns to the grid. It
+its own structural depth and repacking circle/square contents on their compact
+golden spirals — so a hand-dragged graph returns to the size-aware drawing. It
 changes coordinates only, never structure or generated source, and is one
 undoable edit.
 
@@ -374,8 +405,8 @@ A drawing is executable and can open as source only when it is one exact AST:
    emitting it twice would break the one-node/one-expression rule.
 4. The graph is finite and acyclic, and a `program` node occurs only at the
    top level.
-5. Source-bearing names and payloads produce syntax accepted by the Rebis
-   parser.
+5. Source-bearing names, payloads, and optional model selectors produce syntax
+   accepted by the Rebis parser.
 
 The side panel reports `exact · 1:1` only when all five invariants hold.
 Otherwise it shows the structural or parser error and preserves the drawing so
@@ -389,7 +420,7 @@ the complete set as one undoable edit. **Run selection** builds the induced
 subgraph containing exactly the selected nodes and internal links, then runs it
 as a block only if that subgraph is itself an exact Rebis AST.
 
-The faint deep-blue eight-rayed chaos star in the lower-right canvas is chrome
+The faint green eight-rayed chaos star in the lower-right canvas is chrome
 only. It is not a node, cannot be selected, never appears in generated Rebis,
 and has no runtime effect.
 
@@ -405,25 +436,35 @@ from the `2D · EDIT` drawing.
    next plane. A child's angular share of that ring is proportional to the
    subtree it carries, and each layer draws its cone a golden step tighter, so a
    subtree nests inside its parent's cone and the figure occupies real volume.
-2. Results—nodes with no incoming `father of` relation—start at depth 0. A lone
-   program sits on the axis; several independent roots share a ring.
+2. Results—nodes with no structural parent—start at depth 0. A lone program
+   sits on the axis; several independent roots share a ring.
 3. Each ordered operand is one structural layer deeper, and the layer supplies
    Z. An invalid shared form remains one diagnostic node at its deepest reached
    layer; exact source generation rejects it.
 4. An invalid closed recursive component has no ordinary result, so its
    earliest-created node is a stable synthetic depth-0 inspection entry.
-5. Reaching an ancestor marks the actual father/child link as a recursive back-edge.
+5. Reaching an ancestor marks the actual ordered-child relation as a recursive back-edge.
    Participating nodes receive a stable helical offset based on creation order;
    renderers draw those back-edges as lifted Bézier arcs.
-6. Every form remains visible. In particular, `->` and `<-` are explicit
-   arrow-glyph nodes in 3D even though 2D renders them as the arrow between their
-   two operands.
+6. Every form remains represented. A complete `->` or `<-` is projected as its
+   operator connection between the same circle/square blocks in 2D and 3D,
+   rather than as a second midpoint object.
 
-Dragging orbits (yaw and pitch), the arrow keys move through the space (panning
-the whole projection), the wheel changes perspective zoom, click selects, and
-reset restores the default camera. These are viewport operations: they do not
-mutate nodes or links, change exact source, or create undo history. The 2D
-projection remains the editing surface.
+Each structural depth receives a faint neutral plane. Compose boundaries are
+shaded spheres; mediator squares are extruded boxes with distinct front, back,
+and side faces. Pieces and operator connections cast clear screen-space
+shadows onto the planes; deeper forms cast a longer, softer shadow, while
+painter order still lets nearer forms cover farther ones. The light remains
+fixed as the camera orbits, making the structure's rotation easier to read.
+These are rendering cues only and carry no Rebis meaning.
+
+Dragging empty space orbits (yaw and pitch); dragging a piece moves its
+presentation-only 3D offset. The on-object gizmo exposes world X/Y/Z axes, and
+the `free`, `X`, `Y`, `Z` toolbar controls or `G`/`X`/`Y`/`Z` keys constrain the
+move. The arrow keys move through the space, the wheel changes perspective
+zoom, click selects, **reset view** restores the camera, and **reset pieces**
+clears all hand-set offsets. Piece motion is undoable but changes neither exact
+source nor the 2D arrangement. Camera operations remain outside undo history.
 
 The mandala is scrollable. Enter `/graph`, then use `hjkl`, arrow keys, Page Up,
 Page Down, `Home`, or `g`. `Esc` returns to source focus. `/panel hide` removes

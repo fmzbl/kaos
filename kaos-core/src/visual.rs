@@ -6,8 +6,8 @@
 //!
 //! # The abstraction
 //!
-//! Every Rebis expression, without exception, is three things: a **form** tag,
-//! a **text** payload, and an **ordered list of children**.
+//! Every Rebis expression is a **form** tag, a **text** payload, an optional
+//! postfix **model binding**, and an **ordered list of children**.
 //!
 //! ```text
 //! "prompt"            Prompt    text            no children
@@ -25,19 +25,21 @@
 //! (f a b …)           Call      name            arguments
 //! (~ f (p …) body)    Function  name + params   1 (the body)
 //! a b …               Program   —               list (top level only)
+//! expr/model           any form  model           the same children
 //! ```
 //!
 //! So the whole language is one node type — [`Form`] plus text — and edges.
-//! A node's children are numbered per father from `1` through `n`, where `n`
-//! is that father's child count. [`Mandala::to_rebis`] folds those positions
+//! A node's children are numbered per parent from `1` through `n`, where `n`
+//! is that parent's child count. [`Mandala::to_rebis`] folds those positions
 //! into source and [`Mandala::from_rebis`] unfolds source back onto the canvas;
 //! every form round-trips one-to-one. Invalid or incomplete graphs are
 //! reported rather than repaired with invisible expressions.
 //!
 //! The whiteboard alphabet is a *rendering* of this, not a restriction on it:
 //! prompts, symbols, and combining forms use the `o-[]-o` outlines; source
-//! sigils—including `^`—are their own drawn shapes; every father-to-child edge
-//! is an arrow ([`Form::shape`]).
+//! sigils—including `^`—are their own drawn shapes. Circle and square
+//! boundaries render source indentation; only explicit flow operators render
+//! arrows ([`Form::shape`]).
 //!
 //! This module is pure and std-only — no UI, no rendering, no I/O — so the
 //! editor front-end is a thin shell over it.
@@ -124,9 +126,9 @@ impl Form {
     /// Forms that are *placed* on the canvas, in palette order, with a default
     /// text payload.
     ///
-    /// Flow forms can be placed as incomplete arrow nodes and filled with the
-    /// `father of` link tool. The link palette also keeps the two-click
-    /// complete-flow shortcut for the common case.
+    /// Flow forms remain available to source-oriented callers. The visual
+    /// editor creates complete flow operators with its two-boundary gesture
+    /// rather than exposing incomplete arrow nodes in the palette.
     pub const ALL: &'static [FormSpec] = &[
         ("△ prompt", || Form::Prompt, "prompt"),
         ("◇ symbol", || Form::Symbol, "x"),
@@ -285,6 +287,30 @@ pub enum Stroke {
 }
 
 impl Shape {
+    /// The unscaled half-width and half-height of this symbol.
+    ///
+    /// These bounds are the common reference used by resizing, hit-testing,
+    /// automatic layout, and renderers. A hand-set [`Node::size`] scales the
+    /// symbol away from this size; keeping the reference beside the geometry
+    /// prevents those consumers from inventing subtly different footprints.
+    #[must_use]
+    pub fn base_extent(self) -> (f64, f64) {
+        match self {
+            Shape::Circle
+            | Shape::Diamond
+            | Shape::Dollar
+            | Shape::Tilde
+            | Shape::Hash
+            | Shape::Quote
+            | Shape::Comma
+            | Shape::Caret
+            | Shape::Percent => (NODE_R, NODE_R),
+            Shape::Parallelogram => (NODE_R + NODE_RY * 0.55, NODE_RY),
+            Shape::Amp => (NODE_R + NODE_RY * 0.85, NODE_RY),
+            Shape::Triangle | Shape::Square | Shape::Hexagon | Shape::Arrow => (NODE_R, NODE_RY),
+        }
+    }
+
     /// The strokes that draw this shape's sigil, or empty for the shapes that
     /// are outlines ([`Shape::Circle`], [`Shape::Triangle`],
     /// [`Shape::Square`], [`Shape::Diamond`]).
@@ -450,21 +476,40 @@ pub struct Node {
     /// The form's text payload: prompt text, symbol/call/function name, or
     /// module path. Ignored by forms where [`Form::uses_text`] is false.
     pub text: String,
+    /// Optional postfix model selector. `None` inherits the run's default;
+    /// `Some` routes every model call in this node's subtree until a nested
+    /// node overrides it.
+    pub model: Option<String>,
     pub x: f64,
     pub y: f64,
-    /// Half-width and half-height a container's border was dragged to, when it
-    /// has been resized by hand. `None` means the boundary takes whatever size
-    /// its contents need. A compose circle stores the same radius in both.
+    /// Half-width and half-height this symbol was dragged to, when it has been
+    /// resized by hand. `None` means the symbol uses its natural size. A
+    /// compose circle stores the same radius in both dimensions; a visual
+    /// container may grow beyond the stored size to keep its contents visible.
     ///
     /// Presentation only, exactly like `x`/`y`: a hand-sized box and an
     /// auto-sized one generate the same source. Read it through
     /// [`Mandala::extent`], which never lets a stored size hide the contents.
     pub size: Option<(f64, f64)>,
+    /// User-authored displacement in the structural 3D projection.
+    ///
+    /// Like 2D position and size this is presentation only: moving a piece
+    /// along the 3D editor's X/Y/Z gizmo never changes the Rebis expression.
+    /// The derived cone layout supplies the base position and this offset is
+    /// added afterward, so structural depth remains available while pieces can
+    /// be arranged by hand.
+    pub spatial_offset: [f64; 3],
 }
 
 impl Node {
     pub fn shape(&self) -> Shape {
         self.form.shape()
+    }
+
+    /// This symbol's unscaled half-extents.
+    #[must_use]
+    pub fn base_extent(&self) -> (f64, f64) {
+        self.shape().base_extent()
     }
 
     /// Short canvas caption.
@@ -491,7 +536,7 @@ impl Node {
     }
 }
 
-/// A grab on a container's border: which boundary and which axes it changes.
+/// A grab on a symbol's scale outline: which boundary and which axes it changes.
 ///
 /// Both flags are set on a corner. The axes are carried because a drag on a
 /// side wall must change only that dimension — grabbing the left wall of a wide
@@ -680,7 +725,7 @@ impl fmt::Display for FoldError {
                 form.name()
             ),
             Self::SeveralFathers => {
-                write!(f, "the selected block crosses several outside fathers")
+                write!(f, "the selected block crosses several outside parents")
             }
             Self::InvalidSource(message) => {
                 write!(f, "the folded form is not exact Rebis: {message}")
@@ -730,7 +775,7 @@ pub const NODE_R: f64 = 34.0;
 pub const NODE_RY: f64 = NODE_R * 0.72;
 /// Clearance between inlined contents and their container boundary.
 pub const MEDIATOR_PAD: f64 = 13.0;
-/// How far either side of a container boundary still counts as grabbing it.
+/// How far either side of a symbol's scale outline still counts as grabbing it.
 pub const BORDER_BAND: f64 = 8.0;
 /// Grab radius of the handle on a drawn arrow.
 pub const ARROW_HANDLE: f64 = 11.0;
@@ -801,6 +846,10 @@ impl View {
 pub struct Mandala {
     nodes: Vec<Node>,
     arrows: Vec<Arrow>,
+    /// Presentation-only membership for forms deliberately held inside a
+    /// circle or square. These use the same child-to-container orientation as
+    /// structural arrows, but never participate in source generation.
+    contents: Vec<Arrow>,
     next_id: u32,
     /// Derived presentation geometry. It is deliberately absent from clones:
     /// document history stores the drawing, not another copy of its cache.
@@ -819,6 +868,7 @@ impl Clone for Mandala {
         Self {
             nodes: self.nodes.clone(),
             arrows: self.arrows.clone(),
+            contents: self.contents.clone(),
             next_id: self.next_id,
             geometry: OnceLock::new(),
         }
@@ -830,6 +880,7 @@ impl Default for Mandala {
         Self {
             nodes: Vec::new(),
             arrows: Vec::new(),
+            contents: Vec::new(),
             next_id: 0,
             geometry: OnceLock::new(),
         }
@@ -850,17 +901,16 @@ impl MandalaGeometry {
             .map(|(index, id)| (*id, index))
             .collect::<HashMap<_, _>>();
 
-        // `interior` is structural and iterative. Compute it exactly once per
-        // container: re-walking it from every extent query was the source of
-        // exponential behaviour in deeply nested drawings.
+        // `interior` is explicit presentation membership and iterative. Compute
+        // it exactly once per container: re-walking it from every extent query
+        // was the source of exponential behaviour in deeply nested drawings.
         let mut inlined = HashSet::new();
         let interiors = containers
             .iter()
             .map(|id| {
                 let mut interior = mandala.interior(*id);
-                // A recursive father-of path can lead back to its container.
-                // A boundary is never its own contents, even when source
-                // validation will later report that structural cycle.
+                // `hold` rejects cycles, but a boundary is defensively never
+                // counted among its own contents.
                 interior.remove(id);
                 inlined.extend(interior.iter().copied());
                 interior.into_iter().collect::<Vec<_>>()
@@ -995,11 +1045,7 @@ fn is_visual_container(form: &Form) -> bool {
 }
 
 fn default_extent(node: &Node) -> (f64, f64) {
-    if node.form == Form::Compose {
-        (NODE_R, NODE_R)
-    } else {
-        (NODE_R, NODE_RY)
-    }
+    node.base_extent()
 }
 
 fn base_extent(node: &Node) -> (f64, f64) {
@@ -1085,21 +1131,24 @@ impl Mandala {
             id,
             form,
             text: text.into(),
+            model: None,
             x,
             y,
             size: None,
+            spatial_offset: [0.0; 3],
         });
         id
     }
 
-    /// Make `father` the parent of `child`, assigning `child` the next
+    /// Make `father` the semantic parent of `child`, assigning `child` the next
     /// one-based position among its ordered operands. Use
     /// [`Self::set_child_number`] to change that position later.
     ///
-    /// This is the canvas's `father of` relation. Geometry is deliberately
-    /// ignored: overlap, containment, proximity, and screen order never create
-    /// composition. Duplicates and self-links are ignored. Storage remains
-    /// child-to-parent because that is the direction source generation walks.
+    /// This is the low-level ordered AST relation retained for source and API
+    /// compatibility. The visual editor normally calls [`Self::reparent`] and
+    /// [`Self::hold`] together when a form crosses an indentation boundary.
+    /// Duplicates and self-links are ignored. Storage remains child-to-parent
+    /// because that is the direction source generation walks.
     pub fn father_of(&mut self, father: NodeId, child: NodeId) -> bool {
         if father == child || !self.has(father) || !self.has(child) {
             return false;
@@ -1116,13 +1165,126 @@ impl Mandala {
         true
     }
 
-    /// Push unrelated forms out of a container after its structural contents
-    /// make the boundary grow.
+    /// Make `child` one ordered operand of `parent`, replacing any previous
+    /// structural parent.
     ///
-    /// Containment is never inferred from overlap: a square contains its
-    /// mediator subtree and a compose circle contains all of its operand
-    /// subtrees. A loose form caught by a newly expanded boundary therefore
-    /// stays outside. Nested containers move with their contents.
+    /// This is the semantic half of dropping a form into a circle or square:
+    /// visual nesting becomes source nesting without exposing a second link
+    /// gesture. A parent inside the child's own subtree would create
+    /// a cycle and is refused atomically.
+    pub fn reparent(&mut self, parent: NodeId, child: NodeId) -> bool {
+        if parent == child
+            || !self.has(parent)
+            || !self.has(child)
+            || self.subtree(child).contains(&parent)
+        {
+            return false;
+        }
+        let already_only_parent = {
+            let parents = self
+                .arrows
+                .iter()
+                .filter(|arrow| arrow.from == child)
+                .collect::<Vec<_>>();
+            parents.len() == 1 && parents[0].to == parent
+        };
+        if already_only_parent {
+            return false;
+        }
+        self.arrows.retain(|arrow| arrow.from != child);
+        self.arrows.push(Arrow {
+            from: child,
+            to: parent,
+        });
+        self.invalidate_geometry();
+        true
+    }
+
+    /// Detach a form from its structural parent when it is pulled out of its
+    /// indentation boundary.
+    pub fn detach(&mut self, child: NodeId) -> bool {
+        let before = self.arrows.len();
+        self.arrows.retain(|arrow| arrow.from != child);
+        if self.arrows.len() == before {
+            return false;
+        }
+        self.invalidate_geometry();
+        true
+    }
+
+    /// Hold `content` inside a circle or square as presentation state.
+    ///
+    /// The low-level content membership remains separate from the ordered AST
+    /// relation so source loading and copy/paste can reconstruct both layers
+    /// exactly. The editor's boundary-crossing gesture updates both. A form
+    /// belongs to at most one direct container, and visual containment cycles
+    /// are rejected.
+    pub fn hold(&mut self, container: NodeId, content: NodeId) -> bool {
+        if container == content
+            || !self.has(content)
+            || !self
+                .node(container)
+                .is_some_and(|node| is_visual_container(&node.form))
+            || self.content_group(content).contains(&container)
+        {
+            return false;
+        }
+        let membership = Arrow {
+            from: content,
+            to: container,
+        };
+        if self.contents.contains(&membership) {
+            return false;
+        }
+        self.contents.retain(|edge| edge.from != content);
+        self.contents.push(membership);
+        self.invalidate_geometry();
+        true
+    }
+
+    /// Release a directly held form back onto the open canvas.
+    pub fn release(&mut self, content: NodeId) -> bool {
+        let before = self.contents.len();
+        self.contents.retain(|edge| edge.from != content);
+        if self.contents.len() == before {
+            return false;
+        }
+        self.invalidate_geometry();
+        true
+    }
+
+    /// The circle or square directly holding `content`, if any.
+    #[must_use]
+    pub fn holder(&self, content: NodeId) -> Option<NodeId> {
+        self.contents
+            .iter()
+            .find(|edge| edge.from == content)
+            .map(|edge| edge.to)
+    }
+
+    /// The topmost circle or square whose current boundary contains the point.
+    ///
+    /// `content` is excluded along with anything it already contains so a
+    /// container can be dropped inside another one without ever containing
+    /// itself.
+    #[must_use]
+    pub fn holder_at(&self, content: NodeId, x: f64, y: f64) -> Option<NodeId> {
+        let excluded = self.content_group(content);
+        self.nodes.iter().rev().find_map(|node| {
+            (is_visual_container(&node.form)
+                && !excluded.contains(&node.id)
+                && self.node_contains(node, x, y))
+            .then_some(node.id)
+        })
+    }
+
+    /// Push unrelated forms out of a container after its content makes the
+    /// boundary grow.
+    ///
+    /// An AST child without content membership is unrelated to visual
+    /// containment and is therefore pushed outside like any other loose form.
+    /// Only explicit content remains within the boundary. Nested containers
+    /// move with their contents.
     pub fn make_room_for_container(&mut self, id: NodeId) {
         let Some(container) = self.node(id).cloned() else {
             return;
@@ -1137,12 +1299,17 @@ impl Mandala {
         let mut ancestors = HashSet::new();
         let mut stack = vec![id];
         while let Some(child) = stack.pop() {
-            for father in self
+            let structural = self
                 .arrows
                 .iter()
                 .filter(|arrow| arrow.from == child)
-                .map(|arrow| arrow.to)
-            {
+                .map(|arrow| arrow.to);
+            let holders = self
+                .contents
+                .iter()
+                .filter(|edge| edge.from == child)
+                .map(|edge| edge.to);
+            for father in structural.chain(holders) {
                 if ancestors.insert(father) {
                     stack.push(father);
                 }
@@ -1221,8 +1388,9 @@ impl Mandala {
 
     /// Compatibility name using the internal child-to-parent order.
     ///
-    /// New UI code should say [`Self::father_of`], because that is the visible
-    /// relation. A flow arrow has the distinct semantics in [`Self::flow`].
+    /// This remains a low-level compatibility alias for adding an ordered AST
+    /// child. Visual nesting should use [`Self::reparent`] plus [`Self::hold`].
+    /// A flow arrow has the distinct semantics in [`Self::flow`].
     pub fn connect(&mut self, from: NodeId, to: NodeId) {
         let _ = self.father_of(to, from);
     }
@@ -1261,9 +1429,15 @@ impl Mandala {
     pub fn remove(&mut self, id: NodeId) {
         let nodes_before = self.nodes.len();
         let arrows_before = self.arrows.len();
+        let contents_before = self.contents.len();
         self.nodes.retain(|n| n.id != id);
         self.arrows.retain(|a| a.from != id && a.to != id);
-        if self.nodes.len() != nodes_before || self.arrows.len() != arrows_before {
+        self.contents
+            .retain(|edge| edge.from != id && edge.to != id);
+        if self.nodes.len() != nodes_before
+            || self.arrows.len() != arrows_before
+            || self.contents.len() != contents_before
+        {
             self.invalidate_geometry();
         }
     }
@@ -1274,10 +1448,20 @@ impl Mandala {
         }
     }
 
+    /// Set or clear one node's postfix model selector.
+    pub fn set_model(&mut self, id: NodeId, model: Option<String>) {
+        if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
+            node.model = model.filter(|value| !value.is_empty());
+        }
+    }
+
     pub fn set_form(&mut self, id: NodeId, form: Form) {
         if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
             if n.form != form {
                 n.form = form;
+                if !is_visual_container(&n.form) {
+                    self.contents.retain(|edge| edge.to != id);
+                }
                 self.invalidate_geometry();
             }
         }
@@ -1291,6 +1475,30 @@ impl Mandala {
                 self.invalidate_geometry();
             }
         }
+    }
+
+    /// Set one node's presentation-only displacement in the 3D editor.
+    pub fn set_spatial_offset(&mut self, id: NodeId, offset: [f64; 3]) -> bool {
+        let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) else {
+            return false;
+        };
+        if node.spatial_offset == offset {
+            return false;
+        }
+        node.spatial_offset = offset;
+        true
+    }
+
+    /// Reset every hand-moved 3D piece to the derived structural layout.
+    pub fn reset_spatial_offsets(&mut self) -> bool {
+        let mut changed = false;
+        for node in &mut self.nodes {
+            if node.spatial_offset != [0.0; 3] {
+                node.spatial_offset = [0.0; 3];
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn nodes(&self) -> &[Node] {
@@ -1373,6 +1581,12 @@ impl Mandala {
                 .filter(|arrow| ids.contains(&arrow.from) && ids.contains(&arrow.to))
                 .copied()
                 .collect(),
+            contents: self
+                .contents
+                .iter()
+                .filter(|edge| ids.contains(&edge.from) && ids.contains(&edge.to))
+                .copied()
+                .collect(),
             next_id: self.next_id,
             geometry: OnceLock::new(),
         }
@@ -1385,15 +1599,17 @@ impl Mandala {
     /// thing after a block is pasted. Links to anything outside `source`
     /// cannot leak into the copy.
     pub fn append_copy(&mut self, source: &Self, offset: (f64, f64)) -> Vec<NodeId> {
+        self.invalidate_geometry();
         let mut remap = HashMap::new();
         let mut pasted = Vec::with_capacity(source.nodes.len());
         for node in &source.nodes {
-            let id = self.add(
-                node.form.clone(),
-                node.text.clone(),
-                node.x + offset.0,
-                node.y + offset.1,
-            );
+            let id = NodeId(self.next_id);
+            self.next_id += 1;
+            let mut copy = node.clone();
+            copy.id = id;
+            copy.x += offset.0;
+            copy.y += offset.1;
+            self.nodes.push(copy);
             remap.insert(node.id, id);
             pasted.push(id);
         }
@@ -1404,13 +1620,20 @@ impl Mandala {
             };
             let _ = self.father_of(father, child);
         }
+        for edge in &source.contents {
+            let (Some(&content), Some(&container)) = (remap.get(&edge.from), remap.get(&edge.to))
+            else {
+                continue;
+            };
+            let _ = self.hold(container, content);
+        }
         pasted
     }
 
     /// Top-level expressions inside a selection, in stable canvas order.
     ///
     /// Nested selected operands are already represented through their selected
-    /// father, so folding uses only these roots as the new form's children.
+    /// parent, so folding uses only these roots as the new form's children.
     #[must_use]
     pub fn roots_in(&self, ids: impl IntoIterator<Item = NodeId>) -> Vec<NodeId> {
         let ids = ids.into_iter().collect::<HashSet<_>>();
@@ -1427,12 +1650,12 @@ impl Mandala {
             .collect()
     }
 
-    /// Fold the selected subgraph into one new father form.
+    /// Fold the selected subgraph into one new parent form.
     ///
     /// Existing internal structure is preserved. If the selection occupied
-    /// one slot (or several sibling slots) under an outside father, that
+    /// one slot (or several sibling slots) under an outside parent, that
     /// boundary is rewired through the new form at the first selected slot.
-    /// Crossing several outside fathers is rejected instead of creating a
+    /// Crossing several outside parents is rejected instead of creating a
     /// shared visual node.
     pub fn fold_selection(
         &mut self,
@@ -1555,7 +1778,7 @@ impl Mandala {
         if shape.is_some() {
             return shape;
         }
-        // A flow expression is rendered as the complete blue line between its
+        // A flow expression is rendered as the complete purple line between its
         // children. Its midpoint handle is useful but must not be the only
         // selectable part of the form.
         self.nodes.iter().rev().find_map(|node| {
@@ -1577,17 +1800,11 @@ impl Mandala {
 
     fn node_contains(&self, node: &Node, x: f64, y: f64) -> bool {
         let (dx, dy) = (x - node.x, y - node.y);
-        match node.shape() {
-            Shape::Circle => {
-                let radius = self.extent(node.id).0;
-                dx * dx + dy * dy <= radius * radius
-            }
-            Shape::Square => {
-                let (half_w, half_h) = self.extent(node.id);
-                dx.abs() <= half_w && dy.abs() <= half_h
-            }
-            shape => shape.contains(dx, dy),
-        }
+        let (half_w, half_h) = self.extent(node.id);
+        let (base_w, base_h) = node.base_extent();
+        let local_x = dx / (half_w / base_w).max(f64::EPSILON);
+        let local_y = dy / (half_h / base_h).max(f64::EPSILON);
+        node.shape().contains(local_x, local_y)
     }
 
     /// Children of `id`: the nodes whose arrows point at it, in draw order.
@@ -1597,6 +1814,25 @@ impl Mandala {
             .filter(|a| a.to == id)
             .map(|a| a.from)
             .collect()
+    }
+
+    /// `id` and everything nested inside it through explicit content
+    /// membership. Ordered AST children are intentionally not walked.
+    fn content_group(&self, id: NodeId) -> std::collections::BTreeSet<NodeId> {
+        let mut group = std::collections::BTreeSet::new();
+        let mut stack = vec![id];
+        while let Some(container) = stack.pop() {
+            if !group.insert(container) {
+                continue;
+            }
+            stack.extend(
+                self.contents
+                    .iter()
+                    .filter(|edge| edge.to == container)
+                    .map(|edge| edge.from),
+            );
+        }
+        group
     }
 
     /// The mediator of a square: its first child.
@@ -1614,43 +1850,51 @@ impl Mandala {
         self.children(id).first().copied()
     }
 
-    /// The mediator drawn INSIDE its square: the same node, named for where it
-    /// is rendered rather than for what it is.
+    /// The mediator drawn inside its square, when it has explicitly been made
+    /// that square's content.
     ///
-    /// `([m] a b)` writes the mediator between the brackets, so it belongs in
-    /// the box however large it is — a bare symbol, a prompt, or a whole
-    /// drawing. The box grows to hold it.
+    /// Source loading marks the mediator and branches as square content. A
+    /// mediator added later through the low-level AST API remains outside until
+    /// it is deliberately placed into the box.
     #[must_use]
     pub fn inlined_mediator(&self, id: NodeId) -> Option<NodeId> {
         self.mediator(id)
+            .filter(|mediator| self.contains_child(id, *mediator))
     }
 
-    /// Direct children drawn within a structural boundary.
+    /// Forms explicitly held directly within a visual boundary.
     ///
-    /// Square notation encloses only its first child (the mediator), while
-    /// composition parentheses enclose every ordered operand.
+    /// This is presentation state, separate from [`Self::children`]. A form may
+    /// be both source content and an ordered AST child, but the low-level AST
+    /// relation alone never puts it here.
     #[must_use]
     pub fn contained_children(&self, id: NodeId) -> Vec<NodeId> {
         let Some(node) = self.node(id) else {
             return Vec::new();
         };
-        match &node.form {
-            Form::Square => self.children(id).into_iter().take(1).collect(),
-            Form::Compose => self.children(id),
-            _ => Vec::new(),
+        if !is_visual_container(&node.form) {
+            return Vec::new();
         }
+        self.contents
+            .iter()
+            .filter(|edge| edge.to == id)
+            .map(|edge| edge.from)
+            .collect()
     }
 
-    /// Whether `child` is one of `container`'s directly enclosed operands.
+    /// Whether `child` is directly held as `container`'s visual content.
     #[must_use]
     pub fn contains_child(&self, container: NodeId, child: NodeId) -> bool {
-        self.contained_children(container).contains(&child)
+        self.contents.contains(&Arrow {
+            from: child,
+            to: container,
+        })
     }
 
     /// The nodes of one paint pass, back to front.
     ///
     /// `inlined` picks the pass: `false` is everything on the open canvas,
-    /// `true` is what is drawn inside a structural boundary. Within a pass the
+    /// `true` is what is drawn inside a visual boundary. Within a pass the
     /// containers come first, because their fills are surfaces other forms sit
     /// on.
     ///
@@ -1678,23 +1922,22 @@ impl Mandala {
 
     /// Every node drawn inside `id`'s boundary.
     ///
-    /// This is a STRUCTURAL answer, never a geometric one. A square includes
-    /// its mediator subtree; a compose circle includes all operand subtrees.
-    /// Merely overlapping a boundary still means nothing.
+    /// This follows explicit content membership recursively, never bare AST
+    /// edges. Merely overlapping a boundary still means nothing until the drop
+    /// gesture assigns that membership.
     #[must_use]
     pub fn interior(&self, id: NodeId) -> std::collections::BTreeSet<NodeId> {
         let mut interior = self
             .contained_children(id)
             .into_iter()
-            .flat_map(|child| self.subtree(child))
+            .flat_map(|content| self.content_group(content))
             .collect::<std::collections::BTreeSet<_>>();
-        // A structural cycle may lead back to the boundary, but a container
-        // can never be one of the things it visually contains.
+        // Defensive even though `hold` rejects containment cycles.
         interior.remove(&id);
         interior
     }
 
-    /// Whether this node is drawn inside some structural container.
+    /// Whether this node is drawn inside some explicit visual container.
     #[must_use]
     pub fn is_inlined(&self, id: NodeId) -> bool {
         self.geometry().inlined.contains(&id)
@@ -1702,10 +1945,10 @@ impl Mandala {
 
     /// The node's half-width and half-height in world units.
     ///
-    /// Fixed forms use their base outline. A square grows around its mediator
-    /// subtree, and a compose circle grows around all of its operand subtrees.
-    /// A hand-set boundary is honoured only where it is larger than the fit, so
-    /// contents can never end up outside.
+    /// Every form uses its base outline or its hand-set size. Squares and
+    /// compose circles may grow farther around explicitly held content. A
+    /// hand-set container boundary is honoured only where it is larger than
+    /// the fit, so contents cannot end up outside.
     #[must_use]
     pub fn extent(&self, id: NodeId) -> (f64, f64) {
         self.geometry()
@@ -1715,8 +1958,8 @@ impl Mandala {
             .unwrap_or((NODE_R, NODE_RY))
     }
 
-    /// The smallest the node may be drawn: one fixed size for every form, and
-    /// for a structural container whatever its contents occupy. This is the floor
+    /// The smallest the node may be drawn: its natural symbol size, or for a
+    /// visual container whatever its contents occupy. This is the floor
     /// [`Self::extent`] and [`Self::resize`] measure a hand-set size against.
     #[must_use]
     fn fit_extent(&self, id: NodeId) -> (f64, f64) {
@@ -1727,10 +1970,10 @@ impl Mandala {
             .unwrap_or((NODE_R, NODE_RY))
     }
 
-    /// Set a container's drawn size by hand, in half-extents from its centre.
+    /// Set a symbol's drawn size by hand, in half-extents from its centre.
     ///
-    /// Clamped to what the contents need, so a border dragged inward stops at
-    /// the innermost block rather than swallowing it. A square may change each
+    /// Clamped to the symbol's natural footprint and, for a visual container,
+    /// what its contents need. A square or non-circular symbol may change each
     /// axis independently; compose remains a true circle and uses the larger
     /// requested dimension as its radius.
     ///
@@ -1739,10 +1982,6 @@ impl Mandala {
     /// the box.
     pub fn resize(&mut self, id: NodeId, half_w: f64, half_h: f64) {
         let (fit_w, fit_h) = self.fit_extent(id);
-        let form = self.node(id).map(|node| node.form.clone());
-        if !form.as_ref().is_some_and(is_visual_container) {
-            return;
-        }
         if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
             node.size = Some(if node.form == Form::Compose {
                 let radius = half_w.max(half_h).max(fit_w).max(fit_h);
@@ -1773,11 +2012,13 @@ impl Mandala {
         }
     }
 
-    /// The container whose boundary the point rests on, and which axes resize.
+    /// The symbol whose scale outline the point rests on, and which axes resize.
     ///
-    /// The band straddles the boundary by [`BORDER_BAND`] world units. A square
-    /// reports the side/corner axes; a compose circle reports both axes because
-    /// its radius must remain equal in every direction.
+    /// The band straddles the boundary by [`BORDER_BAND`] world units.
+    /// Rectangular scale outlines report the side/corner axes; a compose circle
+    /// reports both axes because its radius must remain equal in every
+    /// direction. Complete flow forms are represented by their connection and
+    /// therefore have no separate scale outline.
     ///
     /// This is geometry only — see [`Self::resize_grab`] for the answer a pointer
     /// gesture wants.
@@ -1793,7 +2034,7 @@ impl Mandala {
                     tall: true,
                 });
             }
-            if node.form != Form::Square {
+            if node.shape() == Shape::Arrow && self.children(node.id).len() == 2 {
                 return None;
             }
             let (dx, dy) = ((x - node.x).abs(), (y - node.y).abs());
@@ -1811,7 +2052,7 @@ impl Mandala {
         })
     }
 
-    /// Move a structural container and everything drawn inside it together.
+    /// Move a visual container and everything explicitly held inside it.
     ///
     /// A boundary and its contents read as one object, so dragging it by the
     /// border or empty space carries the interior along. Plain
@@ -1950,12 +2191,15 @@ impl Mandala {
             }
             memo.insert(id, 1.0);
             let kids = layer_children(mandala, id, depth, depths);
+            let extent = mandala.extent(id);
+            let own_weight = (extent.0.max(extent.1) / NODE_R).max(1.0);
             let total = if kids.is_empty() {
-                1.0
+                own_weight
             } else {
                 kids.iter()
                     .map(|kid| subtree_leaves(mandala, *kid, depth + 1, depths, memo))
-                    .sum()
+                    .sum::<f64>()
+                    .max(own_weight)
             };
             memo.insert(id, total);
             total
@@ -2006,11 +2250,20 @@ impl Mandala {
                 .map(|kid| subtree_leaves(mandala, *kid, depth + 1, depths, memo))
                 .collect();
             let total: f64 = weights.iter().sum::<f64>().max(1.0);
+            let parent_radius = mandala.extent(id).0.max(mandala.extent(id).1);
+            let child_radius = kids
+                .iter()
+                .map(|kid| {
+                    let extent = mandala.extent(*kid);
+                    extent.0.max(extent.1)
+                })
+                .fold(0.0_f64, f64::max);
             // Wide subtrees earn a wider ring; each layer draws its cone a
             // golden step tighter, with a floor so rings never collapse onto
             // the node itself.
             let ring = ((CONE_ARC_PER_LEAF * total / std::f64::consts::TAU).max(CONE_MIN_RING)
                 * CONE_SHRINK.powf(depth as f64 * 0.5))
+            .max(parent_radius + child_radius + MEDIATOR_PAD * 2.0)
             .max(NODE_R * 2.2);
             let mut angle = phase;
             for (kid, weight) in kids.into_iter().zip(weights) {
@@ -2174,14 +2427,17 @@ impl Mandala {
                 let (x, y) = placed.get(&node.id).copied().unwrap_or((0.0, 0.0));
                 SpatialNode {
                     id: node.id,
-                    x: x + if recursive { phase.cos() * 28.0 } else { 0.0 },
-                    y: y + if recursive { phase.sin() * 28.0 } else { 0.0 },
+                    x: x + if recursive { phase.cos() * 28.0 } else { 0.0 }
+                        + node.spatial_offset[0],
+                    y: y + if recursive { phase.sin() * 28.0 } else { 0.0 }
+                        + node.spatial_offset[1],
                     z: depth as f64 * LAYER_GAP
                         + if recursive {
                             phase / std::f64::consts::TAU * 90.0
                         } else {
                             0.0
-                        },
+                        }
+                        + node.spatial_offset[2],
                     depth,
                     recursive,
                 }
@@ -2237,6 +2493,13 @@ impl Mandala {
         let Some(node) = self.node(id) else {
             return false;
         };
+        let (expression, model) = match expression {
+            Expr::Model { selector, body } => (body.as_ref(), Some(selector.as_str())),
+            expression => (expression, None),
+        };
+        if node.model.as_deref() != model {
+            return false;
+        }
         let children = self.children(id);
         let child_matches = |index: usize, expression: &Expr| {
             children
@@ -2365,7 +2628,10 @@ impl Mandala {
             Form::Input => format!("(& {text} {})", parts[0]),
             Form::Program => parts.join("\n"),
         };
-        Ok(out)
+        Ok(match &node.model {
+            Some(model) => format!("{out}/{model}"),
+            None => out,
+        })
     }
 }
 
@@ -2394,6 +2660,8 @@ impl std::error::Error for LoadError {}
 const CIRCUIT_ORIGIN: (f64, f64) = (150.0, 130.0);
 /// Vertical gap between rows (component pitch).
 const ROW_GAP: f64 = 132.0;
+/// Clear canvas left between the resized bounds of vertically packed forms.
+const ROW_GUTTER: f64 = ROW_GAP - NODE_R * 2.0;
 /// The golden ratio. The column pitch is the row pitch times PHI, so the grid
 /// the circuit sits on keeps a golden aspect — the earlier "divine geometry"
 /// proportion, now expressed as the board's cell shape.
@@ -2401,6 +2669,8 @@ const PHI: f64 = 1.618_033_988_749_895;
 /// Horizontal gap between columns (one nesting level), a golden step wider than
 /// the row pitch so signals have room to route between stages.
 const COL_GAP: f64 = ROW_GAP * PHI;
+/// Clear canvas left between the resized bounds of adjacent depth columns.
+const COLUMN_GUTTER: f64 = COL_GAP - NODE_R * 2.0;
 
 /// Structural 3D projection: one plane per nesting layer. Generous so the
 /// arrow between two layers has room to draw its head between the shapes.
@@ -2416,6 +2686,79 @@ const CONE_SHRINK: f64 = 1.0 / PHI;
 /// The golden angle. Successive layers start their rings a golden turn apart,
 /// so cones never line up and hide one another.
 const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
+
+/// Compact non-overlapping phyllotaxis positions for one boundary's direct
+/// contents.
+///
+/// The unit spiral is `sqrt(n)` at successive golden angles. Because every
+/// coordinate is linear in one radius coefficient, the exact smallest
+/// coefficient that separates a pair of axis-aligned extents can be solved
+/// directly: either their X bounds or their Y bounds must separate. Taking the
+/// largest pair requirement packs the whole set without iterative guessing.
+fn fibonacci_spots(items: &[(NodeId, (f64, f64))]) -> Vec<(NodeId, f64, f64)> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let unit = items
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let radius = (index as f64).sqrt();
+            let angle = index as f64 * GOLDEN_ANGLE;
+            (radius * angle.cos(), radius * angle.sin())
+        })
+        .collect::<Vec<_>>();
+    let mut coefficient = 0.0_f64;
+    for left in 0..items.len() {
+        for right in left + 1..items.len() {
+            let dx = (unit[left].0 - unit[right].0).abs();
+            let dy = (unit[left].1 - unit[right].1).abs();
+            let left_extent = items[left].1;
+            let right_extent = items[right].1;
+            let required_x = if dx <= f64::EPSILON {
+                f64::INFINITY
+            } else {
+                (left_extent.0 + right_extent.0 + MEDIATOR_PAD) / dx
+            };
+            let required_y = if dy <= f64::EPSILON {
+                f64::INFINITY
+            } else {
+                (left_extent.1 + right_extent.1 + MEDIATOR_PAD) / dy
+            };
+            coefficient = coefficient.max(required_x.min(required_y));
+        }
+    }
+    // Keep equality safely on the non-overlapping side despite floating-point
+    // rounding in the subsequent geometry cache.
+    coefficient *= 1.000_001;
+
+    let mut spots = items
+        .iter()
+        .zip(unit)
+        .map(|((id, extent), (x, y))| (*id, x * coefficient, y * coefficient, *extent))
+        .collect::<Vec<_>>();
+    let (min_x, max_x, min_y, max_y) = spots.iter().fold(
+        (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ),
+        |(min_x, max_x, min_y, max_y), (_, x, y, extent)| {
+            (
+                min_x.min(x - extent.0),
+                max_x.max(x + extent.0),
+                min_y.min(y - extent.1),
+                max_y.max(y + extent.1),
+            )
+        },
+    );
+    let centre = ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
+    spots
+        .drain(..)
+        .map(|(id, x, y, _)| (id, x - centre.0, y - centre.1))
+        .collect()
+}
 
 impl Mandala {
     /// Load a Rebis program onto the canvas — the inverse of [`Self::to_rebis`].
@@ -2441,6 +2784,10 @@ impl Mandala {
 
         // Every arm is the same move: pick the form and text, then attach the
         // ordered children. The uniformity is the point of the abstraction.
+        let (expr, model) = match expr {
+            Expr::Model { selector, body } => (body.as_ref(), Some(selector.to_string())),
+            expr => (expr, None),
+        };
         let (form, text, kids): (Form, String, Vec<&Expr>) = match expr {
             Expr::Prompt(s) => (Form::Prompt, s.clone(), vec![]),
             Expr::Symbol(s) => (Form::Symbol, s.clone(), vec![]),
@@ -2474,174 +2821,271 @@ impl Mandala {
             ),
             Expr::Input { name, body } => (Form::Input, name.clone(), vec![body.as_ref()]),
             Expr::Program(v) => (Form::Program, String::new(), v.iter().collect()),
+            Expr::Model { .. } => unreachable!("model wrapper was unwrapped above"),
         };
 
         let id = self.add(form, text, 0.0, 0.0);
+        self.set_model(id, model);
         depths.push((id, depth));
+        let mut child_ids = Vec::with_capacity(kids.len());
         for kid in kids {
             let child = self.build(kid, depth + 1, depths);
             let _ = self.father_of(id, child);
+            child_ids.push(child);
+        }
+
+        // Source delimiters carry a literal visual interior. Auto-drawing a
+        // compose keeps every form written at that indentation inside its
+        // circle. A square likewise keeps its mediator AND every branch inside
+        // the box: brackets/parentheses are the nesting, so their operands
+        // never need an extra visible parent arrow. Nested visual containers
+        // retain their nearer content; `hold_lexical_subtree` only claims
+        // nodes that do not already have a holder.
+        //
+        // This applies while loading source. A low-level AST relation still
+        // leaves its child outside until presentation membership is assigned;
+        // the visual editor's boundary-crossing gesture assigns both.
+        match expr {
+            Expr::Square { .. } => {
+                for child in child_ids {
+                    self.hold_lexical_subtree(id, child);
+                }
+            }
+            Expr::Compose(_) => {
+                for child in child_ids {
+                    self.hold_lexical_subtree(id, child);
+                }
+            }
+            _ => {}
         }
         id
     }
 
-    /// Lay the syntax tree out as a left-to-right circuit.
+    /// Assign every unclaimed form in a source-written expression to its
+    /// nearest visual delimiter.
+    fn hold_lexical_subtree(&mut self, container: NodeId, root: NodeId) {
+        let mut stack = vec![root];
+        let mut seen = HashSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            stack.extend(self.children(id).into_iter().rev());
+            if self.holder(id).is_none() {
+                let _ = self.hold(container, id);
+            }
+        }
+    }
+
+    /// Lay the syntax tree out as a left-to-right, size-aware circuit.
     ///
-    /// Nesting depth is the **column**: a form sits one column left of its
-    /// operands, so the source reads as stages wired rightward. A tidy row
-    /// packing gives every leaf its own row and centres each form on its
-    /// children's rows, so subtrees stack without overlap and a form sits level
-    /// with the block of operands it drives. The grid's cell is golden (columns
-    /// are [`PHI`]× the row pitch). Coordinates are presentation only and never
-    /// affect generated Rebis.
+    /// Nesting depth is the **column**. Column centres are separated by the
+    /// largest symbol on either side, so resizing a circle or square also
+    /// increases the visible indentation it occupies. Subtrees are packed into
+    /// non-overlapping vertical bands using each symbol's current extent.
+    ///
+    /// Explicit contents are formatted first. Each circle or square receives a
+    /// compact phyllotaxis layout: item `n` sits at `sqrt(n)` turns of the
+    /// golden angle, with the smallest global radius coefficient that keeps all
+    /// resized bounds apart. Nested containers are packed from the inside out.
+    /// Coordinates and content placement are presentation only and never affect
+    /// generated Rebis.
     fn layout(&mut self, depths: &[(NodeId, usize)]) {
-        use std::collections::{HashMap, HashSet};
+        use std::cmp::Reverse;
 
-        let depth_of: HashMap<NodeId, usize> =
-            depths.iter().map(|(id, depth)| (*id, *depth)).collect();
+        #[derive(Default)]
+        struct PackedBand {
+            top: f64,
+            bottom: f64,
+            ids: Vec<NodeId>,
+        }
 
-        // Tidy row packing: post-order over the syntax tree. A leaf claims the
-        // next free row; a form centres on the rows of the operands it drives.
-        // A visited guard keeps shared nodes and cycles finite.
-        fn pack(
-            m: &Mandala,
+        #[allow(clippy::too_many_arguments)]
+        fn pack_rows(
+            mandala: &Mandala,
             id: NodeId,
+            active: &HashSet<NodeId>,
             depth_of: &HashMap<NodeId, usize>,
             rows: &mut HashMap<NodeId, f64>,
             seen: &mut HashSet<NodeId>,
-            next_leaf: &mut f64,
-        ) {
-            if !seen.insert(id) {
-                return;
+            cursor: &mut f64,
+        ) -> Option<PackedBand> {
+            if !active.contains(&id) || !seen.insert(id) {
+                return None;
             }
-            let depth = depth_of.get(&id).copied().unwrap_or(0);
-            let contained = m.contained_children(id);
-            let kids: Vec<NodeId> = m
+            let start = *cursor;
+            let depth = depth_of.get(&id).copied().unwrap_or_default();
+            let mut child_bands = mandala
                 .children(id)
                 .into_iter()
-                .filter(|kid| !contained.contains(kid))
-                .filter(|kid| depth_of.get(kid).copied() == Some(depth + 1))
-                .collect();
-            for kid in &kids {
-                pack(m, *kid, depth_of, rows, seen, next_leaf);
+                .filter(|child| active.contains(child))
+                .filter(|child| depth_of.get(child).copied() == Some(depth + 1))
+                .filter_map(|child| pack_rows(mandala, child, active, depth_of, rows, seen, cursor))
+                .collect::<Vec<_>>();
+            let half_h = mandala.extent(id).1;
+            if child_bands.is_empty() {
+                let centre = start + half_h;
+                rows.insert(id, centre);
+                *cursor = centre + half_h + ROW_GUTTER;
+                return Some(PackedBand {
+                    top: start,
+                    bottom: centre + half_h,
+                    ids: vec![id],
+                });
             }
-            let child_rows: Vec<f64> = kids
-                .iter()
-                .filter_map(|kid| rows.get(kid).copied())
-                .collect();
-            let row = if child_rows.is_empty() {
-                let row = *next_leaf;
-                *next_leaf += 1.0;
-                row
-            } else {
-                child_rows.iter().sum::<f64>() / child_rows.len() as f64
-            };
-            rows.insert(id, row);
-        }
 
-        let mut rows = HashMap::new();
-        let mut seen = HashSet::new();
-        let mut next_leaf = 0.0;
-        for (id, depth) in depths {
-            if *depth == 0 {
-                pack(self, *id, &depth_of, &mut rows, &mut seen, &mut next_leaf);
-            }
-        }
-        // Any node not reached from a root (defensive) gets a trailing row.
-        for (id, _) in depths {
-            if !rows.contains_key(id) {
-                rows.insert(*id, next_leaf);
-                next_leaf += 1.0;
-            }
-        }
+            let mut ids = child_bands
+                .iter_mut()
+                .flat_map(|band| std::mem::take(&mut band.ids))
+                .collect::<Vec<_>>();
+            let mut top = child_bands.first().map(|band| band.top).unwrap_or(start);
+            let mut bottom = child_bands.last().map(|band| band.bottom).unwrap_or(start);
+            let mut centre = (top + bottom) * 0.5;
 
-        // Everything drawn inside a structural boundary claims no column or
-        // row of its own out here: the container is laid out first, then its
-        // contents are placed within it. Otherwise the interior leaves holes
-        // in the exterior circuit.
-        let containers: Vec<(NodeId, Vec<NodeId>)> = depths
-            .iter()
-            .filter_map(|(id, _)| {
-                let interior: Vec<NodeId> = self.interior(*id).into_iter().collect();
-                (!interior.is_empty()).then_some((*id, interior))
-            })
-            .collect();
-        let inside: HashSet<NodeId> = containers
-            .iter()
-            .flat_map(|(_, interior)| interior.iter().copied())
-            .collect();
-
-        let placed: Vec<(NodeId, f64, f64)> = depths
-            .iter()
-            .filter(|(id, _)| !inside.contains(id))
-            .map(|(id, depth)| {
-                let x = CIRCUIT_ORIGIN.0 + *depth as f64 * COL_GAP;
-                let y = CIRCUIT_ORIGIN.1 + rows.get(id).copied().unwrap_or(0.0) * ROW_GAP;
-                (*id, x, y)
-            })
-            .collect();
-        for (id, x, y) in placed {
-            self.move_to(id, x, y);
-        }
-
-        // Lay each interior out as its own small circuit, centred within its
-        // boundary.
-        for (container, interior) in containers {
-            let Some(node) = self.node(container) else {
-                continue;
-            };
-            let (ox, oy) = (node.x, node.y);
-            let roots = self.contained_children(container);
-            if roots.is_empty() {
-                continue;
-            }
-            // Depth and row within the interior only.
-            let inner_depth: HashMap<NodeId, usize> = {
-                let mut out = HashMap::new();
-                let mut frontier = roots
-                    .iter()
-                    .rev()
-                    .map(|root| (*root, 0usize))
-                    .collect::<Vec<_>>();
-                while let Some((id, depth)) = frontier.pop() {
-                    if out.insert(id, depth).is_some() {
-                        continue;
-                    }
-                    for kid in self.children(id) {
-                        frontier.push((kid, depth + 1));
+            // A tall parent may protrude above its first child's band. Shift
+            // the complete subtree down rather than allowing it to overlap the
+            // previous root's band.
+            let lift = (start - (centre - half_h)).max(0.0);
+            if lift > 0.0 {
+                for child in &ids {
+                    if let Some(row) = rows.get_mut(child) {
+                        *row += lift;
                     }
                 }
-                out
+                top += lift;
+                bottom += lift;
+                centre += lift;
+                *cursor += lift;
+            }
+
+            rows.insert(id, centre);
+            ids.push(id);
+            top = top.min(centre - half_h);
+            bottom = bottom.max(centre + half_h);
+            *cursor = (*cursor).max(bottom + ROW_GUTTER);
+            Some(PackedBand { top, bottom, ids })
+        }
+
+        let depth_of = depths.iter().copied().collect::<HashMap<NodeId, usize>>();
+
+        // Pack nested boundaries first so an outer spiral sees the final extent
+        // of every inner square or circle.
+        let mut containers = self
+            .nodes
+            .iter()
+            .filter(|node| {
+                is_visual_container(&node.form) && !self.contained_children(node.id).is_empty()
+            })
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        containers.sort_by_key(|container| {
+            let mut depth = 0usize;
+            let mut cursor = *container;
+            let mut seen = HashSet::new();
+            while seen.insert(cursor) {
+                let Some(holder) = self.holder(cursor) else {
+                    break;
+                };
+                depth += 1;
+                cursor = holder;
+            }
+            Reverse(depth)
+        });
+        for container in containers {
+            let Some(boundary) = self.node(container) else {
+                continue;
             };
-            let mut inner_rows = HashMap::new();
-            let mut inner_seen = HashSet::new();
-            let mut inner_leaf = 0.0;
-            for root in roots {
-                pack(
+            let centre = (boundary.x, boundary.y);
+            let items = self
+                .contained_children(container)
+                .into_iter()
+                .map(|id| (id, self.extent(id)))
+                .collect::<Vec<_>>();
+            for (id, x, y) in fibonacci_spots(&items) {
+                self.move_group_to(id, centre.0 + x, centre.1 + y);
+            }
+        }
+
+        // Interior forms consume space within their nearest boundary, not a
+        // second row or column on the outer circuit.
+        let active = depths
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| !self.is_inlined(*id))
+            .collect::<HashSet<_>>();
+        let mut rows = HashMap::new();
+        let mut seen = HashSet::new();
+        let mut cursor = 0.0;
+        for (id, depth) in depths {
+            if *depth == 0 {
+                let _ = pack_rows(
                     self,
-                    root,
-                    &inner_depth,
-                    &mut inner_rows,
-                    &mut inner_seen,
-                    &mut inner_leaf,
+                    *id,
+                    &active,
+                    &depth_of,
+                    &mut rows,
+                    &mut seen,
+                    &mut cursor,
                 );
             }
-            let max_depth = inner_depth.values().copied().max().unwrap_or(0) as f64;
-            let max_row = inner_rows.values().copied().fold(0.0_f64, f64::max);
-            let spots: Vec<(NodeId, f64, f64)> = interior
-                .iter()
-                .map(|inner| {
-                    let depth = inner_depth.get(inner).copied().unwrap_or(0) as f64;
-                    let row = inner_rows.get(inner).copied().unwrap_or(0.0);
-                    (
-                        *inner,
-                        ox + (depth - max_depth / 2.0) * COL_GAP,
-                        oy + (row - max_row / 2.0) * ROW_GAP,
-                    )
-                })
-                .collect();
-            for (inner, x, y) in spots {
-                self.move_to(inner, x, y);
+        }
+        // Shared or recursive drawings may not expose an ordinary depth-zero
+        // path. Keep their remaining forms finite and deterministically packed.
+        for (id, _) in depths {
+            let _ = pack_rows(
+                self,
+                *id,
+                &active,
+                &depth_of,
+                &mut rows,
+                &mut seen,
+                &mut cursor,
+            );
+        }
+
+        let max_depth = active
+            .iter()
+            .filter_map(|id| depth_of.get(id))
+            .copied()
+            .max()
+            .unwrap_or_default();
+        let mut column_half_widths = vec![NODE_R; max_depth + 1];
+        for id in &active {
+            let depth = depth_of.get(id).copied().unwrap_or_default();
+            column_half_widths[depth] = column_half_widths[depth].max(self.extent(*id).0);
+        }
+        let mut columns = vec![CIRCUIT_ORIGIN.0; max_depth + 1];
+        for depth in 1..columns.len() {
+            columns[depth] = columns[depth - 1]
+                + column_half_widths[depth - 1]
+                + COLUMN_GUTTER
+                + column_half_widths[depth];
+        }
+        let first_row = rows.values().copied().fold(f64::INFINITY, f64::min);
+        let first_row = if first_row.is_finite() {
+            first_row
+        } else {
+            0.0
+        };
+        let positions = depths
+            .iter()
+            .filter(|(id, _)| active.contains(id))
+            .map(|(id, depth)| {
+                (
+                    *id,
+                    columns.get(*depth).copied().unwrap_or(CIRCUIT_ORIGIN.0),
+                    CIRCUIT_ORIGIN.1 + rows.get(id).copied().unwrap_or(first_row) - first_row,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (id, x, y) in positions {
+            if self
+                .node(id)
+                .is_some_and(|node| is_visual_container(&node.form))
+            {
+                self.move_group_to(id, x, y);
+            } else {
+                self.move_to(id, x, y);
             }
         }
     }
@@ -2696,6 +3140,50 @@ mod tests {
         assert_round_trip("((\"local\") \"sub\")"); // Compose
         assert_round_trip("(f \"a\" \"b\")"); // Call
         assert_round_trip("\"p\" \"q\""); // Program
+        assert_round_trip("(-> \"a\" \"b\")/claude:opus5"); // Model
+    }
+
+    #[test]
+    fn model_bindings_are_node_metadata_and_round_trip() {
+        let source = "(-> \"a\"/ollama:qwen4:4b \
+                      ([\"judge\"] \"b\" \"c\")/openrouter:anthropic/claude-opus-4)\
+                      /claude:opus5";
+        let mandala = Mandala::from_rebis(source).unwrap();
+
+        // Model wrappers annotate existing forms; they do not add geometry.
+        assert_eq!(mandala.nodes().len(), 6);
+        let flow = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Forward)
+            .expect("flow");
+        let square = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Square)
+            .expect("square");
+        let prompt = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.text == "a")
+            .expect("bound prompt");
+        assert_eq!(flow.model.as_deref(), Some("claude:opus5"));
+        assert_eq!(
+            square.model.as_deref(),
+            Some("openrouter:anthropic/claude-opus-4")
+        );
+        assert_eq!(prompt.model.as_deref(), Some("ollama:qwen4:4b"));
+        assert!(mandala
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.text.as_str(), "judge" | "b" | "c"))
+            .all(|node| node.model.is_none()));
+
+        let regenerated = mandala.to_rebis().unwrap();
+        assert_eq!(
+            rebis_lang::parse(&regenerated).unwrap(),
+            rebis_lang::parse(source).unwrap()
+        );
     }
 
     #[test]
@@ -2802,6 +3290,88 @@ mod tests {
     }
 
     #[test]
+    fn father_of_keeps_circle_and_square_children_outside() {
+        for form in [Form::Square, Form::Compose] {
+            let mut mandala = Mandala::new();
+            let container = mandala.add(form.clone(), "", 0.0, 0.0);
+            let child = mandala.add(Form::Prompt, "child", 0.0, 0.0);
+
+            assert!(mandala.father_of(container, child));
+            assert_eq!(mandala.children(container), vec![child]);
+            assert!(
+                mandala.contained_children(container).is_empty(),
+                "a father link is not content for {form:?}"
+            );
+            assert!(!mandala.is_inlined(child));
+            assert_eq!(
+                mandala.extent(container),
+                default_extent(mandala.node(container).unwrap())
+            );
+
+            mandala.make_room_for_container(container);
+            let boundary = mandala.extent(container);
+            let child_extent = mandala.extent(child);
+            let child = mandala.node(child).unwrap();
+            assert!(
+                child.x.abs() > boundary.0 + child_extent.0
+                    || child.y.abs() > boundary.1 + child_extent.1,
+                "the child must be visibly outside {form:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn holding_content_is_visual_and_does_not_invent_a_child() {
+        let mut mandala = Mandala::new();
+        let circle = mandala.add(Form::Compose, "", 0.0, 0.0);
+        let content = mandala.add(Form::Prompt, "content", 120.0, 0.0);
+
+        assert!(mandala.hold(circle, content));
+        assert_eq!(mandala.holder(content), Some(circle));
+        assert_eq!(mandala.contained_children(circle), vec![content]);
+        assert!(mandala.children(circle).is_empty());
+        assert!(mandala.is_inlined(content));
+        assert!(matches!(
+            mandala.to_rebis(),
+            Err(MandalaError::ManyRoots(_))
+        ));
+    }
+
+    #[test]
+    fn indentation_drop_can_reparent_and_detach_source_structure() {
+        let mut mandala = Mandala::new();
+        let circle = mandala.add(Form::Compose, "", 0.0, 0.0);
+        let first = mandala.add(Form::Prompt, "first", 0.0, 0.0);
+        let second = mandala.add(Form::Prompt, "second", 0.0, 0.0);
+
+        assert!(mandala.reparent(circle, first));
+        assert!(mandala.reparent(circle, second));
+        assert!(mandala.hold(circle, first));
+        assert!(mandala.hold(circle, second));
+        assert_eq!(mandala.children(circle), vec![first, second]);
+        assert_eq!(mandala.to_rebis().unwrap(), "(\"first\" \"second\")");
+
+        assert!(mandala.detach(first));
+        assert_eq!(mandala.children(circle), vec![second]);
+        assert!(matches!(
+            mandala.to_rebis(),
+            Err(MandalaError::ManyRoots(_))
+        ));
+    }
+
+    #[test]
+    fn reparent_refuses_to_put_an_expression_inside_its_own_descendant() {
+        let mut mandala = Mandala::new();
+        let outer = mandala.add(Form::Compose, "", 0.0, 0.0);
+        let inner = mandala.add(Form::Compose, "", 0.0, 0.0);
+        assert!(mandala.reparent(outer, inner));
+        let before = mandala.arrows.clone();
+
+        assert!(!mandala.reparent(inner, outer));
+        assert_eq!(mandala.arrows, before);
+    }
+
+    #[test]
     fn spatial_layout_uses_structural_nesting_as_depth() {
         let mandala = Mandala::from_rebis("(^ (-> a b))").unwrap();
         let layout = mandala.spatial_layout();
@@ -2820,6 +3390,35 @@ mod tests {
         for child in mandala.children(flow.id) {
             assert_eq!(layout.node(child).unwrap().depth, 2);
         }
+    }
+
+    #[test]
+    fn hand_moving_a_3d_piece_changes_only_its_spatial_projection() {
+        let mut mandala = Mandala::from_rebis("(\"a\" \"b\")").unwrap();
+        let source = mandala.to_rebis().unwrap();
+        let id = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.text == "a")
+            .unwrap()
+            .id;
+        let before = mandala.spatial_layout().node(id).copied().unwrap();
+
+        assert!(mandala.set_spatial_offset(id, [45.0, -30.0, 80.0]));
+        let moved = mandala.spatial_layout().node(id).copied().unwrap();
+        assert_eq!(
+            (moved.x, moved.y, moved.z),
+            (before.x + 45.0, before.y - 30.0, before.z + 80.0)
+        );
+        assert_eq!(mandala.to_rebis().unwrap(), source);
+
+        assert!(mandala.reset_spatial_offsets());
+        let restored = mandala.spatial_layout().node(id).copied().unwrap();
+        assert_eq!(
+            (restored.x, restored.y, restored.z),
+            (before.x, before.y, before.z)
+        );
+        assert!(!mandala.reset_spatial_offsets());
     }
 
     #[test]
@@ -2933,6 +3532,7 @@ mod tests {
         let second = source.add(Form::Prompt, "b", 50.0, 20.0);
         source.father_of(father, first);
         source.father_of(father, second);
+        source.hold(father, first);
 
         let mut target = Mandala::new();
         let existing = target.add(Form::Symbol, "existing", 0.0, 0.0);
@@ -2942,11 +3542,31 @@ mod tests {
         assert!(pasted.iter().all(|id| *id != existing));
         let copied_father = pasted[0];
         assert_eq!(target.children(copied_father), vec![pasted[1], pasted[2]]);
+        assert_eq!(target.holder(pasted[1]), Some(copied_father));
+        assert_eq!(target.holder(pasted[2]), None);
         let copied = target.node(copied_father).unwrap();
         assert_eq!((copied.x, copied.y), (34.0, 52.0));
         assert_eq!(copied.form, Form::Compose);
         assert_eq!(target.node(pasted[1]).unwrap().text, "a");
         assert_eq!(target.node(pasted[2]).unwrap().text, "b");
+    }
+
+    #[test]
+    fn appending_a_copy_preserves_square_and_circle_sizes() {
+        let mut source = Mandala::new();
+        let circle = source.add(Form::Compose, "", 10.0, 20.0);
+        let square = source.add(Form::Square, "", 210.0, 220.0);
+        source.resize(circle, 180.0, 120.0);
+        source.resize(square, 210.0, 130.0);
+
+        let copied = source.induced_subgraph([circle, square]);
+        let mut target = Mandala::new();
+        let pasted = target.append_copy(&copied, (24.0, 32.0));
+
+        assert_eq!(target.node(pasted[0]).unwrap().size, Some((180.0, 180.0)));
+        assert_eq!(target.extent(pasted[0]), (180.0, 180.0));
+        assert_eq!(target.node(pasted[1]).unwrap().size, Some((210.0, 130.0)));
+        assert_eq!(target.extent(pasted[1]), (210.0, 130.0));
     }
 
     #[test]
@@ -3134,26 +3754,32 @@ mod tests {
         assert!(m.is_inlined(inner));
         assert_eq!(m.node(inner).map(|n| n.text.as_str()), Some("m"));
 
-        // The box grew to hold it, and the mediator sits at its centre.
+        // The box grows around all three operands. The mediator participates in
+        // the same compact spiral as the branches instead of being pinned over
+        // the boundary's centre.
         let (half_w, half_h) = m.extent(square.id);
         assert!(half_w > NODE_R && half_h > NODE_RY, "the box grew");
         let node = m.node(inner).unwrap();
-        assert!((node.x - square.x).abs() < f64::EPSILON);
-        assert!((node.y - square.y).abs() < f64::EPSILON);
+        assert!((node.x - square.x).abs() + m.extent(inner).0 < half_w);
+        assert!((node.y - square.y).abs() + m.extent(inner).1 < half_h);
 
-        // Clicking the middle of the box selects the mediator, not the box.
-        assert_eq!(m.hit(square.x, square.y), Some(inner));
-        // Clicking the wall, past the inner form, still selects the square.
-        assert_eq!(m.hit(square.x + NODE_R + 6.0, square.y), Some(square.id));
+        assert_eq!(m.hit(node.x, node.y), Some(inner));
+        // Empty space beside the packed spiral still selects the boundary.
+        let corner = (
+            square.x + half_w - MEDIATOR_PAD / 2.0,
+            square.y + half_h - MEDIATOR_PAD / 2.0,
+        );
+        assert_eq!(m.hit(corner.0, corner.1), Some(square.id));
 
         // None of this changed the program.
         assert_eq!(m.to_rebis().unwrap(), "([\"m\"] \"a\" \"b\")");
     }
 
     #[test]
-    fn a_program_mediator_is_held_inside_the_box_which_grows_for_it() {
-        // The mediator is a whole drawing: an arrow and its two prompts. All of
-        // it belongs between the brackets, so all of it is drawn inside.
+    fn a_square_keeps_its_mediator_and_every_branch_inside_the_box() {
+        // Everything structurally owned by the square belongs inside it when
+        // source is auto-drawn: the mediator flow, its operands, and both
+        // branches. The boundary itself is the parent relation.
         let mut m = Mandala::from_rebis("([(-> \"x\" \"y\")] \"a\" \"b\")").unwrap();
         let square = m
             .nodes()
@@ -3163,12 +3789,32 @@ mod tests {
             .clone();
 
         let interior = m.interior(square.id);
-        assert_eq!(interior.len(), 3, "the arrow and both of its prompts");
+        assert_eq!(
+            interior.len(),
+            5,
+            "mediator expression and both branches are square content"
+        );
+        assert_eq!(
+            m.contained_children(square.id).len(),
+            5,
+            "the complete lexical square is assigned to its boundary"
+        );
         assert!(interior.iter().all(|id| m.is_inlined(*id)));
+        let mediator = m.inlined_mediator(square.id).expect("held mediator");
+        assert_eq!(
+            m.node(mediator).map(|node| &node.form),
+            Some(&Form::Forward)
+        );
+        assert!(
+            m.children(mediator)
+                .into_iter()
+                .all(|child| m.is_inlined(child)),
+            "the mediator's children stay inside the source-written brackets"
+        );
 
-        // The box grew past its empty size to hold them.
+        // The box grew past its empty size to hold the mediator itself.
         let (half_w, half_h) = m.extent(square.id);
-        assert!(half_w > NODE_R * 2.0, "the box widened: {half_w}");
+        assert!(half_w > NODE_R, "the box widened: {half_w}");
         assert!(half_h > NODE_RY, "the box heightened: {half_h}");
 
         // Everything inside really is inside.
@@ -3209,7 +3855,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_contains_moves_and_resizes_around_every_operand() {
+    fn compose_contains_the_complete_source_written_subtrees() {
         let source = "(\"a\" (-> \"b\" \"c\"))";
         let mut m = Mandala::from_rebis(source).unwrap();
         let compose = m
@@ -3222,10 +3868,21 @@ mod tests {
         assert_eq!(
             interior.len(),
             4,
-            "the direct prompt plus the flow and both of its prompts"
+            "the direct prompt, flow, and both flow operands are lexical content"
         );
         assert!(interior.iter().all(|id| m.is_inlined(*id)));
-        assert_eq!(m.contained_children(compose.id).len(), 2);
+        assert_eq!(m.contained_children(compose.id).len(), 4);
+        let flow = m
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Forward)
+            .expect("flow");
+        assert!(
+            m.children(flow.id)
+                .into_iter()
+                .all(|child| m.is_inlined(child)),
+            "source-written descendants remain inside the compose circle"
+        );
 
         let (radius_x, radius_y) = m.extent(compose.id);
         assert_eq!(radius_x, radius_y, "compose must remain a true circle");
@@ -3287,6 +3944,37 @@ mod tests {
             "the circle cannot shrink through its contents: {restored:?}"
         );
         assert_eq!(m.to_rebis().unwrap(), source);
+    }
+
+    #[test]
+    fn source_draw_keeps_nested_squares_and_connections_inside_the_compose_circle() {
+        let source = "(\"anchor\" (~ f (x) '([,x] ,x)))";
+        let mandala = Mandala::from_rebis(source).unwrap();
+        let circle = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Compose)
+            .unwrap();
+        let square = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Square)
+            .unwrap();
+
+        assert_eq!(
+            mandala.holder(square.id),
+            Some(circle.id),
+            "the nested [] belongs to the source-written compose"
+        );
+        assert!(
+            mandala
+                .nodes()
+                .iter()
+                .filter(|node| node.id != circle.id)
+                .all(|node| mandala.is_inlined(node.id)),
+            "the square, surrounding forms, and connecting structure all paint inside"
+        );
+        assert_eq!(mandala.to_rebis().unwrap(), source);
     }
 
     #[test]
@@ -3725,44 +4413,23 @@ mod tests {
     #[test]
     fn loaded_nodes_get_distinct_positions() {
         let m = Mandala::from_rebis("([\"m\"] \"a\" \"b\")").unwrap();
-        // The mediator is drawn INSIDE its square and shares its centre by
-        // design, so it is the one node exempt from distinct placement.
+        // The square is one indentation block. All three operands receive
+        // distinct compact spiral positions within that one boundary.
+        let square = m.nodes().iter().find(|n| n.form == Form::Square).unwrap();
+        let contents = m.contained_children(square.id);
+        assert_eq!(contents.len(), 3);
         let mut seen = HashSet::new();
-        for n in m.nodes().iter().filter(|n| !m.is_inlined(n.id)) {
+        for id in contents {
+            let node = m.node(id).unwrap();
             assert!(
-                seen.insert((n.x.to_bits(), n.y.to_bits())),
-                "two nodes share a position"
+                seen.insert((node.x.to_bits(), node.y.to_bits())),
+                "two nested operands share a position"
             );
+            assert!(m.is_inlined(id));
+            let extent = m.extent(id);
+            assert!((node.x - square.x).abs() + extent.0 < m.extent(square.id).0);
+            assert!((node.y - square.y).abs() + extent.1 < m.extent(square.id).1);
         }
-        let sq = m.nodes().iter().find(|n| n.form == Form::Square).unwrap();
-        assert_eq!(
-            m.inlined_mediator(sq.id)
-                .and_then(|id| m.node(id))
-                .map(|n| (n.x, n.y)),
-            Some((sq.x, sq.y)),
-            "the mediator sits on its square"
-        );
-        // The form sits one column left of the operands it drives, and those
-        // operands share that next column, each on its own row.
-        let operands: Vec<&Node> = m
-            .nodes()
-            .iter()
-            .filter(|n| n.id != sq.id && !m.is_inlined(n.id))
-            .collect();
-        assert!(
-            operands.iter().all(|n| n.x > sq.x),
-            "operands wire rightward from their form"
-        );
-        let columns = operands
-            .iter()
-            .map(|n| n.x.to_bits())
-            .collect::<HashSet<_>>();
-        assert_eq!(columns.len(), 1, "operands share one column");
-        let rows = operands
-            .iter()
-            .map(|n| n.y.to_bits())
-            .collect::<HashSet<_>>();
-        assert_eq!(rows.len(), operands.len(), "each operand gets its own row");
     }
 
     #[test]
@@ -3782,6 +4449,90 @@ mod tests {
             assert_eq!((node.x, node.y), (x, y));
         }
         assert_eq!(mandala.to_rebis().unwrap(), "([\"m\"] \"a\" \"b\")");
+    }
+
+    #[test]
+    fn format_drawing_reserves_proportional_columns_and_rows_for_resized_symbols() {
+        let mut mandala = Mandala::new();
+        let father = mandala.add(Form::Square, "", 0.0, 0.0);
+        let upper = mandala.add(Form::Prompt, "upper", 0.0, 0.0);
+        let lower = mandala.add(Form::Symbol, "lower", 0.0, 0.0);
+        mandala.father_of(father, upper);
+        mandala.father_of(father, lower);
+        mandala.resize(father, 220.0, 90.0);
+        mandala.resize(upper, 70.0, 100.0);
+        mandala.resize(lower, 80.0, 110.0);
+
+        mandala.relayout();
+
+        let father_node = mandala.node(father).unwrap();
+        let upper_node = mandala.node(upper).unwrap();
+        let lower_node = mandala.node(lower).unwrap();
+        let child_column = upper_node.x - father_node.x;
+        assert!(
+            (child_column - (220.0 + COLUMN_GUTTER + 80.0)).abs() < 1e-9,
+            "column indentation must include both resized half-widths"
+        );
+        assert_eq!(upper_node.x, lower_node.x);
+        assert!(
+            (upper_node.y - lower_node.y).abs() >= 100.0 + 110.0 + ROW_GUTTER - 1e-9,
+            "resized child rows must not overlap"
+        );
+    }
+
+    #[test]
+    fn format_drawing_packs_resized_contents_on_the_smallest_golden_spiral() {
+        let mut mandala =
+            Mandala::from_rebis("(\"one\" \"two\" \"three\" \"four\" \"five\" \"six\")").unwrap();
+        let circle = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Compose)
+            .unwrap()
+            .id;
+        let items = mandala.contained_children(circle);
+        assert_eq!(items.len(), 6);
+        mandala.resize(items[2], 96.0, 72.0);
+        mandala.relayout();
+
+        // Every pair is separated by at least the content gutter even though
+        // one symbol is much larger than the others.
+        for (index, left) in items.iter().copied().enumerate() {
+            let left_node = mandala.node(left).unwrap();
+            let left_extent = mandala.extent(left);
+            for right in items.iter().copied().skip(index + 1) {
+                let right_node = mandala.node(right).unwrap();
+                let right_extent = mandala.extent(right);
+                assert!(
+                    (left_node.x - right_node.x).abs()
+                        >= left_extent.0 + right_extent.0 + MEDIATOR_PAD - 1e-6
+                        || (left_node.y - right_node.y).abs()
+                            >= left_extent.1 + right_extent.1 + MEDIATOR_PAD - 1e-6,
+                    "spiral items {left:?} and {right:?} overlap"
+                );
+            }
+        }
+
+        // Relative to item zero, every point keeps the exact phyllotaxis ray
+        // and all radii share one coefficient: r = c√n.
+        let origin = mandala.node(items[0]).unwrap();
+        let mut coefficient: Option<f64> = None;
+        for (index, id) in items.iter().copied().enumerate().skip(1) {
+            let node = mandala.node(id).unwrap();
+            let delta = (node.x - origin.x, node.y - origin.y);
+            let actual_angle = delta.1.atan2(delta.0);
+            let expected_angle = index as f64 * GOLDEN_ANGLE;
+            let angle_error = (actual_angle - expected_angle)
+                .rem_euclid(std::f64::consts::TAU)
+                .min((expected_angle - actual_angle).rem_euclid(std::f64::consts::TAU));
+            assert!(angle_error < 1e-9, "item {index} left its golden ray");
+            let local = delta.0.hypot(delta.1) / (index as f64).sqrt();
+            if let Some(expected) = coefficient {
+                assert!((local - expected).abs() < 1e-8);
+            } else {
+                coefficient = Some(local);
+            }
+        }
     }
 
     #[test]
@@ -3926,10 +4677,36 @@ mod tests {
             assert!(corner.wide && corner.tall, "a corner sizes both");
         }
 
-        // Fixed forms do not offer a resizable border.
+        // Every visible symbol offers the same scale outline.
         let mut other = Mandala::new();
-        other.add(Form::Prompt, "a", 0.0, 0.0);
-        assert!(other.border_hit(NODE_R - 1.0, 0.0).is_none());
+        let prompt = other.add(Form::Prompt, "a", 0.0, 0.0);
+        assert_eq!(
+            other.border_hit(NODE_R - 1.0, 0.0).map(|grab| grab.id),
+            Some(prompt)
+        );
+    }
+
+    #[test]
+    fn every_visible_symbol_has_a_resizable_scale_outline() {
+        for (_, make, _) in Form::ALL {
+            let mut mandala = Mandala::new();
+            let form = make();
+            let id = mandala.add(form.clone(), form.name(), 25.0, -15.0);
+            let (base_w, base_h) = mandala.extent(id);
+            mandala.resize(id, base_w * 1.8, base_h * 1.6);
+            let (half_w, half_h) = mandala.extent(id);
+            if form == Form::Compose {
+                let radius = (base_w * 1.8).max(base_h * 1.6);
+                assert_eq!((half_w, half_h), (radius, radius));
+            } else {
+                assert_eq!((half_w, half_h), (base_w * 1.8, base_h * 1.6));
+            }
+            let grab = mandala
+                .resize_grab(25.0 + half_w, -15.0)
+                .unwrap_or_else(|| panic!("{} has no scale outline", form.name()));
+            assert_eq!(grab.id, id);
+            assert!(grab.wide);
+        }
     }
 
     #[test]
@@ -4100,6 +4877,7 @@ mod tests {
             .collect::<Vec<_>>();
         for pair in squares.windows(2) {
             m.father_of(pair[0], pair[1]);
+            m.hold(pair[0], pair[1]);
         }
 
         let outer = m.extent(squares[0]);
@@ -4110,18 +4888,19 @@ mod tests {
     }
 
     #[test]
-    fn geometry_cache_is_invalidated_by_presentation_and_structure_edits() {
+    fn geometry_cache_is_invalidated_by_presentation_and_content_edits() {
         let mut m = Mandala::new();
         let square = m.add(Form::Square, "", 0.0, 0.0);
         let mediator = m.add(Form::Prompt, "m", 0.0, 0.0);
         m.father_of(square, mediator);
+        m.hold(square, mediator);
         let initial = m.extent(square);
 
         m.move_to(mediator, 200.0, 0.0);
         let moved = m.extent(square);
         assert!(moved.0 > initial.0);
 
-        m.disconnect(mediator, square);
+        m.release(mediator);
         assert_eq!(m.extent(square), (NODE_R, NODE_RY));
     }
 
@@ -4132,6 +4911,7 @@ mod tests {
         let loose = m.add(Form::Prompt, "loose", 100.0, 0.0);
         let mediator = m.add(Form::Prompt, "mediator", 200.0, 0.0);
         m.father_of(square, mediator);
+        m.hold(square, mediator);
 
         m.make_room_for_container(square);
 
@@ -4155,6 +4935,7 @@ mod tests {
         let loose = m.add(Form::Prompt, "loose", 100.0, 0.0);
         let operand = m.add(Form::Prompt, "operand", 220.0, 0.0);
         m.father_of(compose, operand);
+        m.hold(compose, operand);
 
         m.make_room_for_container(compose);
 

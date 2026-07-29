@@ -400,10 +400,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                         {
                             out.push(format!(
                                 "     {}",
-                                dim(
-                                    (74, 124, 240),
-                                    &format!("\u{263d} {}", clip(line.trim(), 92))
-                                )
+                                dim(GREEN(), &format!("\u{263d} {}", clip(line.trim(), 92)))
                             ));
                         }
                     }
@@ -415,20 +412,20 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                 let path = input["file_path"].as_str().unwrap_or("?");
                                 out.push(format!(
                                     "   {} {}",
-                                    bold((220, 170, 60), "\u{00b1} edit"),
+                                    bold(PURPLE(), "\u{00b1} edit"),
                                     bone(short(path))
                                 ));
                                 push_block(
                                     &mut out,
                                     input["old_string"].as_str().unwrap_or(""),
                                     '-',
-                                    (200, 90, 90),
+                                    PURPLE(),
                                 );
                                 push_block(
                                     &mut out,
                                     input["new_string"].as_str().unwrap_or(""),
                                     '+',
-                                    (90, 200, 110),
+                                    GREEN(),
                                 );
                             }
                             "Write" => {
@@ -436,17 +433,17 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                 let contents = input["content"].as_str().unwrap_or("");
                                 out.push(format!(
                                     "   {} {}  {}",
-                                    bold((220, 170, 60), "\u{271a} write"),
+                                    bold(PURPLE(), "\u{271a} write"),
                                     bone(short(path)),
                                     dim(ASH(), &format!("({} lines)", contents.lines().count())),
                                 ));
-                                push_block(&mut out, contents, '+', (90, 200, 110));
+                                push_block(&mut out, contents, '+', GREEN());
                             }
                             "Bash" => {
                                 let cmd = input["command"].as_str().unwrap_or("?");
                                 out.push(format!(
                                     "   {} {}",
-                                    bold(RED(), "$"),
+                                    bold(GREEN(), "$"),
                                     bone(&clip(cmd, 88))
                                 ));
                             }
@@ -454,7 +451,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                 let path = input["file_path"].as_str().unwrap_or("?");
                                 out.push(format!(
                                     "   {} {}",
-                                    fg((74, 124, 240), "\u{25cb} read"),
+                                    fg(GREEN(), "\u{25cb} read"),
                                     dim(ASH(), short(path))
                                 ));
                             }
@@ -462,7 +459,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                 let pat = input["pattern"].as_str().unwrap_or("?");
                                 out.push(format!(
                                     "   {} {}",
-                                    fg((74, 124, 240), "\u{2315} search"),
+                                    fg(GREEN(), "\u{2315} search"),
                                     dim(ASH(), &clip(pat, 80))
                                 ));
                             }
@@ -475,7 +472,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                             other => {
                                 out.push(format!(
                                     "   {} {}",
-                                    fg((74, 124, 240), "\u{2699}"),
+                                    fg(GREEN(), "\u{2699}"),
                                     dim(ASH(), other)
                                 ));
                             }
@@ -502,7 +499,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                     if let Some(l) = text.lines().find(|l| !l.trim().is_empty()) {
                         out.push(format!(
                             "     {}",
-                            fg((200, 90, 90), &format!("\u{2192} {}", clip(l.trim(), 88)))
+                            fg(PURPLE(), &format!("\u{2192} {}", clip(l.trim(), 88)))
                         ));
                     }
                 }

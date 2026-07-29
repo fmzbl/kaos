@@ -1028,6 +1028,9 @@ fn walk(expr: &Expr, depth: usize, parent: Option<usize>, cells: &mut Vec<Cell>)
     };
 
     match expr {
+        // A model selector is execution metadata on the same form, not an
+        // extra site in the program's geometry.
+        Expr::Model { body, .. } => walk(body, depth, parent, cells),
         Expr::Prompt(text) => {
             let me = push(Site::Prompt, cells);
             // A prompt's own bytes give it a resting state even before it fires,

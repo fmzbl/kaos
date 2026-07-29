@@ -16,6 +16,14 @@ language but follow the node prompt and return only its flow value.
   Rebis never interpolates variable names inside quoted strings.
 - A bare atom is a symbol. Symbols name macros, macro parameters, modules, and
   deterministic judges; a symbol alone does not call a model.
+- `E/provider:model` optionally routes every model call in expression `E`
+  through that Kaos model instead of the session default. The suffix is lexical:
+  nested bindings override their parent only for their subtree, while unbound
+  forms inherit. It changes no value and makes no call itself. Write it adjacent
+  to a closing quote or `)`, for example `"draft"/ollama:qwen4:4b`,
+  `(-> "a" "b")/claude:opus5`, or
+  `(["judge"] "a" "b")/openrouter:anthropic/claude-opus-4`. A slash inside a
+  symbol such as `std/loops` remains part of the symbol.
 - `($ A B ...)` is string composition — the one operator over the string value.
   It **interpolates** its operands into one string and yields that string;
   nothing inside `$` fires or runs. An operand contributes its text: a prompt its
@@ -299,7 +307,9 @@ When correcting a Rebis program, check these before changing its design:
 7. Repeated macro parameters intentionally repeat model work.
 8. `<-` has only reverse-flow semantics; rewrite it as `->` when direction is
    unclear.
-9. Use `/format` or `/tree` to validate structure before spending live model
+9. A model suffix is adjacent to a closing quote or `)` and names a Kaos model;
+   whitespace before `/` does not bind it.
+10. Use `/format` or `/tree` to validate structure before spending live model
    calls. `kaos rebis run --dry` also expands and traces model-free shapes, but
    a model-driven `%` gate will intentionally report no decision when its dry
    oracle returns `nothing`.

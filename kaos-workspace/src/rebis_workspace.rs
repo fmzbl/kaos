@@ -59,6 +59,8 @@ pub enum Highlight {
     Import,
     /// The `^` syntax inverter.
     Invert,
+    /// A postfix `/provider:model` selector.
+    Model,
     Backflow,
     Parenthesis,
     Whitespace,
@@ -70,7 +72,7 @@ pub enum Highlight {
 /// Complete punctuation token set accepted by Rebis, in reference-manual
 /// order. The editor renders this as a compact top-bar language legend.
 pub const REBIS_SYMBOLS: &[&str] = &[
-    "(", ")", "[", "]", "~", "#", "'", ",", "$", "%", "^", "&", "->", "<-", ";", "\"",
+    "(", ")", "[", "]", "~", "#", "'", ",", "$", "%", "^", "&", "/", "->", "<-", ";", "\"",
 ];
 
 /// The live state of a source buffer, for an editor's status line.
@@ -167,6 +169,20 @@ pub fn line_column(source: &str, byte: usize) -> (usize, usize) {
 #[must_use]
 pub fn matching_form(source: &str, cursor: usize) -> Option<(usize, usize)> {
     let chars: Vec<char> = source.chars().collect();
+    let with_model = |start: usize, end: usize| {
+        let Some((closing_byte, closing)) = source.char_indices().nth(end) else {
+            return (start, end);
+        };
+        let suffix_start = closing_byte + closing.len_utf8();
+        let suffix = rebis_lang::tokens(source).into_iter().find(|token| {
+            token.start == suffix_start && token.kind == rebis_lang::TokenKind::Model
+        });
+        let Some(suffix) = suffix else {
+            return (start, end);
+        };
+        let suffix_end = source[..suffix.end].chars().count().saturating_sub(1);
+        (start, suffix_end)
+    };
     let at = [Some(cursor), cursor.checked_sub(1)]
         .into_iter()
         .flatten()
@@ -180,7 +196,7 @@ pub fn matching_form(source: &str, cursor: usize) -> Option<(usize, usize)> {
                     ')' => {
                         depth -= 1;
                         if depth == 0 {
-                            return Some((at, index));
+                            return Some(with_model(at, index));
                         }
                     }
                     _ => {}
@@ -196,7 +212,7 @@ pub fn matching_form(source: &str, cursor: usize) -> Option<(usize, usize)> {
                     '(' => {
                         depth -= 1;
                         if depth == 0 {
-                            return Some((index, at));
+                            return Some(with_model(index, at));
                         }
                     }
                     _ => {}
@@ -231,7 +247,13 @@ pub fn scoped_block_source(source: &str, block_source: &str) -> Result<String, S
     let mut items = Vec::new();
     if let Ok(Expr::Compose(top) | Expr::Program(top)) = rebis_lang::parse(source) {
         for item in top {
-            if matches!(item, Expr::Function { .. } | Expr::Import { .. }) {
+            let static_item = matches!(item, Expr::Function { .. } | Expr::Import { .. })
+                || matches!(
+                    &item,
+                    Expr::Model { body, .. }
+                        if matches!(body.as_ref(), Expr::Function { .. } | Expr::Import { .. })
+                );
+            if static_item {
                 items.push(item);
             }
         }
@@ -2513,6 +2535,7 @@ fn highlight_for(
         | TokenKind::Amp
         | TokenKind::Percent => Highlight::Mediate,
         TokenKind::Invert => Highlight::Invert,
+        TokenKind::Model => Highlight::Model,
         TokenKind::Forward => Highlight::Forward,
         TokenKind::Backflow => Highlight::Backflow,
         TokenKind::Comment => Highlight::Comment,
@@ -4474,6 +4497,27 @@ mod tests {
     }
 
     #[test]
+    fn postfix_models_have_their_own_highlight_without_stealing_module_slashes() {
+        let source = "\"hello\"/ollama:qwen4:4b";
+        let colours = highlights(source);
+        let model_start = source
+            .chars()
+            .position(|character| character == '/')
+            .unwrap();
+        assert!(colours[model_start..]
+            .iter()
+            .all(|highlight| *highlight == Highlight::Model));
+
+        let import = "(# std/loops)";
+        let import_colours = highlights(import);
+        let slash = import
+            .chars()
+            .position(|character| character == '/')
+            .unwrap();
+        assert_eq!(import_colours[slash], Highlight::Atom);
+    }
+
+    #[test]
     fn format_guards_comments_and_bang_confirms_the_drop() {
         let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
         workspace.editor = Editor::new("; keep me\n(-> \"a\" \"b\")".to_string());
@@ -4723,6 +4767,14 @@ mod tests {
         assert_eq!(editor.matching_parentheses(), Some((1, 14)));
         editor.cursor = 14;
         assert_eq!(editor.matching_parentheses(), Some((1, 14)));
+
+        let editor = Editor::new("(-> \"a\" \"b\")/claude:opus5");
+        assert_eq!(
+            editor
+                .matching_parentheses()
+                .map(|(start, end)| slice_chars(editor.source(), start, end)),
+            Some("(-> \"a\" \"b\")/claude:opus5".to_string())
+        );
     }
 
     #[test]
@@ -5472,6 +5524,19 @@ mod tests {
             "parallel block source: {source}"
         );
         assert!(source.contains("\"parser\""));
+    }
+
+    #[test]
+    fn block_runs_keep_model_bound_top_level_definitions() {
+        let source = "(~ inspect (topic) (-> topic \"report\"))/claude:opus5\n(inspect \"parser\")";
+        let scoped = scoped_block_source(source, "(inspect \"parser\")").unwrap();
+        let parsed = rebis_lang::parse(&scoped).unwrap();
+
+        assert!(
+            scoped.contains("/claude:opus5"),
+            "scoped block source: {scoped}"
+        );
+        assert!(matches!(parsed, Expr::Compose(_)));
     }
 
     #[test]
