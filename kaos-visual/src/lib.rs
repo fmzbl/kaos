@@ -5619,7 +5619,16 @@ impl Editor {
         if response.drag_stopped_by(PointerButton::Middle) {
             self.drag = Drag::None;
         }
-        if response.dragged_by(PointerButton::Primary) {
+        if response.dragged_by(PointerButton::Primary) && panning {
+            // Space is a mode, not a latch: while it is held the pointer moves
+            // the view, whatever the gesture started out as. Consulting it only
+            // on the one frame the drag began meant a key state that flickered
+            // at that instant — autorepeat on some desktops sends release/press
+            // pairs — left the gesture stuck on whatever was under the pointer,
+            // with the hand cursor still showing and nothing moving.
+            let d = response.drag_delta();
+            self.doc_mut().view.pan(f64::from(d.x), f64::from(d.y));
+        } else if response.dragged_by(PointerButton::Primary) {
             match self.drag {
                 Drag::Resize(grab) => {
                     if let Some(p) = response.interact_pointer_pos() {
@@ -9432,8 +9441,13 @@ mod tests {
             let before = (node.x, node.y);
             let framed = editor.doc().view;
 
-            let held_space = |mut events: Vec<Event>| {
-                if space {
+            // Pressed once and then held, exactly as a keyboard delivers it:
+            // re-sending the press every frame would hide a failure to keep the
+            // key down between frames.
+            let mut pressed_once = false;
+            let mut held_space = |mut events: Vec<Event>| {
+                if space && !pressed_once {
+                    pressed_once = true;
                     events.insert(
                         0,
                         Event::Key {
@@ -9489,6 +9503,85 @@ mod tests {
             (view.tx, view.ty),
             (framed.tx, framed.ty),
             "and leaves the view where framing put it"
+        );
+    }
+
+    #[test]
+    fn space_pressed_mid_drag_takes_over_and_moves_the_view() {
+        use egui::{Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0));
+        let mut editor = Editor::new(Mandala::from_rebis("(\"a\" \"b\")").unwrap());
+        let ctx = egui::Context::default();
+        let mut origin = Pos2::ZERO;
+        let frame = |editor: &mut Editor, events: Vec<Event>, origin: &mut Pos2| {
+            let _ = ctx.run(
+                RawInput {
+                    events,
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        *origin = ui.max_rect().min;
+                        editor.canvas(ui);
+                    });
+                },
+            );
+        };
+        frame(&mut editor, Vec::new(), &mut origin);
+        frame(&mut editor, Vec::new(), &mut origin);
+
+        // Start an ordinary drag on a form, with no space held at all.
+        let held = editor.doc().mandala.nodes()[1].id;
+        let node = editor.doc().mandala.node(held).unwrap();
+        let (sx, sy) = editor.doc().view.to_screen(node.x, node.y);
+        let start = origin + Vec2::new(sx as f32, sy as f32);
+        frame(
+            &mut editor,
+            vec![
+                Event::PointerMoved(start),
+                Event::PointerButton {
+                    pos: start,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::default(),
+                },
+            ],
+            &mut origin,
+        );
+        frame(
+            &mut editor,
+            vec![Event::PointerMoved(start + Vec2::splat(30.0))],
+            &mut origin,
+        );
+
+        // Now press space part-way through. Space is a mode, so the view takes
+        // over from here even though the gesture began as something else.
+        let framed = editor.doc().view;
+        let moved = editor.doc().mandala.node(held).map(|n| (n.x, n.y)).unwrap();
+        frame(
+            &mut editor,
+            vec![
+                Event::Key {
+                    key: Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::default(),
+                },
+                Event::PointerMoved(start + Vec2::splat(90.0)),
+            ],
+            &mut origin,
+        );
+
+        assert!(
+            (editor.doc().view.tx - framed.tx).abs() > 1.0,
+            "space pressed mid-drag must start moving the view"
+        );
+        assert_eq!(
+            editor.doc().mandala.node(held).map(|n| (n.x, n.y)),
+            Some(moved),
+            "and must stop moving the form it had hold of"
         );
     }
 
