@@ -1,6 +1,6 @@
 event    prompt started · abstraction 0 · Answer with exactly the word: reversed
 Rebis agent 1 · Answer with exactly the word: reversed
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    reversed
 answer   reversed
@@ -11,7 +11,7 @@ prompt   INPUT:
 prompt   RESULT 1:
 prompt   reversed
 Rebis agent 2 · Repeat the word you were given, exactly, and nothing else.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    reversed
 answer   reversed

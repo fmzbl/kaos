@@ -1,32 +1,32 @@
 event    prompt started · abstraction 0 · Answer with exactly the word: shared
 Rebis agent 1 · Answer with exactly the word: shared
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    shared
 answer   shared
 event    subject bound · shared
-Rebis agent 3 · Say the word you were given, then the word second.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
 Rebis agent 2 · Say the word you were given, then the word first.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
+Rebis agent 3 · Say the word you were given, then the word second.
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    shared second
+model    shared
 model turn 1 · complete response
-model    shared first
+model    shared
 event    forward value routed
 event    prompt started · abstraction 1 · Say the word you were given, then the word first.
 prompt   
 prompt   INPUT:
 prompt   RESULT 1:
 prompt   shared
-answer   shared first
+answer   shared
 event    forward value routed
 event    prompt started · abstraction 1 · Say the word you were given, then the word second.
 prompt   
 prompt   INPUT:
 prompt   RESULT 1:
 prompt   shared
-answer   shared second
+answer   shared
 event    mediator started · 2 branch(es)
 event    prompt started · abstraction 1 · Reply with both readings, separated by ' | ', nothing else.
 prompt   
@@ -35,34 +35,34 @@ prompt   RESULT 1:
 prompt   shared
 prompt   
 prompt   RESULT 2:
-prompt   shared first
+prompt   shared
 prompt   
 prompt   RESULT 3:
 prompt   shared
 prompt   
 prompt   RESULT 4:
-prompt   shared second
+prompt   shared
 Rebis agent 4 · Reply with both readings, separated by ' | ', nothing else.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    shared first | shared second
-answer   shared first | shared second
+model    shared | shared
+answer   shared | shared
 o-[]-o
 RESULT
-result   shared first | shared second
+result   shared | shared
 TRACE
 firing   1 · ○ prompt Answer with exactly the word: shared · abstraction 0
 answer   shared
 firing   2 · & input subject · abstraction 1
 answer   shared
 firing   3 · ○ prompt Say the word you were given, then the word first. · abstraction 1
-answer   shared first
+answer   shared
 firing   4 · & input subject · abstraction 1
 answer   shared
 firing   5 · ○ prompt Say the word you were given, then the word second. · abstraction 1
-answer   shared second
+answer   shared
 firing   6 · ○ prompt Reply with both readings, separated by ' | ', nothing else. · abstraction 1
-answer   shared first | shared second
+answer   shared | shared
 score    1.000
 terms    Reply with both readings, separated by ' | ', nothing else.
 evidence 0 line(s)

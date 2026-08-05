@@ -1,7 +1,7 @@
 event    macro twice expanded · 255 remaining
 event    prompt started · abstraction 1 · Answer with exactly the word: expanded
 Rebis agent 1 · Answer with exactly the word: expanded
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    expanded
 answer   expanded
@@ -12,22 +12,18 @@ prompt   INPUT:
 prompt   RESULT 1:
 prompt   expanded
 Rebis agent 2 · Repeat what you were given, exactly.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    RESULT 1:
 model    expanded
-answer   RESULT 1:
 answer   expanded
 o-[]-o
 RESULT
-result   RESULT 1:
 result   expanded
 TRACE
 firing   1 · ○ prompt Answer with exactly the word: expanded · abstraction 1
 answer   expanded
 firing   2 · ○ prompt Repeat what you were given, exactly. · abstraction 1
-answer   RESULT 1:
-expanded
+answer   expanded
 score    1.000
 terms    Repeat what you were given, exactly.
 evidence 0 line(s)

@@ -3,16 +3,16 @@ event    macro std-reflected expanded · 255 remaining
 event    macro count-prompts expanded · 254 remaining
 event    prompt started · abstraction 1 · Reply with the number of quoted strings in this Rebis program, and nothing else. Program: ((# std/source) (~ count-prompts (p) ($ "Reply with the number of quoted strings in this Rebis program, and " "nothing else. Program: " p)) (std-reflected count-prompts))
 Rebis agent 1 · Reply with the number of quoted strings in this Rebis program, and nothing else. Program: ((# std/source) (~ count-prompts (p) ($ "Reply with the number of quoted strings in this Rebis program, and " "nothing else. Program: " p)) (std-reflected count-prompts))
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    2
-answer   2
+model    1
+answer   1
 o-[]-o
 RESULT
-result   2
+result   1
 TRACE
 firing   1 · ○ prompt Reply with the number of quoted strings in this Rebis program, and nothing else. Program: ((# std/source) (~ count-prompts (p) ($ "Reply with the number of quoted strings in this Rebis program, and " "nothing else. Program: " p)) (std-reflected count-prompts)) · abstraction 1
-answer   2
+answer   1
 score    1.000
 terms    Reply with the number of quoted strings in this Rebis program, and  nothing else. Program: 
 evidence 0 line(s)

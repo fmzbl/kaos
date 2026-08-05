@@ -1,12 +1,12 @@
 event    prompt started · abstraction 1 · Answer with exactly the sentence: The beacon is red.
 Rebis agent 1 · Answer with exactly the sentence: The beacon is red.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    The beacon is red.
 answer   The beacon is red.
 event    prompt started · abstraction 1 · Answer with exactly the sentence: The beacon is green.
 Rebis agent 2 · Answer with exactly the sentence: The beacon is green.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    The beacon is green.
 answer   The beacon is green.
@@ -20,13 +20,13 @@ prompt   INPUT:
 prompt   RESULT 1:
 prompt   The beacon is green.
 Rebis agent 3 · Repeat the sentence you were given, exactly.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    RESULT 1: The beacon is green.
-answer   RESULT 1: The beacon is green.
+model    The beacon is green.
+answer   The beacon is green.
 o-[]-o
 RESULT
-result   RESULT 1: The beacon is green.
+result   The beacon is green.
 TRACE
 firing   1 · ○ prompt Answer with exactly the sentence: The beacon is red. · abstraction 1
 answer   The beacon is red.
@@ -35,7 +35,7 @@ answer   The beacon is green.
 firing   3 · ? flashback beacon · abstraction 1
 answer   The beacon is green.
 firing   4 · ○ prompt Repeat the sentence you were given, exactly. · abstraction 1
-answer   RESULT 1: The beacon is green.
+answer   The beacon is green.
 score    1.000
 terms    Repeat the sentence you were given, exactly.
 evidence 0 line(s)

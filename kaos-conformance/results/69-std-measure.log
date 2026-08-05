@@ -17,7 +17,7 @@ event    macro std-less-one expanded · 241 remaining
 event    binary gate selected 1 branch
 event    prompt started · abstraction 2 · Answer with exactly the word: enough
 Rebis agent 1 · Answer with exactly the word: enough
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    enough
 answer   enough

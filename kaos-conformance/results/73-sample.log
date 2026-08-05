@@ -8,17 +8,17 @@ event    macro std-divide expanded · 250 remaining
 event    prompt started · abstraction 1 · Reply with exactly the three values below, separated by single spaces, and nothing else.
 prompt   5 33 1/2
 Rebis agent 1 · Reply with exactly the three values below, separated by single spaces, and nothing else.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    5 33 1/2
-answer   5 33 1/2
+model    5 33 2.5
+answer   5 33 2.5
 o-[]-o
 RESULT
-result   5 33 1/2
+result   5 33 2.5
 TRACE
 firing   1 · ○ prompt Reply with exactly the three values below, separated by single spaces, and nothing else.
 5 33 1/2 · abstraction 1
-answer   5 33 1/2
+answer   5 33 2.5
 score    1.000
 terms      Reply with exactly the three values below, separated by single spaces, and nothing else.
 

@@ -1,25 +1,25 @@
 Rebis agent 1 · Answer with exactly: the failure is reproducible on every run
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 Rebis agent 2 · Answer with exactly: the failure appears at random
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    the failure appears at random
 model turn 1 · complete response
-model    the failure is reproducible on every run
+model    true
 event    prompt started · abstraction 1 · Answer with exactly: the failure is reproducible on every run
-answer   the failure is reproducible on every run
+answer   true
 event    prompt started · abstraction 1 · Answer with exactly: the failure appears at random
 answer   the failure appears at random
 event    mediator started · 2 branch(es)
-event    mediator resolved deterministically · result 1 · holonomy 0%
+event    mediator resolved deterministically · result 2 · holonomy 0%
 o-[]-o
 RESULT
-result   the failure is reproducible on every run
+result   the failure appears at random
 TRACE
 firing   1 · ○ prompt Answer with exactly: the failure is reproducible on every run · abstraction 1
-answer   the failure is reproducible on every run
+answer   true
 firing   2 · ○ prompt Answer with exactly: the failure appears at random · abstraction 1
 answer   the failure appears at random
 score    1.000
 terms    failure
-evidence 2 line(s)
+evidence 1 line(s)

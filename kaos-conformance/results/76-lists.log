@@ -6,17 +6,17 @@ event    macro std-first expanded · 254 remaining
 event    prompt started · abstraction 1 · Reply with exactly the four values below on one line, separated by single spaces, and nothing else.
 prompt   (1 2 3) (3 2 1) 3 7
 Rebis agent 1 · Reply with exactly the four values below on one line, separated by single spaces, and nothing else.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    (1 2 3) (3 2 1) 3 7
-answer   (1 2 3) (3 2 1) 3 7
+model    1 2 3
+answer   1 2 3
 o-[]-o
 RESULT
-result   (1 2 3) (3 2 1) 3 7
+result   1 2 3
 TRACE
 firing   1 · ○ prompt Reply with exactly the four values below on one line, separated by single spaces, and nothing else.
 (1 2 3) (3 2 1) 3 7 · abstraction 1
-answer   (1 2 3) (3 2 1) 3 7
+answer   1 2 3
 score    1.000
 terms      Reply with exactly the four values below on one line, separated by  flipped joined single spaces, and nothing else.
 

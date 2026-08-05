@@ -1,7 +1,7 @@
 event    syntax orientation inverted
 event    prompt started · abstraction 0 · Answer with exactly the word: identity
 Rebis agent 1 · Answer with exactly the word: identity
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    identity
 answer   identity
@@ -12,22 +12,18 @@ prompt   INPUT:
 prompt   RESULT 1:
 prompt   identity
 Rebis agent 2 · Repeat what you were given, exactly.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    RESULT 1:
 model    identity
-answer   RESULT 1:
 answer   identity
 o-[]-o
 RESULT
-result   RESULT 1:
 result   identity
 TRACE
 firing   1 · ○ prompt Answer with exactly the word: identity · abstraction 0
 answer   identity
 firing   2 · ○ prompt Repeat what you were given, exactly. · abstraction 0
-answer   RESULT 1:
-identity
+answer   identity
 score    1.000
 terms    Repeat what you were given, exactly.
 evidence 0 line(s)

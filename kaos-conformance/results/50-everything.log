@@ -3,29 +3,29 @@ event    prompt started · abstraction 1 · Answer in as few words as possible.
 prompt   
 prompt   Answer with exactly: the retry queue
 Rebis agent 1 · Answer in as few words as possible.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    the retry queue
-answer   the retry queue
-answer   the retry queue
-event    subject bound · the retry queue
+model    retry queue
+answer   retry queue
+answer   retry queue
+event    subject bound · retry queue
 event    prompt started · abstraction 2 · Answer in as few words as possible.
 prompt   
 prompt   Answer with exactly the single character: 1
 Rebis agent 2 · Answer in as few words as possible.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    1
 answer   1
 event    binary gate selected 1 branch
 Rebis agent 3 · Answer in as few words as possible.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 Rebis agent 4 · Answer in as few words as possible.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    infinite retry loop
+model    retry queue
 model turn 1 · complete response
-model    reliability
+model    retry
 event    forward value routed
 event    prompt started · abstraction 3 · Answer in as few words as possible.
 prompt   
@@ -33,8 +33,8 @@ prompt   Name one failure mode of this.
 prompt   
 prompt   INPUT:
 prompt   RESULT 1:
-prompt   the retry queue
-answer   infinite retry loop
+prompt   retry queue
+answer   retry
 event    syntax orientation inverted
 event    backflow value routed
 event    prompt started · abstraction 3 · Answer in as few words as possible.
@@ -43,8 +43,8 @@ prompt   Name one strength of this.
 prompt   
 prompt   INPUT:
 prompt   RESULT 1:
-prompt   the retry queue
-answer   reliability
+prompt   retry queue
+answer   retry queue
 event    mediator started · 2 branch(es)
 event    prompt started · abstraction 3 · Answer in as few words as possible.
 prompt   
@@ -52,41 +52,42 @@ prompt   Reply with both readings, separated by ' | ', nothing else.
 prompt   
 prompt   INPUT:
 prompt   RESULT 1:
-prompt   the retry queue
+prompt   retry queue
 prompt   
 prompt   RESULT 2:
-prompt   infinite retry loop
+prompt   retry
 prompt   
 prompt   RESULT 3:
-prompt   the retry queue
+prompt   retry queue
 prompt   
 prompt   RESULT 4:
-prompt   reliability
+prompt   retry queue
 Rebis agent 5 · Answer in as few words as possible.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    the retry queue | infinite retry loop
-answer   the retry queue | infinite retry loop
+model    retry queue | retry
+answer   retry queue | retry
+dream    kept 1 answer · 5 remembered
 o-[]-o
 RESULT
-result   the retry queue | infinite retry loop
+result   retry queue | retry
 TRACE
 firing   1 · ○ prompt Answer with exactly: the retry queue · abstraction 1
-answer   the retry queue
+answer   retry queue
 firing   2 · ! dream · abstraction 1
-answer   the retry queue
+answer   retry queue
 firing   3 · ○ prompt Answer with exactly the single character: 1 · abstraction 2
 answer   1
 firing   4 · & input subject · abstraction 3
-answer   the retry queue
+answer   retry queue
 firing   5 · ○ prompt Name one failure mode of this. · abstraction 3
-answer   infinite retry loop
+answer   retry
 firing   6 · & input subject · abstraction 3
-answer   the retry queue
+answer   retry queue
 firing   7 · ○ prompt Name one strength of this. · abstraction 3
-answer   reliability
+answer   retry queue
 firing   8 · ○ prompt Reply with both readings, separated by ' | ', nothing else. · abstraction 3
-answer   the retry queue | infinite retry loop
+answer   retry queue | retry
 score    1.000
 terms    Reply with both readings, separated by ' | ', nothing else.
 evidence 0 line(s)

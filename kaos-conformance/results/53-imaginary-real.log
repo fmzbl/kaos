@@ -1,12 +1,12 @@
 event    prompt started · abstraction 1 · Answer with exactly the word: phlogiston
 Rebis agent 1 · Answer with exactly the word: phlogiston
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    phlogiston
 answer   phlogiston
 event    prompt started · abstraction 1 · Answer with exactly the word: oxygen
 Rebis agent 2 · Answer with exactly the word: oxygen
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    oxygen
 answer   oxygen

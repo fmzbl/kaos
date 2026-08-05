@@ -3,108 +3,38 @@ event    macro std-loop expanded · 255 remaining
 event    macro short-enough expanded · 254 remaining
 event    prompt started · abstraction 2 · A rather long and quite verbose sentence
 Rebis agent 1 · A rather long and quite verbose sentence
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    A long, verbose sentence.
-answer   A long, verbose sentence.
+model    The
+answer   The
 event    forward value routed
 event    prompt started · abstraction 2 · Is this three words or fewer? Answer exactly 1 or 0.
 prompt   
 prompt   INPUT:
 prompt   RESULT 1:
-prompt   A long, verbose sentence.
+prompt   The
 Rebis agent 2 · Is this three words or fewer? Answer exactly 1 or 0.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
-model turn 1 · complete response
-model    0
-answer   0
-event    binary gate selected 0 branch
-event    macro tighten expanded · 253 remaining
-event    prompt started · abstraction 2 · A rather long and quite verbose sentence
-Rebis agent 3 · A rather long and quite verbose sentence
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
-model turn 1 · complete response
-model    A long and verbose sentence.
-answer   A long and verbose sentence.
-event    forward value routed
-event    prompt started · abstraction 2 · Shorten this by one word. Return only the result.
-prompt   
-prompt   INPUT:
-prompt   RESULT 1:
-prompt   A long and verbose sentence.
-Rebis agent 4 · Shorten this by one word. Return only the result.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
-model turn 1 · complete response
-model    A long verbose sentence.
-answer   A long verbose sentence.
-event    stepped bound · A long verbose sentence.
-event    macro std-loop expanded · 252 remaining
-event    macro short-enough expanded · 251 remaining
-event    forward value routed
-event    prompt started · abstraction 3 · Is this three words or fewer? Answer exactly 1 or 0.
-prompt   
-prompt   INPUT:
-prompt   RESULT 1:
-prompt   A long verbose sentence.
-Rebis agent 5 · Is this three words or fewer? Answer exactly 1 or 0.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
-model turn 1 · complete response
-model    0
-answer   0
-event    binary gate selected 0 branch
-event    macro tighten expanded · 250 remaining
-event    forward value routed
-event    prompt started · abstraction 3 · Shorten this by one word. Return only the result.
-prompt   
-prompt   INPUT:
-prompt   RESULT 1:
-prompt   A long verbose sentence.
-Rebis agent 6 · Shorten this by one word. Return only the result.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
-model turn 1 · complete response
-model    A verbose sentence.
-answer   A verbose sentence.
-event    stepped bound · A verbose sentence.
-event    macro std-loop expanded · 249 remaining
-event    macro short-enough expanded · 248 remaining
-event    forward value routed
-event    prompt started · abstraction 4 · Is this three words or fewer? Answer exactly 1 or 0.
-prompt   
-prompt   INPUT:
-prompt   RESULT 1:
-prompt   A verbose sentence.
-Rebis agent 7 · Is this three words or fewer? Answer exactly 1 or 0.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    1
 answer   1
 event    binary gate selected 1 branch
+event    prompt started · abstraction 2 · A rather long and quite verbose sentence
+Rebis agent 3 · A rather long and quite verbose sentence
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
+model turn 1 · complete response
+model    The
+answer   The
 o-[]-o
 RESULT
-result   A verbose sentence.
+result   The
 TRACE
 firing   1 · ○ prompt A rather long and quite verbose sentence · abstraction 2
-answer   A long, verbose sentence.
+answer   The
 firing   2 · ○ prompt Is this three words or fewer? Answer exactly 1 or 0. · abstraction 2
-answer   0
-firing   3 · ○ prompt A rather long and quite verbose sentence · abstraction 2
-answer   A long and verbose sentence.
-firing   4 · ○ prompt Shorten this by one word. Return only the result. · abstraction 2
-answer   A long verbose sentence.
-firing   5 · & input stepped0 · abstraction 3
-answer   A long verbose sentence.
-firing   6 · ○ prompt Is this three words or fewer? Answer exactly 1 or 0. · abstraction 3
-answer   0
-firing   7 · & input stepped0 · abstraction 3
-answer   A long verbose sentence.
-firing   8 · ○ prompt Shorten this by one word. Return only the result. · abstraction 3
-answer   A verbose sentence.
-firing   9 · & input stepped3 · abstraction 4
-answer   A verbose sentence.
-firing   10 · ○ prompt Is this three words or fewer? Answer exactly 1 or 0. · abstraction 4
 answer   1
-firing   11 · & input stepped3 · abstraction 4
-answer   A verbose sentence.
+firing   3 · ○ prompt A rather long and quite verbose sentence · abstraction 2
+answer   The
 score    1.000
-terms    stepped3
+terms    A rather long and quite verbose sentence
 evidence 0 line(s)

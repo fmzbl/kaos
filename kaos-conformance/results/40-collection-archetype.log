@@ -1,103 +1,98 @@
 event    module archetypes/core loaded · 38 definition(s)
 event    macro arch-name-pattern expanded · 255 remaining
 Rebis agent 1 · Answer with exactly: three retries then give up
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 Rebis agent 2 · Answer with exactly: three retries then give up
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    three retries then give up
+model    three
 Rebis agent 3 · List the observable evidence that supports the label and one consequence.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    three retries then give up
+model    3
 Rebis agent 4 · Give one concise label for the active pattern.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    Observable Evidence: System logs showing three consecutive failed attempts followed by a termination message.  
-model    Consequence: Potential user frustration due to unresolved issue after limited retry attempts.
+model    three
 model turn 1 · complete response
-model    3-Retry Policy
+model    3
 event    prompt started · abstraction 2 · Answer with exactly: three retries then give up
-answer   three retries then give up
+answer   3
 event    forward value routed
 event    prompt started · abstraction 2 · Give one concise label for the active pattern.
 prompt   
 prompt   INPUT:
 prompt   RESULT 1:
-prompt   three retries then give up
-answer   3-Retry Policy
+prompt   3
+answer   3
 event    prompt started · abstraction 2 · Answer with exactly: three retries then give up
-answer   three retries then give up
+answer   three
 event    forward value routed
 event    prompt started · abstraction 2 · List the observable evidence that supports the label and one consequence.
 prompt   
 prompt   INPUT:
 prompt   RESULT 1:
-prompt   three retries then give up
-answer   Observable Evidence: System logs showing three consecutive failed attempts followed by a termination message.  
-answer   Consequence: Potential user frustration due to unresolved issue after limited retry attempts.
+prompt   three
+answer   three
 event    mediator started · 2 branch(es)
 event    prompt started · abstraction 2 · Name the pattern in one phrase.
 prompt   
 prompt   INPUT:
 prompt   RESULT 1:
-prompt   three retries then give up
+prompt   3
 prompt   
 prompt   RESULT 2:
-prompt   3-Retry Policy
+prompt   3
 prompt   
 prompt   RESULT 3:
-prompt   three retries then give up
+prompt   three
 prompt   
 prompt   RESULT 4:
-prompt   Observable Evidence: System logs showing three consecutive failed attempts followed by a termination message.  
-prompt   Consequence: Potential user frustration due to unresolved issue after limited retry attempts.
+prompt   three
 Rebis agent 5 · Name the pattern in one phrase.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    retry limit exhaustion pattern
-answer   retry limit exhaustion pattern
+model    three
+answer   three
 event    forward value routed
 event    prompt started · abstraction 1 · Keep the label narrow; do not infer a personality or diagnosis.
 prompt   
 prompt   INPUT:
 prompt   RESULT 1:
-prompt   three retries then give up
+prompt   3
 prompt   
 prompt   RESULT 2:
-prompt   3-Retry Policy
+prompt   3
 prompt   
 prompt   RESULT 3:
-prompt   three retries then give up
+prompt   three
 prompt   
 prompt   RESULT 4:
-prompt   Observable Evidence: System logs showing three consecutive failed attempts followed by a termination message.  
-prompt   Consequence: Potential user frustration due to unresolved issue after limited retry attempts.
+prompt   three
 prompt   
 prompt   RESULT 5:
-prompt   retry limit exhaustion pattern
+prompt   three
 Rebis agent 6 · Keep the label narrow; do not infer a personality or diagnosis.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    retry limit exhaustion pattern
-answer   retry limit exhaustion pattern
+model    3
+answer   3
 o-[]-o
 RESULT
-result   retry limit exhaustion pattern
+result   3
 TRACE
 firing   1 · ○ prompt Answer with exactly: three retries then give up · abstraction 2
-answer   three retries then give up
+answer   3
 firing   2 · ○ prompt Give one concise label for the active pattern. · abstraction 2
-answer   3-Retry Policy
+answer   3
 firing   3 · ○ prompt Answer with exactly: three retries then give up · abstraction 2
-answer   three retries then give up
+answer   three
 firing   4 · ○ prompt List the observable evidence that supports the label and one consequence. · abstraction 2
-answer   Observable Evidence: System logs showing three consecutive failed attempts followed by a termination message.  
-Consequence: Potential user frustration due to unresolved issue after limited retry attempts.
+answer   three
 firing   5 · ○ prompt Name the pattern in one phrase. · abstraction 2
-answer   retry limit exhaustion pattern
+answer   three
 firing   6 · ○ prompt Keep the label narrow; do not infer a personality or diagnosis. · abstraction 1
-answer   retry limit exhaustion pattern
+answer   3
 score    1.000
 terms    Keep the label narrow; do not infer a personality or diagnosis.
 evidence 0 line(s)

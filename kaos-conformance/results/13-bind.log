@@ -1,24 +1,28 @@
 event    prompt started · abstraction 0 · Answer with exactly the word: bound
 Rebis agent 1 · Answer with exactly the word: bound
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    bound
 answer   bound
 event    subject bound · bound
 event    prompt started · abstraction 0 · Report this word twice: bound and bound
 Rebis agent 2 · Report this word twice: bound and bound
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    bound and bound
-answer   bound and bound
+model    bound
+model    bound
+answer   bound
+answer   bound
 o-[]-o
 RESULT
-result   bound and bound
+result   bound
+result   bound
 TRACE
 firing   1 · ○ prompt Answer with exactly the word: bound · abstraction 0
 answer   bound
 firing   2 · ○ prompt Report this word twice: bound and bound · abstraction 0
-answer   bound and bound
+answer   bound
+bound
 score    1.000
 terms     and  Report this word twice:  subject
 evidence 0 line(s)

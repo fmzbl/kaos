@@ -7,23 +7,19 @@ prompt   INPUT:
 prompt   RESULT 1:
 prompt   The fixture says: pomegranate.
 Rebis agent 1 · Repeat the text you were given, exactly.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    RESULT 1:
 model    The fixture says: pomegranate.
-answer   RESULT 1:
 answer   The fixture says: pomegranate.
 o-[]-o
 RESULT
-result   RESULT 1:
 result   The fixture says: pomegranate.
 TRACE
 firing   1 · &: load programs/fixture.txt
 answer   The fixture says: pomegranate.
 
 firing   2 · ○ prompt Repeat the text you were given, exactly. · abstraction 0
-answer   RESULT 1:
-The fixture says: pomegranate.
+answer   The fixture says: pomegranate.
 score    1.000
 terms    Repeat the text you were given, exactly.
 evidence 0 line(s)

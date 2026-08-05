@@ -1,6 +1,6 @@
 event    prompt started · abstraction 0 · Answer with exactly the word: alpha
 Rebis agent 1 · Answer with exactly the word: alpha
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    alpha
 answer   alpha

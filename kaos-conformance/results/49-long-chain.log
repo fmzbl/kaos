@@ -1,6 +1,6 @@
 event    prompt started · abstraction 0 · Answer with exactly the digit: 1
 Rebis agent 1 · Answer with exactly the digit: 1
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    1
 answer   1
@@ -11,7 +11,7 @@ prompt   INPUT:
 prompt   RESULT 1:
 prompt   1
 Rebis agent 2 · Add one to the number you were given. Answer with only the digit.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    2
 answer   2
@@ -25,61 +25,61 @@ prompt
 prompt   RESULT 2:
 prompt   2
 Rebis agent 3 · Add one to the number you were given. Answer with only the digit.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
-model turn 1 · complete response
-model    2
-answer   2
-event    forward value routed
-event    prompt started · abstraction 0 · Add one to the number you were given. Answer with only the digit.
-prompt   
-prompt   INPUT:
-prompt   RESULT 1:
-prompt   1
-prompt   
-prompt   RESULT 2:
-prompt   2
-prompt   
-prompt   RESULT 3:
-prompt   2
-Rebis agent 4 · Add one to the number you were given. Answer with only the digit.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
-model turn 1 · complete response
-model    2
-answer   2
-event    forward value routed
-event    prompt started · abstraction 0 · Add one to the number you were given. Answer with only the digit.
-prompt   
-prompt   INPUT:
-prompt   RESULT 1:
-prompt   1
-prompt   
-prompt   RESULT 2:
-prompt   2
-prompt   
-prompt   RESULT 3:
-prompt   2
-prompt   
-prompt   RESULT 4:
-prompt   2
-Rebis agent 5 · Add one to the number you were given. Answer with only the digit.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    3
 answer   3
+event    forward value routed
+event    prompt started · abstraction 0 · Add one to the number you were given. Answer with only the digit.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   1
+prompt   
+prompt   RESULT 2:
+prompt   2
+prompt   
+prompt   RESULT 3:
+prompt   3
+Rebis agent 4 · Add one to the number you were given. Answer with only the digit.
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
+model turn 1 · complete response
+model    4
+answer   4
+event    forward value routed
+event    prompt started · abstraction 0 · Add one to the number you were given. Answer with only the digit.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   1
+prompt   
+prompt   RESULT 2:
+prompt   2
+prompt   
+prompt   RESULT 3:
+prompt   3
+prompt   
+prompt   RESULT 4:
+prompt   4
+Rebis agent 5 · Add one to the number you were given. Answer with only the digit.
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
+model turn 1 · complete response
+model    5
+answer   5
 o-[]-o
 RESULT
-result   3
+result   5
 TRACE
 firing   1 · ○ prompt Answer with exactly the digit: 1 · abstraction 0
 answer   1
 firing   2 · ○ prompt Add one to the number you were given. Answer with only the digit. · abstraction 0
 answer   2
 firing   3 · ○ prompt Add one to the number you were given. Answer with only the digit. · abstraction 0
-answer   2
-firing   4 · ○ prompt Add one to the number you were given. Answer with only the digit. · abstraction 0
-answer   2
-firing   5 · ○ prompt Add one to the number you were given. Answer with only the digit. · abstraction 0
 answer   3
+firing   4 · ○ prompt Add one to the number you were given. Answer with only the digit. · abstraction 0
+answer   4
+firing   5 · ○ prompt Add one to the number you were given. Answer with only the digit. · abstraction 0
+answer   5
 score    1.000
 terms    Add one to the number you were given. Answer with only the digit.
 evidence 0 line(s)

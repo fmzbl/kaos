@@ -2,7 +2,7 @@ event    prompt started · abstraction 2 · Always answer in lowercase.
 prompt   
 prompt   Answer with the word outer.
 Rebis agent 1 · Always answer in lowercase.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    outer
 answer   outer
@@ -12,7 +12,7 @@ prompt   Always end with a full stop.
 prompt   
 prompt   Answer with the word inner.
 Rebis agent 2 · Always answer in lowercase.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    inner.
 answer   inner.

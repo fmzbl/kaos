@@ -2,7 +2,7 @@ event    plan bound · (-> "Answer with exactly the word: one" "Reply with exact
 event    macro plan expanded · 255 remaining
 event    prompt started · abstraction 1 · Answer with exactly the word: one
 Rebis agent 1 · Answer with exactly the word: one
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    one
 answer   one
@@ -13,13 +13,13 @@ prompt   INPUT:
 prompt   RESULT 1:
 prompt   one
 Rebis agent 2 · Reply with exactly the word: two
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    two
 answer   two
 event    prompt started · abstraction 1 · Reply with exactly the word: done. This was held: (-> "Answer with exactly the word: one" "Reply with exactly the word: two")
 Rebis agent 3 · Reply with exactly the word: done. This was held: (-> "Answer with exactly the word: one" "Reply with exactly the word: two")
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    done
 answer   done

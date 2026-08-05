@@ -1,7 +1,7 @@
 event    binary gate selected 1 branch
 event    prompt started · abstraction 1 · Answer with exactly the word: taken
 Rebis agent 1 · Answer with exactly the word: taken
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    taken
 answer   taken

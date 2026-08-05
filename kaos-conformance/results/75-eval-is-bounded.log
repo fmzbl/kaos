@@ -1,6 +1,6 @@
 event    prompt started · abstraction 1 · Reply with exactly this and nothing else: ("SHOULD-NOT-RUN")
 Rebis agent 1 · Reply with exactly this and nothing else: ("SHOULD-NOT-RUN")
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    SHOULD-NOT-RUN
 answer   SHOULD-NOT-RUN
@@ -8,7 +8,7 @@ event    answer bound · SHOULD-NOT-RUN
 diagnostic undefined macro `answer`
 event    prompt started · abstraction 1 · Reply with exactly the word: bounded
 Rebis agent 2 · Reply with exactly the word: bounded
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    bounded
 answer   bounded

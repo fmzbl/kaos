@@ -2,7 +2,7 @@ event    macro apply-twice expanded · 255 remaining
 event    macro shout expanded · 254 remaining
 event    prompt started · abstraction 1 · Answer with exactly the word: applied
 Rebis agent 1 · Answer with exactly the word: applied
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    applied
 answer   applied
@@ -13,7 +13,7 @@ prompt   INPUT:
 prompt   RESULT 1:
 prompt   applied
 Rebis agent 2 · Repeat what you were given in capitals.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    APPLIED
 answer   APPLIED

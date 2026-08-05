@@ -1,17 +1,17 @@
 Rebis agent 1 · Answer with exactly the word: outer
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 Rebis agent 2 · Answer with exactly the word: inner-a
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 Rebis agent 3 · Answer with exactly the word: inner-b
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
-model turn 1 · complete response
-model    outer
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    inner-a
 model turn 1 · complete response
 model    inner-b
 Rebis agent 4 · Reply with both words, separated by one space, nothing else.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
+model turn 1 · complete response
+model    outer
 model turn 1 · complete response
 model    inner-a inner-b
 event    prompt started · abstraction 2 · Answer with exactly the word: inner-a
@@ -46,7 +46,7 @@ prompt
 prompt   RESULT 4:
 prompt   outer
 Rebis agent 5 · Reply with the two phrases you were given, separated by ' | ', nothing else.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    inner-a | inner-b
 answer   inner-a | inner-b

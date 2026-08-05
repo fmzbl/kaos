@@ -2,26 +2,40 @@ event    prompt started · abstraction 2 · Whenever you answer, end with the wo
 prompt   
 prompt   Answer with the word alpha.
 Rebis agent 1 · Whenever you answer, end with the word: framed.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    alpha framed
-answer   alpha framed
+model    alpha
+model    
+model    framed.
+answer   alpha
+answer   
+answer   framed.
 event    prompt started · abstraction 2 · Whenever you answer, end with the word: framed.
 prompt   
 prompt   Answer with the word beta.
 Rebis agent 2 · Whenever you answer, end with the word: framed.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    beta framed
-answer   beta framed
+model    beta
+model    
+model    framed
+answer   beta
+answer   
+answer   framed
 o-[]-o
 RESULT
-result   beta framed
+result   beta
+result   
+result   framed
 TRACE
 firing   1 · ○ prompt Answer with the word alpha. · abstraction 2
-answer   alpha framed
+answer   alpha
+
+framed.
 firing   2 · ○ prompt Answer with the word beta. · abstraction 2
-answer   beta framed
+answer   beta
+
+framed
 score    1.000
 terms    Answer with the word beta.
 evidence 0 line(s)

@@ -1,9 +1,9 @@
 event    module std/imaginary loaded · 21 definition(s)
 event    macro std-weighed expanded · 255 remaining
 Rebis agent 1 · Answer with exactly the word: phlogiston
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 Rebis agent 2 · Answer with exactly the word: cobalt
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    cobalt
 model turn 1 · complete response
@@ -22,7 +22,7 @@ prompt
 prompt   RESULT 2:
 prompt   cobalt
 Rebis agent 3 · Reply with the better of the two words you were given, and nothing else.
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    cobalt
 answer   cobalt

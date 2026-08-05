@@ -1,7 +1,7 @@
 event    module std/measure loaded · 22 definition(s)
 event    prompt started · abstraction 1 · Reply with exactly the word: KEPT
 Rebis agent 1 · Reply with exactly the word: KEPT
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    KEPT
 answer   KEPT
@@ -11,7 +11,7 @@ event    macro std-spent expanded · 254 remaining
 event    before bound · 1
 event    prompt started · abstraction 3 · Reply with exactly the word: work
 Rebis agent 2 · Reply with exactly the word: work
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    work
 answer   work
@@ -22,7 +22,7 @@ event    macro std-under expanded · 251 remaining
 event    binary gate selected 1 branch
 event    prompt started · abstraction 2 · caller kept: KEPT
 Rebis agent 3 · caller kept: KEPT
-model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    KEPT
 answer   KEPT
