@@ -79,6 +79,50 @@ pub enum Form {
     Conditional,
     /// `($ a b …)` — string interpolation.
     Concat,
+    /// `(? a b …)` — a flashback: answer from the record, not from a model.
+    Flashback,
+    /// `(! a)` — a dream: this answer is kept beyond the run.
+    Dream,
+    /// `<>` — source: the program itself.
+    ///
+    /// An atom, not a boundary: it takes no operands, because it names
+    /// something the runtime already holds rather than composing anything.
+    Source,
+    /// `(>< a b …)` — meta: a prompt whose answer is a program, and runs.
+    Meta,
+    /// `|a b …|` — the numeric plane: quantity, and arithmetic.
+    ///
+    /// The other pole of the emblem. A boundary like the compose circle, drawn
+    /// as the opposite side rather than as a fourth exotic outline.
+    Numeric,
+    /// `(* topic body)` — supersede: correct what the record believes.
+    Supersede,
+    /// `(@ check body)` — an invariant over every arrow inside.
+    Invariant,
+    /// `{a b …}` — an imaginary space: work that leaves no evidence.
+    ///
+    /// A compose boundary standing on the imaginary axis. Everything drawn
+    /// inside runs and is traced; only the space's own answer becomes evidence
+    /// when it crosses the boundary.
+    Imaginary,
+    /// `(= name value body)` — run the value once and name its answer.
+    Bind,
+    /// `(&: source)` — obtain the value of a source the program named.
+    Load,
+    /// `(+ context body)` — frame everything in the body with the context.
+    Context,
+    /// `(/ selector body)` — route every model call in the body.
+    ///
+    /// Routing used to be a postfix suffix, unwrapped into [`Node::model`] and
+    /// so invisible on the canvas: a drawing could not show which part of a
+    /// program ran on which model. As a form it is a circle wearing its
+    /// selector, with the routed subtree drawn inside it.
+    ///
+    /// The per-node [`Node::model`] override stays — it is how the panel pins
+    /// one form without wrapping it — so a program has both a drawn scope and
+    /// a per-form exception, exactly as it has both `+` and a prompt's own
+    /// words.
+    Route,
     /// `(a b …)` — an abstraction boundary.
     Compose,
     /// `(f a b …)` — a call to a named macro.
@@ -130,22 +174,39 @@ impl Form {
     /// editor creates complete flow operators with its two-boundary gesture
     /// rather than exposing incomplete arrow nodes in the palette.
     pub const ALL: &'static [FormSpec] = &[
-        ("⬡ prompt", || Form::Prompt, "prompt"),
-        ("◇ symbol", || Form::Symbol, "x"),
-        ("→ forward", || Form::Forward, ""),
-        ("← backflow", || Form::Backflow, ""),
-        ("[] square", || Form::Square, ""),
-        ("% binary gate", || Form::Conditional, ""),
+        // In the order the language's own punctuation is listed — the same
+        // sequence the terminal app shows across its top bar, so a reader who
+        // learns the alphabet in one front end finds it in the same order in
+        // the other. Indentation leads, because a drawing is nesting first.
+        // Forms written with no punctuation of their own follow at the end.
         ("( ) compose", || Form::Compose, ""),
-        ("$ concat", || Form::Concat, ""),
-        ("call", || Form::Call, "f"),
+        ("[] square", || Form::Square, ""),
+        ("{} imaginary", || Form::Imaginary, ""),
+        ("| numeric", || Form::Numeric, ""),
         ("~ macro", || Form::Function(vec!["x".into()]), "f"),
         ("# import", || Form::Import, "std/flow"),
-        ("& input", || Form::Input, "input"),
         ("' quote", || Form::Quote, ""),
         (", unquote", || Form::Unquote, ""),
+        ("$ concat", || Form::Concat, ""),
+        ("? flashback", || Form::Flashback, ""),
+        ("! dream", || Form::Dream, ""),
+        ("* supersede", || Form::Supersede, ""),
+        ("= bind", || Form::Bind, "n"),
+        ("& input", || Form::Input, "input"),
+        ("&: load", || Form::Load, ""),
+        ("+ context", || Form::Context, ""),
+        ("@ invariant", || Form::Invariant, ""),
+        ("/ route", || Form::Route, "ollama:qwen3:4b"),
+        ("% binary gate", || Form::Conditional, ""),
         ("^ invert", || Form::Invert, ""),
-        ("△ program", || Form::Program, ""),
+        ("<> source", || Form::Source, ""),
+        (">< meta", || Form::Meta, ""),
+        ("→ forward", || Form::Forward, ""),
+        ("← backflow", || Form::Backflow, ""),
+        ("⬡ prompt", || Form::Prompt, "prompt"),
+        ("◇ symbol", || Form::Symbol, "x"),
+        ("call", || Form::Call, "f"),
+        ("program", || Form::Program, ""),
     ];
 
     /// Whether the form writes its operands inside delimiters of its own.
@@ -165,14 +226,28 @@ impl Form {
             self,
             Form::Compose
                 | Form::Square
+                | Form::Imaginary
+                | Form::Numeric
+                | Form::Meta
+                | Form::Supersede
+                | Form::Invariant
                 | Form::Concat
+                | Form::Flashback
+                | Form::Dream
+                | Form::Bind
+                | Form::Load
+                | Form::Context
+                | Form::Route
                 | Form::Invert
                 | Form::Conditional
                 | Form::Function(_)
                 | Form::Input
                 | Form::Call
-                | Form::Forward
-                | Form::Backflow
+                // The program is the outermost boundary there is. It used to hold
+                // nothing, which left every top-level form loose on the page and the
+                // program itself a small mark floating beside them — a container that
+                // contained nothing.
+                | Form::Program
         )
     }
 
@@ -225,34 +300,57 @@ impl Form {
         match self {
             Form::Prompt => Shape::Hexagon,
             Form::Symbol => Shape::Diamond,
+            // Punctuation draws itself. A diamond is what a name the AUTHOR
+            // wrote looks like, and `@` is not one — it is the language's own
+            // mark for the program, so it wears its own glyph exactly as `#`,
+            // `'` and `,` do.
+            Form::Source => Shape::Source,
             Form::Import => Shape::Hash,
             Form::Quote => Shape::Quote,
             Form::Unquote => Shape::Comma,
             Form::Square => Shape::Square,
-            Form::Program => Shape::Triangle,
+            // The one boundary that is neither circle nor box: four sides, each
+            // drawn as a brace curve, so an imaginary space is recognisable as a
+            // boundary at a glance and as a DIFFERENT boundary on a second look.
+            Form::Imaginary => Shape::Brace,
             // Every parenthesised form is one indentation, and every indentation
             // is one circle. The sigil it was written with becomes that circle's
             // mark; see `Node::mark`.
             Form::Compose
             | Form::Concat
+            | Form::Flashback
+            | Form::Dream
+            | Form::Bind
+            | Form::Load
+            | Form::Context
+            | Form::Route
+            | Form::Meta
+            | Form::Numeric
+            | Form::Supersede
+            | Form::Invariant
             | Form::Function(_)
             | Form::Invert
             | Form::Call
             | Form::Input
             | Form::Conditional
-            // A flow expression is parenthesised like any other, so it is an
-            // indentation and gets the circle — which is what gives the arrow
-            // above it a block to connect to. It wears no mark: a circle titled
-            // with an arrow is nothing the palette can build, and the arrow it
-            // would name is already drawn inside it.
-            | Form::Forward
-            | Form::Backflow => Shape::Circle,
+            // A program is a compose that happens to be outermost. Nothing in the
+            // language distinguishes them — every evaluator and runtime site reads
+            // `Program(items) | Compose(items)` as one case — and the only difference
+            // is that the outermost level prints without its parentheses. A shape of
+            // its own claimed a form the language does not have.
+            | Form::Program => Shape::Circle,
+            // A flow is the one form that is not a shape at all: it is drawn as
+            // the arrow BETWEEN the two forms it routes, so it claims no outline
+            // and no slot. A circle around it said the arrow was a thing rather
+            // than a connection, and nothing in the palette can build a circle
+            // whose title is an arrow.
+            Form::Forward | Form::Backflow => Shape::Arrow,
         }
     }
 
     pub fn arity(&self) -> Arity {
         match self {
-            Form::Prompt | Form::Symbol | Form::Import => Arity::Exactly(0),
+            Form::Prompt | Form::Symbol | Form::Source | Form::Import => Arity::Exactly(0),
             Form::Quote | Form::Unquote | Form::Invert | Form::Function(_) | Form::Input => {
                 Arity::Exactly(1)
             }
@@ -260,7 +358,24 @@ impl Form {
             Form::Square => Arity::AtLeast(2),
             Form::Conditional => Arity::Exactly(3),
             Form::Program => Arity::AtLeast(2),
-            Form::Concat | Form::Compose => Arity::AtLeast(1),
+            Form::Concat
+            | Form::Flashback
+            | Form::Meta
+            | Form::Numeric
+            | Form::Compose
+            | Form::Imaginary => {
+                Arity::AtLeast(1)
+            }
+            // A dream keeps ITS answer, and two operands are two answers.
+            Form::Dream => Arity::Exactly(1),
+            // The value, then the scope that uses it.
+            Form::Bind | Form::Supersede | Form::Invariant => Arity::Exactly(2),
+            // `&` obtains nothing but itself; `&:` names one source; `+` takes
+            // a framing and the scope it frames.
+            Form::Load => Arity::Exactly(1),
+            Form::Context => Arity::Exactly(2),
+            // The selector is the form's own text, so only the body is a child.
+            Form::Route => Arity::Exactly(1),
             Form::Call => Arity::Any,
         }
     }
@@ -274,6 +389,8 @@ impl Form {
                 | Form::Import
                 | Form::Call
                 | Form::Function(_)
+                | Form::Bind
+                | Form::Route
                 | Form::Input
         )
     }
@@ -282,6 +399,11 @@ impl Form {
         match self {
             Form::Prompt => "prompt",
             Form::Symbol => "symbol",
+            Form::Source => "source",
+            Form::Meta => "meta",
+            Form::Numeric => "numeric",
+            Form::Supersede => "supersede",
+            Form::Invariant => "invariant",
             Form::Import => "import",
             Form::Quote => "quote",
             Form::Unquote => "unquote",
@@ -291,7 +413,14 @@ impl Form {
             Form::Square => "square",
             Form::Conditional => "binary gate",
             Form::Concat => "concat",
+            Form::Flashback => "flashback",
+            Form::Dream => "dream",
+            Form::Bind => "bind",
+            Form::Load => "load",
+            Form::Context => "context",
+            Form::Route => "route",
             Form::Compose => "compose",
+            Form::Imaginary => "imaginary",
             Form::Call => "call",
             Form::Function(_) => "macro",
             Form::Input => "input",
@@ -309,15 +438,17 @@ pub enum Shape {
     /// `( )` — an ordered composition boundary. A compose node is the only
     /// circular form on the canvas.
     Circle,
-    /// `△` — an implicit top-level program. Its name stays hidden until the
-    /// node is selected, keeping the idle glyph purely structural.
-    Triangle,
     /// `◇` — a symbol: a name rather than a literal.
     Diamond,
     /// `[]` — the mediator square, and nothing else. The box belongs to the
     /// one form whose notation is a box, so a square on the canvas always
     /// means a mediation.
     Square,
+    /// `{}` — a box whose four sides are each drawn as a brace curve.
+    ///
+    /// A boundary like the square and the circle, and unmistakably neither:
+    /// the pinched sides read as the delimiter the form is written with.
+    Brace,
     /// A prompt terminal. The six sides leave a broad interior for its complete
     /// wrapped text while remaining distinct from every nesting boundary.
     Hexagon,
@@ -335,6 +466,8 @@ pub enum Shape {
     Caret,
     /// `%` — a lazy binary gate.
     Percent,
+    /// `<>` — source: the program itself.
+    Source,
     /// `->` / `<-` — drawn as the arrow between its two children. Incomplete
     /// flow forms use the same shape as a small selectable arrow node.
     Arrow,
@@ -368,6 +501,7 @@ impl Shape {
     pub fn base_extent(self) -> (f64, f64) {
         match self {
             Shape::Circle
+            | Shape::Source
             | Shape::Diamond
             | Shape::Dollar
             | Shape::Tilde
@@ -378,12 +512,12 @@ impl Shape {
             | Shape::Percent => (NODE_R, NODE_R),
             Shape::Parallelogram => (NODE_R + NODE_RY * 0.55, NODE_RY),
             Shape::Amp => (NODE_R + NODE_RY * 0.85, NODE_RY),
-            Shape::Triangle | Shape::Square | Shape::Hexagon | Shape::Arrow => (NODE_R, NODE_RY),
+            Shape::Square | Shape::Brace | Shape::Hexagon | Shape::Arrow => (NODE_R, NODE_RY),
         }
     }
 
     /// The strokes that draw this shape's sigil, or empty for the shapes that
-    /// are outlines ([`Shape::Circle`], [`Shape::Triangle`],
+    /// are outlines ([`Shape::Circle`],
     /// [`Shape::Square`], [`Shape::Diamond`]).
     pub fn strokes(self) -> &'static [Stroke] {
         match self {
@@ -420,6 +554,20 @@ impl Shape {
                 (1.0, 12.0),
                 (-3.0, 16.0),
             ])],
+            // An at-sign: the inner ring, then the outer ring opened at the
+            // lower right, then the tail that opening becomes.
+            Shape::Source => &[
+                Stroke::Cubic([(6.0, 2.0), (6.0, -1.3), (3.3, -4.0), (0.0, -4.0)]),
+                Stroke::Cubic([(0.0, -4.0), (-3.3, -4.0), (-6.0, -1.3), (-6.0, 2.0)]),
+                Stroke::Cubic([(-6.0, 2.0), (-6.0, 5.3), (-3.3, 8.0), (0.0, 8.0)]),
+                Stroke::Cubic([(0.0, 8.0), (3.3, 8.0), (6.0, 5.3), (6.0, 2.0)]),
+                Stroke::Poly(&[(6.0, -4.0), (6.0, 6.0)]),
+                Stroke::Cubic([(6.0, 6.0), (9.0, 9.0), (15.0, 8.0), (15.0, 2.0)]),
+                Stroke::Cubic([(15.0, 2.0), (15.0, -9.0), (7.0, -16.0), (-2.0, -16.0)]),
+                Stroke::Cubic([(-2.0, -16.0), (-11.0, -16.0), (-17.0, -8.0), (-17.0, 1.0)]),
+                Stroke::Cubic([(-17.0, 1.0), (-17.0, 10.0), (-10.0, 17.0), (-1.0, 17.0)]),
+                Stroke::Poly(&[(-1.0, 17.0), (7.0, 17.0)]),
+            ],
             // A crisp caret, kept open so it remains legible at low zoom.
             Shape::Caret => &[Stroke::Poly(&[(-16.0, 10.0), (0.0, -12.0), (16.0, 10.0)])],
             // A percent sign: diagonal slash with two compact open circles.
@@ -445,8 +593,8 @@ impl Shape {
                 Stroke::Poly(&[(-11.0, 15.0), (11.0, -15.0)]),
             ],
             Shape::Circle
-            | Shape::Triangle
             | Shape::Square
+            | Shape::Brace
             | Shape::Diamond
             | Shape::Arrow
             | Shape::Parallelogram
@@ -525,10 +673,6 @@ impl Shape {
             Shape::Square | Shape::Parallelogram | Shape::Amp | Shape::Hexagon => {
                 dx.abs() <= NODE_R && dy.abs() <= NODE_RY
             }
-            Shape::Triangle => {
-                (-NODE_RY..=NODE_RY).contains(&dy)
-                    && dx.abs() <= NODE_R * (dy + NODE_RY) / (2.0 * NODE_RY)
-            }
             Shape::Diamond => dx.abs() + dy.abs() <= NODE_R,
             // Only a small handle: the arrow is a line, and a full disc here
             // would swallow clicks meant for the shapes it runs between.
@@ -562,6 +706,19 @@ pub struct Node {
     /// auto-sized one generate the same source. Read it through
     /// [`Mandala::extent`], which never lets a stored size hide the contents.
     pub size: Option<(f64, f64)>,
+    /// A size this boundary must not shrink BELOW, set when a hand gesture inside it
+    /// would otherwise have pulled its wall in.
+    ///
+    /// Distinct from `size`, which is a size someone chose for this form: a floor is
+    /// a size someone chose for something else and this form merely has to respect.
+    /// A boundary's size is derived from what it holds, so shrinking one content
+    /// dragged its container in after it, and that container's container, out to the
+    /// page — one circle made smaller rearranged the whole drawing. Growing still
+    /// happens freely, because a wall has to keep containing what it holds.
+    ///
+    /// Cleared by formatting, which is the gesture that hands a boundary back to its
+    /// contents. Presentation only, like `size`.
+    pub floor: Option<(f64, f64)>,
     /// User-authored displacement in the structural 3D projection.
     ///
     /// Like 2D position and size this is presentation only: moving a piece
@@ -583,30 +740,69 @@ impl Node {
         self.shape().base_extent()
     }
 
-    /// The sigil written on an indentation's ring.
+    /// The written head of an indentation, on its ring.
     ///
-    /// A circle is one `( )`, and this is the notation that opened it: `$` for
-    /// concatenation, `~ f` for a macro, the callee's name for a call. It is
-    /// drawn on the boundary rather than inside it, so it names the indentation
-    /// without standing among the forms indented within.
+    /// A circle is one `( )`, and this is the line that opened it, whole:
+    /// `~ greet (name)` for a macro, `& port` for an input, the callee's name
+    /// for a call, `$` for a concatenation that has nothing else to its head.
+    /// It is drawn on the boundary rather than inside it, so it names the
+    /// indentation without standing among the forms indented within.
+    ///
+    /// The head and *only* the head — never the operands, which are the forms
+    /// drawn inside. A macro's name and parameters are not its body; they are
+    /// what the reader needs in order to know which macro they are looking at
+    /// and how to call it, and a ring reading `~` beside another ring reading
+    /// `~` told them neither. The panel is where the rest of a form lives, but
+    /// the identity of a boundary belongs on the boundary.
+    ///
+    /// The ring's label is measured, so a long head widens the room the
+    /// boundary reserves rather than running through its neighbour — see
+    /// `mark_band`.
     ///
     /// Empty for a bare `( )` compose, which was opened by nothing but the
     /// parenthesis, and for every form that is not an indentation.
-    /// Only the head of the list — never its arguments.
-    ///
-    /// `(~ f (x) body)` wears `~`, not `~ f (x)`: the ring says which kind of
-    /// indentation this is, and the panel says the rest. Writing the name and
-    /// parameters up there turned the boundary's label back into the block it
-    /// was supposed to have replaced. A call is the exception only because its
-    /// head *is* the callee's name.
     #[must_use]
     pub fn mark(&self) -> String {
         match &self.form {
+            // A circle wearing its own sigil, exactly as `$` and `?` do.
+            Form::Meta => "><".into(),
+            Form::Numeric => "|".into(),
+            Form::Supersede => "*".into(),
+            Form::Invariant => "@".into(),
             Form::Concat => "$".into(),
+            Form::Flashback => "?".into(),
+            Form::Dream => "!".into(),
+            Form::Load => "&:".into(),
+            Form::Context => "+".into(),
+            // `(/ selector body)` — the selector is the whole point of the form.
+            Form::Route => match self.text.trim() {
+                "" => "/".into(),
+                selector => format!("/ {selector}"),
+            },
+            // `(= n value body)` — the name is the whole point of the form.
+            Form::Bind => match self.text.trim() {
+                "" => "=".into(),
+                name => format!("= {name}"),
+            },
             Form::Invert => "^".into(),
             Form::Conditional => "%".into(),
-            Form::Input => "&".into(),
-            Form::Function(_) => "~".into(),
+            // `(& port body)` — the port is the whole point of the form.
+            Form::Input => match self.text.trim() {
+                "" => "&".into(),
+                port => format!("& {port}"),
+            },
+            // `(~ name (p …) body)`, exactly as it is written, parameters
+            // included: an empty list is written `()` because that is what the
+            // source says, and a macro of no arguments reads differently from
+            // one whose arguments you cannot see.
+            Form::Function(params) => {
+                let (name, params) = (self.text.trim(), params.join(" "));
+                if name.is_empty() {
+                    format!("~ ({params})")
+                } else {
+                    format!("~ {name} ({params})")
+                }
+            }
             Form::Call => self.text.clone(),
             _ => String::new(),
         }
@@ -935,13 +1131,100 @@ pub const NODE_R: f64 = 34.0;
 pub const NODE_RY: f64 = NODE_R * 0.72;
 /// Clearance between inlined contents and their container boundary.
 pub const MEDIATOR_PAD: f64 = 9.0;
+
 /// Clear canvas each form indented inside a boundary keeps around itself.
 ///
 /// Separate from [`MEDIATOR_PAD`], which is the margin against the wall: this
 /// is what the contents claim from one another, and it is the one number that
 /// decides how airy a drawn indentation reads. Half a symbol's width, so
 /// neighbours are plainly apart without drifting into separate groups.
-pub const CONTENT_GAP: f64 = 12.0;
+pub const CONTENT_GAP: f64 = 10.0;
+
+/// How much of a form's text the drawing writes inside it.
+///
+/// A drawing is a map, and a map is read at a glance — which is why one token
+/// per form is the default. But a map is also a thing you print and hand to
+/// someone, and then the panel holding the rest of the text is not in the room.
+/// The two readings want different drawings, so they are a setting rather than
+/// an argument.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Legend {
+    /// One token per form; the panel beside the canvas holds the rest.
+    #[default]
+    Token,
+    /// Every form's whole text, with its outline grown until the text fits
+    /// inside at a readable size.
+    Whole,
+}
+
+/// How the sizes of forms relate across a drawing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Sizing {
+    /// Each level is measured on its own: brothers share the widest size among
+    /// them, and a boundary's contents are grown to fill the wall they are
+    /// given. Sizes then say which level you are looking at, which is what
+    /// makes a nested drawing readable *while you move through it*.
+    ///
+    /// It is not the default because of what it costs. Handing every boundary
+    /// at a level the width of the widest one multiplies outward: measured on
+    /// a page of macros, one holding a paragraph and the rest holding a symbol
+    /// each, it doubled the drawing's span and quadrupled its area, and all of
+    /// that was empty.
+    ByLevel,
+    /// One size for every form in the drawing, at every depth, and a boundary
+    /// exactly as large as what it holds.
+    ///
+    /// The nested reading grows the page faster than it grows the symbols, so
+    /// a whole program fitted to a window leaves its innermost forms below a
+    /// pixel and the only way to read them is to travel. Evening the sizes
+    /// spends nothing on saying which level a form is written at — indentation
+    /// already says that, by being drawn inside something — and spends what it
+    /// saves on the page being small enough to read at one magnification.
+    /// Which is also what a printed sheet needs, since a sheet cannot be
+    /// zoomed.
+    #[default]
+    Even,
+}
+
+/// The size a caption is written at inside its own outline, in world units.
+///
+/// One number for the whole app: the canvas draws at this size (scaled by the
+/// view), and [`Legend::Whole`] sizes outlines so their text fits *at* it.
+pub const LABEL_HEIGHT: f64 = 11.0;
+
+/// One monospace character's width, as a fraction of its height.
+///
+/// An estimate, and deliberately the same estimate the canvas and the PDF
+/// exporter lay text out with — a form sized by one metric and typeset by
+/// another would either overflow its outline or rattle around inside it.
+pub const LABEL_ADVANCE: f64 = 0.62;
+
+/// The height of one line of a caption, as a multiple of the type size.
+pub const LABEL_LEADING: f64 = 1.16;
+
+/// The longest line a whole caption is broken at, in characters.
+///
+/// A paragraph set as one line makes a form wider than the page; set too
+/// narrow it becomes a column of two-letter fragments. Twenty-four is about
+/// where a long prompt comes out square, which is the shape that costs a
+/// spiral the least room.
+pub const LABEL_WRAP: usize = 24;
+
+/// How many times a boundary's interior is grown towards its wall.
+///
+/// A fit is its contents plus a pad, so scaling the contents by the ratio the
+/// wall asks for leaves the pad's share behind — a small remainder, divided
+/// again by the same ratio on each pass. Three take the worst case on the
+/// collection (a bare symbol under a wall five times its size) to under a
+/// thousandth of the radius, which is well below a pixel at any readable zoom.
+const FILL_PASSES: usize = 3;
+
+/// How close to its wall a boundary's contents count as touching it.
+///
+/// The stop condition for [`Mandala::fill_boundary`], and with it the guarantee
+/// that formatting twice is formatting once: below this the pass is skipped
+/// outright, so a settled drawing is left byte-for-byte alone.
+const FILL_TOLERANCE: f64 = 1e-3;
 
 /// How many characters of a form's text the canvas shows before the panel takes
 /// over. Enough to tell two forms apart at a glance, not enough to become a
@@ -1097,6 +1380,14 @@ pub struct Mandala {
     /// structural arrows, but never participate in source generation.
     contents: Vec<Arrow>,
     next_id: u32,
+    /// How much of each form's text is written inside it. Presentation, like
+    /// positions: it changes the drawing and never the generated Rebis.
+    legend: Legend,
+    /// How sizes relate across the drawing. Also presentation, and also part of
+    /// the document rather than of the window — it decides the arrangement
+    /// [`Self::relayout`] produces, so undo has to be able to take it back with
+    /// the arrangement it produced.
+    sizing: Sizing,
     /// Derived presentation geometry. It is deliberately absent from clones:
     /// document history stores the drawing, not another copy of its cache.
     geometry: OnceLock<MandalaGeometry>,
@@ -1116,6 +1407,8 @@ impl Clone for Mandala {
             arrows: self.arrows.clone(),
             contents: self.contents.clone(),
             next_id: self.next_id,
+            legend: self.legend,
+            sizing: self.sizing,
             geometry: OnceLock::new(),
         }
     }
@@ -1128,6 +1421,8 @@ impl Default for Mandala {
             arrows: Vec::new(),
             contents: Vec::new(),
             next_id: 0,
+            legend: Legend::default(),
+            sizing: Sizing::default(),
             geometry: OnceLock::new(),
         }
     }
@@ -1218,15 +1513,26 @@ impl MandalaGeometry {
             .filter_map(|(component, count)| (*count == 0).then_some(component))
             .collect::<VecDeque<_>>();
 
+        // Under `Legend::Whole` a form's own text is a floor on its size, so
+        // it belongs here with the shape's natural extent rather than in the
+        // renderer: everything downstream — a boundary closing on its contents,
+        // the spiral packing them apart, the framing that fits the page —
+        // measures through these two tables and would otherwise lay out one
+        // drawing while the canvas painted another.
+        let legend = mandala.legend;
+        let natural = |node: &Node| {
+            let text = caption_floor(node, legend);
+            move |base: (f64, f64)| (base.0.max(text.0), base.1.max(text.1))
+        };
         let mut fits = mandala
             .nodes
             .iter()
-            .map(|node| (node.id, default_extent(node)))
+            .map(|node| (node.id, natural(node)(default_extent(node))))
             .collect::<HashMap<_, _>>();
         let mut extents = mandala
             .nodes
             .iter()
-            .map(|node| (node.id, base_extent(node)))
+            .map(|node| (node.id, natural(node)(base_extent(node))))
             .collect::<HashMap<_, _>>();
 
         while let Some(component) = ready.pop_front() {
@@ -1235,44 +1541,76 @@ impl MandalaGeometry {
                 let Some(container) = mandala.node(container_id) else {
                     continue;
                 };
-                let mut fit = default_extent(container);
+                let mut fit = natural(container)(default_extent(container));
                 for inner_id in &interiors[*container_index] {
                     let Some(inner) = mandala.node(*inner_id) else {
                         continue;
                     };
+                    let held = natural(inner);
                     let child_extent = container_indices.get(inner_id).map_or_else(
-                        || base_extent(inner),
+                        || held(base_extent(inner)),
                         |inner_index| {
                             if components[*inner_index] == component {
-                                base_extent(inner)
+                                held(base_extent(inner))
                             } else {
                                 extents
                                     .get(inner_id)
                                     .copied()
-                                    .unwrap_or_else(|| base_extent(inner))
+                                    .unwrap_or_else(|| held(base_extent(inner)))
                             }
                         },
                     );
+                    // The room a held form needs, not merely the outline it
+                    // draws: a form's sigil stands outside its own outline, and a
+                    // boundary closing on the outline alone cut straight through
+                    // the mark. The band is sized from the mark that will
+                    // actually be drawn — a flat one was right for an unresized
+                    // circle and short by up to six times for a resized one, so a
+                    // scaled-up `~` disappeared under its container's wall.
+                    let band = mark_band(
+                        inner,
+                        &mandala.written_prefix(*inner_id),
+                        child_extent,
+                    );
+                    let child_extent = (child_extent.0 + band, child_extent.1 + band);
                     let far_x = (inner.x - container.x).abs() + child_extent.0;
                     let far_y = (inner.y - container.y).abs() + child_extent.1;
                     if is_circular_boundary(&container.form) {
-                        // A circle must reach the farthest point of what it
-                        // holds. For a boxy form that is the corner of its
-                        // bounds — but a round one has no corners, and reaching
-                        // for its phantom corner is what made every nesting
-                        // level inflate its parent by a further √2. A circle
-                        // inside a circle needs only the distance between their
-                        // centres plus the inner radius.
-                        let reach = if is_circular_boundary(&inner.form) {
-                            (inner.x - container.x).hypot(inner.y - container.y) + child_extent.0
-                        } else {
-                            far_x.hypot(far_y)
-                        };
-                        let radius = reach + MEDIATOR_PAD;
+                        // A circle must reach the farthest point of what it holds,
+                        // which is the centre distance plus the radius of the
+                        // smallest circle containing that form — never the corner of
+                        // its bounding box. Only a square HAS corners to reach for;
+                        // every other shape on the canvas is inscribed in its own
+                        // bounds, and reaching for a round form's phantom corner
+                        // inflated each nesting level by a further √2.
+                        let reach = (inner.x - container.x).hypot(inner.y - container.y)
+                            + circumscribed_reach(inner.shape(), child_extent);
+                        // Plus room for the boundary's OWN mark, which hangs inside
+                        // its ring. Two passes because the mark's size is read from
+                        // the radius it is helping to set — it grows as the fourth
+                        // root of the area, so one correction settles it.
+                        let mut radius = reach + MEDIATOR_PAD;
+                        for _ in 0..2 {
+                            radius = reach
+                                + MEDIATOR_PAD
+                                + mark_inward(
+                                    container,
+                                    &mandala.written_prefix(container_id),
+                                    (radius, radius),
+                                );
+                        }
                         fit = (fit.0.max(radius), fit.1.max(radius));
                     } else {
+                        let mut inward = 0.0;
+                        for _ in 0..2 {
+                            inward = mark_inward(
+                                container,
+                                &mandala.written_prefix(container_id),
+                                (far_x + MEDIATOR_PAD, far_y + MEDIATOR_PAD + inward),
+                            );
+                        }
                         fit.0 = fit.0.max(far_x + MEDIATOR_PAD);
-                        fit.1 = fit.1.max(far_y + MEDIATOR_PAD);
+                        fit.1 = fit.1.max(far_y + MEDIATOR_PAD + inward);
                     }
                 }
                 fits.insert(container_id, fit);
@@ -1293,6 +1631,123 @@ impl MandalaGeometry {
             extents,
             inlined,
         }
+    }
+}
+
+/// The room a text-bearing outline has inside it, as multiples of its own
+/// half-extents.
+///
+/// The largest conservative rectangle that stays within the shape: a circle
+/// gives less of its bounding box than a square does, and a diamond less
+/// again. Expressed as factors rather than as a rectangle so that it reads
+/// both ways — the renderer multiplies to find the room it may set type in,
+/// and [`Legend::Whole`] divides to find the outline a given block of type
+/// needs. One table, so the two can never drift apart and leave text hanging
+/// over a wall.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct CaptionArea {
+    /// Sideways shift of the text's centre, as a fraction of the half-width.
+    pub offset: f64,
+    /// Usable width, as a multiple of the half-width.
+    pub width: f64,
+    /// Usable height, as a multiple of the half-height.
+    pub height: f64,
+}
+
+/// The interior [`CaptionArea`] of a shape.
+#[must_use]
+pub const fn caption_area(shape: Shape) -> CaptionArea {
+    const fn area(offset: f64, width: f64, height: f64) -> CaptionArea {
+        CaptionArea {
+            offset,
+            width,
+            height,
+        }
+    }
+    match shape {
+        Shape::Circle => area(0.0, 1.34, 1.34),
+        Shape::Diamond => area(0.0, 1.12, 1.12),
+        Shape::Square => area(0.0, 1.72, 1.72),
+        Shape::Parallelogram => area(0.0, 1.42, 1.54),
+        // The `&` glyph stands to the left of its own text.
+        Shape::Amp => area(0.10, 1.18, 1.54),
+        Shape::Hexagon => area(0.0, 1.50, 1.55),
+        _ => area(0.0, 2.0, 2.0),
+    }
+}
+
+/// Break a caption into the lines a drawing writes it on.
+///
+/// Nothing is deleted or replaced: breaks prefer existing whitespace, and a
+/// word longer than the line is split rather than elided, so an unbroken path
+/// or model selector still appears in full.
+#[must_use]
+pub fn wrap_caption(text: &str, columns: usize) -> Vec<String> {
+    let columns = columns.max(1);
+    let mut wrapped = Vec::new();
+    for source_line in text.split('\n') {
+        let mut remaining = source_line.chars().collect::<Vec<_>>();
+        if remaining.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        while remaining.len() > columns {
+            let split = remaining[..columns]
+                .iter()
+                .rposition(|character| character.is_whitespace())
+                .map(|index| index + 1)
+                .filter(|index| *index > 0)
+                .unwrap_or(columns);
+            wrapped.push(remaining.drain(..split).collect());
+        }
+        wrapped.push(remaining.into_iter().collect());
+    }
+    wrapped
+}
+
+/// The smallest outline that holds this form's whole caption at reading size.
+///
+/// Zero under [`Legend::Token`], and zero for anything that writes no caption —
+/// an indentation wears its head on its ring, which is measured separately.
+///
+/// The inverse of [`caption_area`], through the same character metrics the
+/// renderer uses. Shapes that keep their proportions are scaled whole, so a
+/// hexagon holding a paragraph is a larger hexagon rather than a letterbox.
+fn caption_floor(node: &Node, legend: Legend) -> (f64, f64) {
+    if legend == Legend::Token {
+        return (0.0, 0.0);
+    }
+    let caption = node.caption();
+    if caption.trim().is_empty() {
+        return (0.0, 0.0);
+    }
+    let lines = wrap_caption(&caption, LABEL_WRAP);
+    #[allow(clippy::cast_precision_loss)]
+    let columns = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let rows = lines.len().max(1) as f64;
+    let text = (
+        columns * LABEL_HEIGHT * LABEL_ADVANCE,
+        rows * LABEL_HEIGHT * LABEL_LEADING,
+    );
+    let area = caption_area(node.shape());
+    let want = (text.0 / area.width, text.1 / area.height);
+    if scales_uniformly(&node.form) {
+        // One factor, from whichever axis is tighter: a shape is a shape at
+        // every size, and stretching one to fit a paragraph would make it a
+        // different figure.
+        let base = node.base_extent();
+        let scale = (want.0 / base.0.max(f64::EPSILON))
+            .max(want.1 / base.1.max(f64::EPSILON))
+            .max(1.0);
+        (base.0 * scale, base.1 * scale)
+    } else {
+        want
     }
 }
 
@@ -1321,11 +1776,150 @@ pub fn scales_uniformly(form: &Form) -> bool {
     form.shape() != Shape::Square
 }
 
+/// The room a ring label needs, in world units.
+///
+/// A mark is written centred on its boundary's outline, so half of it stands
+/// outside — and nothing reserved that room. Neighbours were packed against the
+/// wall the label sits on, and the framing that fits a drawing to the window
+/// measured only outlines, so the mark on the outermost circle fell off the
+/// edge.
+///
+/// Reserved on every circle, marked or not. A bare `( )` wearing nothing then
+/// takes the same room as a `$` beside it, which is what makes a row of them
+/// read as a row rather than as shapes that happen to be near each other.
+///
+/// It is room *around* the outline, never part of it: the circle drawn and the
+/// circle clicked are the same size as before, and only what has to leave space
+/// for the label — packing, the boundary above, and the framing that fits a
+/// drawing to the window — reads [`Mandala::footprint`] instead of the extent.
+pub const LABEL_BAND: f64 = 12.0;
+
+/// The drawn height of an unresized ring mark, in world units.
+///
+/// The canvas paints the mark at this size times [`mark_weight`], so the room
+/// reserved for it has to be computed from the same two numbers or the reserved
+/// band and the drawn glyph disagree — which is exactly how a scaled-up circle's
+/// sigil ended up under its container's wall.
+pub const MARK_HEIGHT: f64 = 18.0;
+
+/// The chip drawn behind a mark clears the wall by this much above the glyph.
+const MARK_CHIP_PAD: f64 = 2.0;
+
+/// How wide one character of a mark is, as a fraction of its height.
+///
+/// Marks are written in the monospace face, where every character advances the same
+/// amount, so a mark's width is its length times this. The model cannot measure a
+/// font — it has none — so this is the one place a rendering fact is written down
+/// here, and it is deliberately an OVER-estimate: reserving a little too much room
+/// leaves a gap, while reserving too little puts one circle's name through another's.
+/// A test in the visual crate holds it against the real face.
+pub const MARK_ADVANCE: f64 = 0.62;
+
+/// How much larger a mark grows than the form it names, capped.
+///
+/// A sigil on a wide outer circle reads larger than one on a circle deep inside
+/// it, which is how the eye is told which level it is looking at. The cap keeps
+/// a heavily resized boundary from demanding unbounded room for one character.
+const MARK_WEIGHT_CAP: f64 = 8.0;
+
+/// How much a form's ring mark is magnified, given how far the form itself was
+/// resized from its base size.
+///
+/// The fourth root of the area ratio, floored at 1 and capped: a mark grows with
+/// its boundary, but far more slowly, so a circle scaled 400× wears a sigil 8×
+/// rather than 400× the base size. The canvas reads this to size the glyph and
+/// the layout reads it to reserve the room — one function so they cannot drift.
+#[must_use]
+pub fn mark_weight(resize: (f64, f64)) -> f64 {
+    (resize.0 * resize.1)
+        .sqrt()
+        .max(1.0)
+        .sqrt()
+        .min(MARK_WEIGHT_CAP)
+}
+
+/// Room a form needs *outside* its own outline for the sigil written on its ring.
+///
+/// The mark is painted centred on the boundary's topmost point, so half of it
+/// stands outside the outline and a container closing on the outline alone cuts
+/// through it. `extent` is the form's resolved half-size, from which the mark's
+/// magnification is recovered.
+///
+/// Room a boundary needs INSIDE its own ring for the mark written on it.
+///
+/// A mark is centred on the outline, so half of it hangs inside. Contents that reach
+/// that far in are drawn straight through it — and with one content, which sits at the
+/// middle, the boundary's radius exceeds its content's by only the content's own band
+/// plus a pad, so the two marks ended up a few units apart and collided. Measured
+/// across the standard library before this was reserved: thirty-odd overlapping pairs,
+/// every one of them a boundary against something it holds.
+fn mark_inward(node: &Node, prefix: &str, extent: (f64, f64)) -> f64 {
+    // The prefix counts: a quoted `( )` wears `'` on its ring and nothing else, so a
+    // boundary with no mark of its own may still have something written on it.
+    if node.mark().is_empty() && prefix.is_empty() {
+        return 0.0;
+    }
+    let base = default_extent(node);
+    let resize = (
+        extent.0 / base.0.max(f64::EPSILON),
+        extent.1 / base.1.max(f64::EPSILON),
+    );
+    MARK_HEIGHT * mark_weight(resize) / 2.0 + MARK_CHIP_PAD
+}
+
+/// Every circle reserves at least [`LABEL_BAND`] whether it wears a mark today or
+/// not, so a bare `( )` takes the room a `$` takes and a row of them reads as a
+/// row. A form carrying a mark reserves that floor or the mark's own reach,
+/// whichever is larger.
+///
+/// The reach counts the mark's WIDTH, not only its height. A mark is not always one
+/// sigil: a call wears its callee's name, so `std-with-evidence` is written across
+/// the top of its circle and reaches far further sideways than up. Reserving by
+/// height alone gave a seventeen-character name the same room as a `$` — sixteen
+/// units against the ninety it needed on each side — and neighbouring circles'
+/// names ran through one another.
+///
+/// The mark is centred on the boundary's topmost point, so what has to be contained
+/// is the far corner of its box: half the text's width across, and half its height
+/// above the outline.
+fn mark_band(node: &Node, prefix: &str, extent: (f64, f64)) -> f64 {
+    let floor = if node.shape() == Shape::Circle {
+        LABEL_BAND
+    } else {
+        0.0
+    };
+    let mark = node.mark();
+    if mark.is_empty() && prefix.is_empty() {
+        return floor;
+    }
+    let base = default_extent(node);
+    let resize = (
+        extent.0 / base.0.max(f64::EPSILON),
+        extent.1 / base.1.max(f64::EPSILON),
+    );
+    let height = MARK_HEIGHT * mark_weight(resize);
+    #[allow(clippy::cast_precision_loss)]
+    let characters = (prefix.chars().count() + mark.chars().count()) as f64;
+    let across = characters * height * MARK_ADVANCE / 2.0;
+    let above = extent.1 + height / 2.0 + MARK_CHIP_PAD;
+    // The radius that contains that corner, less the outline already drawn.
+    let reach = across.hypot(above) - extent.0.max(extent.1);
+    floor.max(reach)
+}
+
 fn default_extent(node: &Node) -> (f64, f64) {
     node.base_extent()
 }
 
 fn base_extent(node: &Node) -> (f64, f64) {
+    let sized = sized_extent(node);
+    match node.floor {
+        Some((half_w, half_h)) => (sized.0.max(half_w), sized.1.max(half_h)),
+        None => sized,
+    }
+}
+
+fn sized_extent(node: &Node) -> (f64, f64) {
     let base = default_extent(node);
     node.size.map_or(base, |(half_w, half_h)| {
         if is_circular_boundary(&node.form) {
@@ -1412,6 +2006,7 @@ impl Mandala {
             x,
             y,
             size: None,
+            floor: None,
             spatial_offset: [0.0; 3],
         });
         id
@@ -1469,6 +2064,26 @@ impl Mandala {
     /// makes this idempotent: formatting twice leaves the drawing exactly where
     /// formatting once put it. A full relayout finishes inner boundaries first,
     /// so by the time one is measured here its own contents have settled.
+    /// How many boundaries this form is drawn inside — its indentation on the
+    /// canvas, which is its indentation in the source.
+    ///
+    /// Presentation nesting, not the AST: a mark written on a form and the form
+    /// itself sit at the same level, because on the page they are one thing.
+    #[must_use]
+    pub fn indentation_depth(&self, id: NodeId) -> usize {
+        let mut depth = 0usize;
+        let mut cursor = id;
+        let mut seen = HashSet::new();
+        while seen.insert(cursor) {
+            let Some(holder) = self.holder(cursor) else {
+                break;
+            };
+            depth += 1;
+            cursor = holder;
+        }
+        depth
+    }
+
     fn layout_contents(&mut self, container: NodeId) {
         let Some(centre) = self.node(container).map(|node| (node.x, node.y)) else {
             return;
@@ -1478,16 +2093,87 @@ impl Mandala {
             .into_iter()
             .map(|id| (id, self.fit_extent(id)))
             .collect::<Vec<_>>();
+        // Brothers are drawn at ONE size — the largest any of them needs.
+        //
+        // A row of siblings at assorted sizes reads as a hierarchy that is not
+        // there. The forms inside one boundary are peers, and what tells them apart
+        // is what they hold and what they are called, not how big they happened to
+        // come out. So size stops carrying accidental information at a level, and
+        // only nesting changes it.
+        //
+        // "One size" means among brothers of the same KIND: a boundary matches the
+        // widest boundary beside it, a form holding nothing matches the widest of
+        // those. Not one size across both, because a boundary's size is *derived*
+        // from its contents — forcing a bare symbol up to the width of the loaded
+        // circle next to it raises the parent's fit, which raises that parent's
+        // brothers, and so on outward. Measured on the collection, equalising
+        // across kinds cost 11× the page and 42× at depth nine, which is the same
+        // compounding that killed an earlier attempt at this. Within a kind it
+        // costs 1.7×.
+        let widest = |mandala: &Self, holds: bool| {
+            contents
+                .iter()
+                .filter(|(id, _)| mandala.contained_children(*id).is_empty() != holds)
+                .fold((0.0_f64, 0.0_f64), |widest, (_, fit)| {
+                    (widest.0.max(fit.0), widest.1.max(fit.1))
+                })
+        };
+        let (boundaries, marks) = (widest(self, true), widest(self, false));
+        // Under `Sizing::Even` the level is not the unit — the drawing is. Every
+        // form that holds nothing is drawn at one size wherever it stands, and
+        // every boundary is exactly as large as what it holds, so nothing is
+        // sized by how deep it happens to be written. Nothing is filled to a
+        // wall either: filling is what makes two forms at the same depth come
+        // out at different sizes, which is the thing being evened out.
+        let even = self.sizing == Sizing::Even;
+        let everywhere = if even {
+            self.even_mark_size()
+        } else {
+            (0.0, 0.0)
+        };
         for (id, fit) in &contents {
-            // Each form to its own fit: the least it may honestly be drawn at.
-            self.resize(*id, fit.0, fit.1);
+            let holds = !self.contained_children(*id).is_empty();
+            let size = match (even, holds) {
+                (true, true) => *fit,
+                (true, false) => everywhere,
+                (false, true) => boundaries,
+                (false, false) => marks,
+            };
+            // One level is one size, so a boundary needing less than its widest
+            // brother is handed a wall it does not fill. The slack goes to what
+            // it holds — see [`Self::fill_boundary`] — before the wall is set,
+            // so the wall then closes on contents that already reach it.
+            if !even {
+                self.fill_boundary(*id, size.0, size.1);
+            }
+            self.resize(*id, size.0, size.1);
         }
         // Pack with the sizes they will actually be drawn at.
+        // Packed by footprint, so a neighbour is never set against the wall a
+        // ring label is written on.
         let items = contents
             .iter()
-            .map(|(id, _)| (*id, self.extent(*id)))
+            .map(|(id, _)| {
+                let footprint = self.footprint(*id);
+                let shape = self
+                    .node(*id)
+                    .map_or(Shape::Circle, |node| node.shape());
+                (*id, footprint, circumscribed_reach(shape, footprint))
+            })
             .collect::<Vec<_>>();
-        for (id, x, y) in spiral_spots(&items) {
+        // The figure follows the boundary: a box lays its contents out on the golden
+        // section, a round one winds them along the spiral. Each is the arrangement
+        // its own outline implies — rows and columns inside something with sides, a
+        // curve inside something without.
+        let boxed = self
+            .node(container)
+            .is_some_and(|node| node.shape() == Shape::Square);
+        let spots = if boxed {
+            golden_grid_spots(&items)
+        } else {
+            spiral_spots(&items)
+        };
+        for (id, x, y) in spots {
             self.move_group_to(id, centre.0 + x, centre.1 + y);
         }
         // Prefix sigils ride on the form they are written on, so they never
@@ -1536,6 +2222,194 @@ impl Mandala {
         sigils.concat()
     }
 
+    /// The form actually drawn for this one.
+    ///
+    /// A prefix sigil is painted on the front of its operand rather than as a
+    /// shape of its own, so it is never what anything on the canvas attaches
+    /// to — the form it marks is. Following the chain answers "what is at this
+    /// position", which is what a connection needs to know before it can point
+    /// at something.
+    #[must_use]
+    pub fn drawn_form(&self, id: NodeId) -> NodeId {
+        let mut cursor = id;
+        let mut seen = HashSet::new();
+        while seen.insert(cursor) {
+            if !self.is_written_prefix(cursor) {
+                break;
+            }
+            match self.children(cursor).first().copied() {
+                Some(operand) => cursor = operand,
+                None => break,
+            }
+        }
+        cursor
+    }
+
+    /// The outermost flow whose chain this form takes part in, if any.
+    ///
+    /// `(-> a b c)` folds into nested flows, so the three stages are spread over two
+    /// `->` nodes. A reader sees one chain, and so should a click: the whole run of
+    /// arrows is one thing, and picking up its middle should pick up the rest.
+    #[must_use]
+    pub fn flow_chain_root(&self, id: NodeId) -> Option<NodeId> {
+        let mut cursor = self
+            .node(id)
+            .filter(|node| node.form.is_flow())
+            .map(|_| id)
+            .or_else(|| self.father(id).filter(|f| self.is_flow_node(*f)))?;
+        let mut seen = HashSet::new();
+        while seen.insert(cursor) {
+            let Some(father) = self.father(cursor) else { break };
+            if !self.is_flow_node(father) {
+                break;
+            }
+            cursor = father;
+        }
+        Some(cursor)
+    }
+
+    fn is_flow_node(&self, id: NodeId) -> bool {
+        self.node(id).is_some_and(|node| node.form.is_flow())
+    }
+
+    /// Every stage of one chain, in written order.
+    ///
+    /// The stages are what the arrows run BETWEEN — the flows themselves are the
+    /// arrows and are not stages. `(-> (-> a b) c)` and `(-> a (-> b c))` both give
+    /// `[a, b, c]`, because both draw the same three blocks joined by two arrows.
+    #[must_use]
+    pub fn flow_stages(&self, root: NodeId) -> Vec<NodeId> {
+        let mut stages = Vec::new();
+        let mut seen = HashSet::new();
+        self.walk_chain(root, &mut stages, &mut seen);
+        stages
+    }
+
+    fn walk_chain(&self, node: NodeId, stages: &mut Vec<NodeId>, seen: &mut HashSet<NodeId>) {
+        if !seen.insert(node) {
+            return;
+        }
+        for kid in self.children(node) {
+            if self.is_flow_node(kid) {
+                self.walk_chain(kid, stages, seen);
+            } else {
+                stages.push(self.drawn_form(kid));
+            }
+        }
+    }
+
+    /// Which stage of its chain this form is, one-based, and how many there are.
+    #[must_use]
+    pub fn flow_stage_number(&self, id: NodeId) -> Option<(usize, usize)> {
+        let root = self.flow_chain_root(id)?;
+        let stages = self.flow_stages(root);
+        let at = stages.iter().position(|stage| *stage == id)?;
+        Some((at + 1, stages.len()))
+    }
+
+    /// Move one stage of a chain to a new position, one-based.
+    ///
+    /// The stages are permuted where they SIT — the arrows keep their shape and the
+    /// forms exchange slots — so `(-> a b c)` with `c` moved to 1 becomes
+    /// `(-> c a b)`. The same mechanism as [`Self::set_child_number`], over a
+    /// chain's slots instead of one father's.
+    pub fn set_flow_stage_number(&mut self, id: NodeId, number: usize) -> bool {
+        let Some(root) = self.flow_chain_root(id) else {
+            return false;
+        };
+        let slots = self.chain_slots(root);
+        if number == 0 || number > slots.len() {
+            return false;
+        }
+        let occupants = slots
+            .iter()
+            .map(|slot| self.arrows[*slot].from)
+            .collect::<Vec<_>>();
+        let Some(current) = occupants.iter().position(|node| *node == id) else {
+            return false;
+        };
+        let target = number - 1;
+        if current == target {
+            return false;
+        }
+        let mut ordered = occupants;
+        let moved = ordered.remove(current);
+        ordered.insert(target, moved);
+        for (slot, occupant) in slots.into_iter().zip(ordered) {
+            self.arrows[slot].from = occupant;
+        }
+        self.invalidate_geometry();
+        true
+    }
+
+    /// The arrow slots holding a chain's stages, in written order.
+    fn chain_slots(&self, root: NodeId) -> Vec<usize> {
+        let mut slots = Vec::new();
+        let mut seen = HashSet::new();
+        self.walk_chain_slots(root, &mut slots, &mut seen);
+        slots
+    }
+
+    fn walk_chain_slots(&self, node: NodeId, slots: &mut Vec<usize>, seen: &mut HashSet<NodeId>) {
+        if !seen.insert(node) {
+            return;
+        }
+        for kid in self.children(node) {
+            if self.is_flow_node(kid) {
+                self.walk_chain_slots(kid, slots, seen);
+            } else if let Some(slot) = self
+                .arrows
+                .iter()
+                .position(|arrow| arrow.from == kid && arrow.to == node)
+            {
+                slots.push(slot);
+            }
+        }
+    }
+
+    /// The form an arrow attaches to at one end of a connection.
+    ///
+    /// Two things resolve away. A prefix sigil is painted on the front of what it
+    /// marks, so pointing at the sigil pointed at nothing. And a flow is drawn as
+    /// an arrow rather than as a shape, so an arrow reaching a nested flow has to
+    /// reach the STAGE of it that carries the value at that end: a forward flow
+    /// ends at its second operand and begins at its first, and a backflow is the
+    /// same relation read the other way.
+    ///
+    /// That makes chains draw as chains. `(-> (-> a b) c)` is `a → b → c`, because
+    /// the outer arrow leaves the inner flow's value — which is `b` — rather than
+    /// leaving a shape that is not there. Without this an arrow arrived from empty
+    /// canvas with a head on the end of it.
+    ///
+    /// `producing` asks for the end that supplies a value; `false` asks for the end
+    /// that receives one.
+    #[must_use]
+    pub fn flow_endpoint(&self, id: NodeId, producing: bool) -> NodeId {
+        let mut cursor = id;
+        let mut seen = HashSet::new();
+        while seen.insert(cursor) {
+            if self.is_written_prefix(cursor) {
+                match self.children(cursor).first().copied() {
+                    Some(operand) => cursor = operand,
+                    None => break,
+                }
+                continue;
+            }
+            let Some(node) = self.node(cursor) else { break };
+            if !node.form.is_flow() {
+                break;
+            }
+            let kids = self.children(cursor);
+            let [first, second] = kids[..] else {
+                // An incomplete flow is still a small selectable arrow of its own.
+                break;
+            };
+            let forward = node.form == Form::Forward;
+            cursor = if producing == forward { second } else { first };
+        }
+        cursor
+    }
+
     /// Whether this form is a prefix sigil, and so is drawn on its operand
     /// rather than anywhere of its own.
     #[must_use]
@@ -1553,7 +2427,7 @@ impl Mandala {
     /// boundary, rather than dragging an empty one out and moving the other
     /// inside it by hand.
     pub fn wrap(&mut self, id: NodeId, form: Form) -> Option<NodeId> {
-        if !form.opens_indentation() || !self.has(id) {
+        if !(form.opens_indentation() || form.is_prefix_sigil()) || !self.has(id) {
             return None;
         }
         let (x, y) = self.node(id).map(|node| (node.x, node.y))?;
@@ -1573,10 +2447,70 @@ impl Mandala {
             }
         }
         if let Some(holder) = holder {
-            self.hold(holder, made);
+            // A prefix claims no slot of its own; its operand keeps the one it
+            // already has and the mark rides along on it.
+            if self.is_written_prefix(made) {
+                self.hold(holder, id);
+            } else {
+                self.hold(holder, made);
+                self.hold(made, id);
+            }
+        } else if !self.is_written_prefix(made) {
+            self.hold(made, id);
         }
-        self.hold(made, id);
         Some(made)
+    }
+
+    /// The prefix sigil written directly on this form, if it is that one.
+    #[must_use]
+    pub fn prefixed_with(&self, id: NodeId, form: &Form) -> Option<NodeId> {
+        let father = self.father(id)?;
+        let node = self.node(father)?;
+        (node.form == *form && self.is_written_prefix(father)).then_some(father)
+    }
+
+    /// Take one form out of the drawing and let what it held take its place.
+    ///
+    /// The counterpart of [`Self::wrap`]. Deleting a boundary leaves everything
+    /// inside it orphaned — no parent, no boundary, and source that no longer
+    /// parses — so removing a level of nesting had no move at all. Here the
+    /// operands are spliced into the hole: they inherit the form's place in its
+    /// father's operand order and the boundary that was drawing it.
+    ///
+    /// Returns the forms that moved up.
+    pub fn unwrap_form(&mut self, id: NodeId) -> Vec<NodeId> {
+        let Some(operands) = self.has(id).then(|| self.children(id)) else {
+            return Vec::new();
+        };
+        let father = self.father(id);
+        let number = father.and_then(|father| self.child_number(father, id));
+        // A prefix never held its operand — the operand kept the slot and the
+        // mark rode on it — so taking the mark off must leave that slot alone.
+        let holder = (!self.is_written_prefix(id)).then(|| self.holder(id));
+        for (offset, operand) in operands.iter().copied().enumerate() {
+            match father {
+                Some(father) => {
+                    self.reparent(father, operand);
+                    if let Some(number) = number {
+                        self.set_child_number(father, operand, number + offset);
+                    }
+                }
+                None => {
+                    self.detach(operand);
+                }
+            }
+            match holder {
+                Some(Some(holder)) => {
+                    self.hold(holder, operand);
+                }
+                Some(None) => {
+                    self.release(operand);
+                }
+                None => {}
+            }
+        }
+        self.remove(id);
+        operands
     }
 
     /// Put a new form *inside* a boundary, as its newest operand.
@@ -1815,12 +2749,6 @@ impl Mandala {
         }
     }
 
-    /// Backward-compatible name for callers that only know about square
-    /// containers.
-    pub fn make_room_for_square(&mut self, id: NodeId) {
-        self.make_room_for_container(id);
-    }
-
     /// Compatibility name using the internal child-to-parent order.
     ///
     /// This remains a low-level compatibility alias for adding an ordered AST
@@ -1850,14 +2778,6 @@ impl Mandala {
         let _ = self.father_of(id, from);
         let _ = self.father_of(id, to);
         Some(id)
-    }
-
-    pub fn disconnect(&mut self, from: NodeId, to: NodeId) {
-        let before = self.arrows.len();
-        self.arrows.retain(|a| a.from != from || a.to != to);
-        if self.arrows.len() != before {
-            self.invalidate_geometry();
-        }
     }
 
     /// Remove a node and every arrow touching it.
@@ -2023,6 +2943,10 @@ impl Mandala {
                 .copied()
                 .collect(),
             next_id: self.next_id,
+            // A block cut out of a drawing is still read the way that drawing
+            // was read.
+            legend: self.legend,
+            sizing: self.sizing,
             geometry: OnceLock::new(),
         }
     }
@@ -2197,19 +3121,20 @@ impl Mandala {
     /// interaction testable without a window.
     pub fn hit(&self, x: f64, y: f64) -> Option<NodeId> {
         // Contents drawn inside a container are on top of it: clicking an
-        // inner form must select the form, not its surrounding boundary.
-        let inside =
-            self.nodes.iter().rev().find_map(|n| {
-                (self.is_inlined(n.id) && self.node_contains(n, x, y)).then_some(n.id)
-            });
+        // inner form must select the form, not its surrounding boundary. A
+        // prefix sigil is drawn on the front of its operand rather than as a
+        // shape of its own, so it is never what the pointer is on — the form it
+        // marks is, and it sits at the same place.
+        let inside = self.nodes.iter().rev().find_map(|n| {
+            (!self.is_written_prefix(n.id) && self.is_inlined(n.id) && self.node_contains(n, x, y))
+                .then_some(n.id)
+        });
         if inside.is_some() {
             return inside;
         }
-        let shape = self
-            .nodes
-            .iter()
-            .rev()
-            .find_map(|n| self.node_contains(n, x, y).then_some(n.id));
+        let shape = self.nodes.iter().rev().find_map(|n| {
+            (!self.is_written_prefix(n.id) && self.node_contains(n, x, y)).then_some(n.id)
+        });
         if shape.is_some() {
             return shape;
         }
@@ -2481,35 +3406,115 @@ impl Mandala {
     /// is distorted, and a pair that cleared each other before still clears
     /// afterwards.
     pub fn resize_group(&mut self, id: NodeId, half_w: f64, half_h: f64) {
+        // Every boundary this form is drawn inside keeps the size it already had.
+        //
+        // A boundary's size is DERIVED from what it holds, so making one form
+        // smaller pulled its container in after it — and the container's container,
+        // and so on out to the page. Shrinking one circle rearranged the whole
+        // drawing. Growing is different and has to stay: a wall must keep containing
+        // what it holds, or the form escapes it.
+        //
+        // So the walls are pinned here, which only sets a FLOOR: the drawn size is
+        // still the larger of the pin and what the contents need, so the container
+        // grows when it must and stands still otherwise. `format mandala` is the
+        // gesture that hands a boundary back to its contents.
+        self.pin_enclosing(id);
         let factor = self.group_scale(id, half_w, half_h);
-        if let Some(centre) = self
+        self.scale_interior(id, factor);
+        self.resize(id, half_w, half_h);
+    }
+
+    /// Scale everything drawn inside a boundary about that boundary's centre.
+    ///
+    /// Positions and extents take the same one factor, so the interior keeps its
+    /// arrangement exactly: whatever cleared its neighbour before still clears
+    /// it, at every size.
+    fn scale_interior(&mut self, id: NodeId, factor: f64) {
+        let Some(centre) = self
             .node(id)
             .map(|node| (node.x, node.y))
-            .filter(|_| (factor - 1.0).abs() > f64::EPSILON)
-        {
-            // Every scaled position and size is read before any is written: the
-            // derived geometry is invalidated by each edit, so measuring as we
-            // went would compound the factor across the interior.
-            let scaled = self
-                .interior(id)
-                .into_iter()
-                .filter_map(|inner| {
-                    let node = self.node(inner)?;
-                    let extent = self.extent(inner);
-                    Some((
-                        inner,
-                        centre.0 + (node.x - centre.0) * factor,
-                        centre.1 + (node.y - centre.1) * factor,
-                        (extent.0 * factor, extent.1 * factor),
-                    ))
-                })
-                .collect::<Vec<_>>();
-            for (inner, x, y, size) in scaled {
-                self.move_to(inner, x, y);
-                self.set_size(inner, Some(size));
+            .filter(|_| factor.is_finite() && (factor - 1.0).abs() > f64::EPSILON)
+        else {
+            return;
+        };
+        // Every scaled position and size is read before any is written: the
+        // derived geometry is invalidated by each edit, so measuring as we
+        // went would compound the factor across the interior.
+        let scaled = self
+            .interior(id)
+            .into_iter()
+            .filter_map(|inner| {
+                let node = self.node(inner)?;
+                let extent = self.extent(inner);
+                Some((
+                    inner,
+                    centre.0 + (node.x - centre.0) * factor,
+                    centre.1 + (node.y - centre.1) * factor,
+                    (extent.0 * factor, extent.1 * factor),
+                ))
+            })
+            .collect::<Vec<_>>();
+        for (inner, x, y, size) in scaled {
+            self.move_to(inner, x, y);
+            self.set_size(inner, Some(size));
+        }
+    }
+
+    /// The one size every form that holds nothing is drawn at under
+    /// [`Sizing::Even`]: the largest any of them needs.
+    ///
+    /// Taken across the whole drawing rather than a level, which is the entire
+    /// difference between the two sizings. It is the largest and not an average
+    /// because a size is a floor — a form drawn smaller than its own text or
+    /// its own outline is not evened out, it is broken.
+    fn even_mark_size(&self) -> (f64, f64) {
+        self.nodes
+            .iter()
+            .map(|node| node.id)
+            .filter(|id| self.contained_children(*id).is_empty())
+            .map(|id| self.fit_extent(id))
+            .fold((NODE_R, NODE_RY), |widest, fit| {
+                (widest.0.max(fit.0), widest.1.max(fit.1))
+            })
+    }
+
+    /// Grow what a boundary holds until it reaches the wall it is about to be
+    /// given.
+    ///
+    /// A level is drawn at one size, so a boundary that needs less than its
+    /// widest brother is handed the same wall as the rest — and what stands
+    /// inside it used to stay whatever size it happened to be, a speck in an
+    /// empty room. The room said nothing except which brother was the largest.
+    /// Here the interior takes that slack instead, at one factor, so a circle
+    /// holding a single prompt reads as that prompt rather than as a hole.
+    ///
+    /// Iterated because a boundary's fit is its contents *plus a constant* — the
+    /// pad and the ring band do not scale with what is inside — so one factor
+    /// falls a little short. Each pass removes the same fraction of what is
+    /// left, and a handful settle far inside a pixel. Stopping early when the
+    /// floor rather than the wall decides the factor keeps a contents-limited
+    /// boundary from being scaled again on every pass.
+    fn fill_boundary(&mut self, id: NodeId, half_w: f64, half_h: f64) {
+        if self.interior(id).is_empty() {
+            return;
+        }
+        for _ in 0..FILL_PASSES {
+            let fit = self.fit_extent(id);
+            if fit.0 <= 0.0 || fit.1 <= 0.0 {
+                return;
+            }
+            // One factor from the tighter axis: the interior is scaled, never
+            // stretched, whatever shape of wall it is being fitted to.
+            let wanted = (half_w / fit.0).min(half_h / fit.1);
+            let factor = wanted.max(self.smallest_group_scale(id));
+            if !factor.is_finite() || (factor - 1.0).abs() <= FILL_TOLERANCE {
+                return;
+            }
+            self.scale_interior(id, factor);
+            if factor > wanted {
+                return;
             }
         }
-        self.resize(id, half_w, half_h);
     }
 
     /// How much [`Self::resize_group`] scales an indentation's contents.
@@ -2552,6 +3557,29 @@ impl Mandala {
             .fold(0.0_f64, f64::max)
     }
 
+    /// The room this form needs on the canvas, label included.
+    ///
+    /// [`Self::extent`] is the outline: what is drawn, what is clicked, what a
+    /// wall is dragged by. This is that plus the band a ring label occupies, and
+    /// it is what anything *arranging* forms must read — packing them apart, the
+    /// boundary closing around them, the framing that fits a drawing to a
+    /// window.
+    ///
+    /// The band is sized from the mark this form actually draws, so it grows with
+    /// a resized boundary and is nothing at all for a form that wears no sigil —
+    /// a bare `( )` states itself with its circle and takes no extra room.
+    #[must_use]
+    pub fn footprint(&self, id: NodeId) -> (f64, f64) {
+        let extent = self.extent(id);
+        match self.node(id) {
+            Some(node) => {
+                let band = mark_band(node, &self.written_prefix(id), extent);
+                (extent.0 + band, extent.1 + band)
+            }
+            None => extent,
+        }
+    }
+
     /// The complete drawn bounds of everything on the canvas, extents included.
     ///
     /// `None` for an empty drawing, which has no bounds to speak of rather than
@@ -2560,7 +3588,7 @@ impl Mandala {
     pub fn bounds(&self) -> Option<WorldRect> {
         let mut bounds: Option<WorldRect> = None;
         for node in &self.nodes {
-            let extent = self.extent(node.id);
+            let extent = self.footprint(node.id);
             match &mut bounds {
                 Some(bounds) => bounds.absorb_node(node, extent),
                 none => {
@@ -2572,6 +3600,30 @@ impl Mandala {
             }
         }
         bounds
+    }
+
+    /// Hold every boundary this form is drawn inside at the size it has now.
+    ///
+    /// A floor, not a fixed size — see [`Self::resize_group`] for why a hand
+    /// gesture may grow a container but not shrink one. Read before written, so an
+    /// outer wall is pinned at what it measured before any inner one moved.
+    fn pin_enclosing(&mut self, id: NodeId) {
+        let mut pins = Vec::new();
+        let mut cursor = id;
+        let mut seen = HashSet::new();
+        while seen.insert(cursor) {
+            let Some(holder) = self.holder(cursor) else {
+                break;
+            };
+            pins.push((holder, self.extent(holder)));
+            cursor = holder;
+        }
+        for (holder, extent) in pins {
+            if let Some(node) = self.nodes.iter_mut().find(|node| node.id == holder) {
+                node.floor = Some(extent);
+            }
+        }
+        self.invalidate_geometry();
     }
 
     /// Set — or clear — a symbol's hand-set size outright.
@@ -2757,6 +3809,45 @@ impl Mandala {
         for (index, child) in sibling_indices.into_iter().zip(ordered) {
             self.arrows[index].from = child;
         }
+        self.invalidate_geometry();
+        true
+    }
+
+    /// How much of each form's text the drawing writes inside it.
+    #[must_use]
+    pub fn legend(&self) -> Legend {
+        self.legend
+    }
+
+    /// Write one token per form, or all of the text. Returns whether anything
+    /// changed, so a caller can skip the relayout that a change wants.
+    ///
+    /// Outlines resize themselves the moment this changes — the room a caption
+    /// needs is derived, not stored — but nothing MOVES on its own. Growing a
+    /// form where it stands would push it through its neighbour, so the caller
+    /// relayouts to repack at the new sizes.
+    pub fn set_legend(&mut self, legend: Legend) -> bool {
+        if self.legend == legend {
+            return false;
+        }
+        self.legend = legend;
+        self.invalidate_geometry();
+        true
+    }
+
+    /// How sizes relate across the drawing.
+    #[must_use]
+    pub fn sizing(&self) -> Sizing {
+        self.sizing
+    }
+
+    /// Choose between per-level sizes and one size for the whole drawing.
+    /// Returns whether anything changed. Takes effect on the next layout.
+    pub fn set_sizing(&mut self, sizing: Sizing) -> bool {
+        if self.sizing == sizing {
+            return false;
+        }
+        self.sizing = sizing;
         self.invalidate_geometry();
         true
     }
@@ -3106,12 +4197,81 @@ impl Mandala {
         }
     }
 
+    /// Generate Rebis for everything on the page, however many top-level forms
+    /// it has.
+    ///
+    /// [`Self::to_rebis`] answers "which one expression is this?" — what a
+    /// block, a run, and a round trip each need, and it refuses a drawing with
+    /// two roots because two answers are not an answer. This answers "what is
+    /// written here?", and a page of Rebis is *allowed* to be several forms:
+    /// the language's own top level is a list of them, which is why a file can
+    /// open with imports and macro definitions before the expression that uses
+    /// them.
+    ///
+    /// It exists because the strict reading made the source panel go quiet
+    /// exactly when it was most wanted. Every drawing passes through several
+    /// roots on its way to having one — a form placed is a root until it is
+    /// linked — so the panel showed nothing for the whole of the gesture that
+    /// was creating the program.
+    ///
+    /// Roots are written in the order they were drawn. Everything that is a
+    /// real error under the single-expression reading — a cycle, a shared
+    /// subexpression, the wrong arity — is still an error here.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same [`MandalaError`]s as [`Self::to_rebis`], except that
+    /// several roots are not one of them.
+    pub fn to_rebis_page(&self) -> Result<String, MandalaError> {
+        if self.nodes.is_empty() {
+            return Err(MandalaError::Empty);
+        }
+        let roots: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .filter(|id| !self.arrows.iter().any(|arrow| arrow.from == *id))
+            .collect();
+        if roots.is_empty() {
+            return Err(MandalaError::NoRoot);
+        }
+        // One `seen` across the whole page: it is what proves every node was
+        // reached exactly once, and a node reachable from two roots is the
+        // shared-subexpression error rather than a form written twice.
+        let mut seen = HashSet::new();
+        let mut forms = Vec::with_capacity(roots.len());
+        for root in &roots {
+            let mut on_path = HashSet::new();
+            forms.push(self.render(*root, true, false, &mut on_path, &mut seen)?);
+        }
+        if seen.len() != self.nodes.len() {
+            return Err(MandalaError::Cycle);
+        }
+        let source = forms.join("\n");
+        let expression = rebis_lang::parse(&source)
+            .map_err(|error| MandalaError::InvalidSource(error.to_string()))?;
+        let structural = match (&expression, roots.as_slice()) {
+            (rebis_lang::Expr::Program(items), roots) if items.len() == roots.len() => roots
+                .iter()
+                .zip(items)
+                .all(|(id, item)| self.matches_expression(*id, item)),
+            (expression, [only]) => self.matches_expression(*only, expression),
+            _ => false,
+        };
+        if !structural {
+            return Err(MandalaError::InvalidSource(
+                "a source payload changed the expression structure".to_string(),
+            ));
+        }
+        Ok(source)
+    }
+
     /// Generate Rebis source for this mandala.
     pub fn to_rebis(&self) -> Result<String, MandalaError> {
         let root = self.root()?;
         let mut on_path = HashSet::new();
         let mut seen = HashSet::new();
-        let source = self.render(root, true, &mut on_path, &mut seen)?;
+        let source = self.render(root, true, false, &mut on_path, &mut seen)?;
         if seen.len() != self.nodes.len() {
             return Err(MandalaError::Cycle);
         }
@@ -3130,11 +4290,17 @@ impl Mandala {
         let Some(node) = self.node(id) else {
             return false;
         };
+        // A `(/ …)` in the source is either a Route node — a written route,
+        // matched by the arm below — or the wrapper a per-form pin generated
+        // around some other form, which is unwrapped here so the form beneath
+        // is what gets matched. Which one it is, is what the node says.
         let (expression, model) = match expression {
-            Expr::Model { selector, body } => (body.as_ref(), Some(selector.as_str())),
+            Expr::Model { selector, body } if node.form != Form::Route => {
+                (body.as_ref(), Some(selector.as_str()))
+            }
             expression => (expression, None),
         };
-        if node.model.as_deref() != model {
+        if node.form != Form::Route && node.model.as_deref() != model {
             return false;
         }
         let children = self.children(id);
@@ -3150,6 +4316,7 @@ impl Mandala {
             (Form::Import, Expr::Import { module }) => node.text == module.to_string(),
             (Form::Quote, Expr::Quote(inner))
             | (Form::Unquote, Expr::Unquote(inner))
+            | (Form::Dream, Expr::Dream(inner))
             | (Form::Invert, Expr::Invert(inner)) => child_matches(0, inner),
             (Form::Forward, Expr::Forward(left, right))
             | (Form::Backflow, Expr::Backflow(left, right)) => {
@@ -3176,8 +4343,29 @@ impl Mandala {
                     && child_matches(1, when_yes)
                     && child_matches(2, when_no)
             }
+            // A two-child head-and-scope: the head is inert and the scope is
+            // what it holds, so both must match in order.
+            (Form::Supersede, Expr::Supersede { topic: head, body })
+            | (Form::Invariant, Expr::Invariant { check: head, body }) => {
+                children.len() == 2 && child_matches(0, head) && child_matches(1, body)
+            }
+            // `=` carries its name on the node and its two scopes as children.
+            // It had no arm at all until a numeric round-trip went looking for
+            // one, so `(= n A B)` has never survived being drawn and read back.
+            (Form::Bind, Expr::Bind { name, value, body }) => {
+                node.text.trim() == name
+                    && children.len() == 2
+                    && child_matches(0, value)
+                    && child_matches(1, body)
+            }
+            // An atom that names the program. Nothing to compare but itself.
+            (Form::Source, Expr::Source) => children.is_empty(),
             (Form::Concat, Expr::Concat(items))
+            | (Form::Flashback, Expr::Flashback(items))
             | (Form::Compose, Expr::Compose(items))
+            | (Form::Imaginary, Expr::Imaginary(items))
+            | (Form::Numeric, Expr::Numeric(items))
+            | (Form::Meta, Expr::Meta(items))
             | (Form::Program, Expr::Program(items)) => {
                 children.len() == items.len()
                     && items
@@ -3201,8 +4389,13 @@ impl Mandala {
                     body,
                 },
             ) => node.text == *name && params == parsed && child_matches(0, body),
-            (Form::Input, Expr::Input { name, body }) => {
-                node.text == *name && child_matches(0, body)
+            (Form::Input, Expr::Ask) => children.is_empty(),
+            (Form::Load, Expr::Load(path)) => child_matches(0, path),
+            (Form::Route, Expr::Model { selector, body }) => {
+                node.text == selector.to_string() && child_matches(0, body)
+            }
+            (Form::Context, Expr::Context { context, body }) => {
+                children.len() == 2 && child_matches(0, context) && child_matches(1, body)
             }
             _ => false,
         }
@@ -3212,6 +4405,7 @@ impl Mandala {
         &self,
         id: NodeId,
         at_root: bool,
+        quoted: bool,
         on_path: &mut HashSet<NodeId>,
         seen: &mut HashSet<NodeId>,
     ) -> Result<String, MandalaError> {
@@ -3225,8 +4419,15 @@ impl Mandala {
         let node = self.node(id).ok_or(MandalaError::Empty)?;
         let kids = self.children(id);
 
+        // An empty `Compose` is the EMPTY LIST, and it is legal in exactly one
+        // place: directly under a quote. That is the language's own rule —
+        // `'()` parses, a bare `()` does not — and the position decides the
+        // reading here for the same reason it decides it there. Checked with
+        // the parent in hand rather than by widening `Compose`'s arity, which
+        // would have let the canvas build an `()` that no parser accepts.
+        let empty_list = quoted && matches!(node.form, Form::Compose) && kids.is_empty();
         let arity = node.form.arity();
-        if !arity.accepts(kids.len()) {
+        if !empty_list && !arity.accepts(kids.len()) {
             return Err(MandalaError::WrongArity {
                 id,
                 form: node.form.clone(),
@@ -3240,7 +4441,7 @@ impl Mandala {
 
         let mut parts = Vec::with_capacity(kids.len());
         for kid in kids {
-            parts.push(self.render(kid, false, on_path, seen)?);
+            parts.push(self.render(kid, false, matches!(node.form, Form::Quote), on_path, seen)?);
         }
         on_path.remove(&id);
 
@@ -3248,6 +4449,7 @@ impl Mandala {
         let out = match &node.form {
             Form::Prompt => quote(text),
             Form::Symbol => text.clone(),
+            Form::Source => "<>".to_string(),
             Form::Import => format!("(# {text})"),
             Form::Quote => format!("'{}", parts[0]),
             Form::Unquote => format!(",{}", parts[0]),
@@ -3257,7 +4459,22 @@ impl Mandala {
             Form::Square => format!("([{}] {})", parts[0], parts[1..].join(" ")),
             Form::Conditional => format!("(% {} {} {})", parts[0], parts[1], parts[2]),
             Form::Concat => format!("($ {})", parts.join(" ")),
+            Form::Flashback => format!("(? {})", parts.join(" ")),
+            Form::Dream => format!("(! {})", parts.join(" ")),
+            Form::Load => format!("(&: {})", parts.join(" ")),
+            Form::Context => format!("(+ {})", parts.join(" ")),
+            Form::Route => format!(
+                "(/ {} {})",
+                self.node(id).map_or("", |node| node.text.trim()),
+                parts.join(" ")
+            ),
+            Form::Bind => format!("(= {} {})", self.node(id).map_or("", |node| node.text.trim()), parts.join(" ")),
+            Form::Meta => format!("(>< {})", parts.join(" ")),
+            Form::Numeric => format!("|{}|", parts.join(" ")),
+            Form::Supersede => format!("(* {})", parts.join(" ")),
+            Form::Invariant => format!("(@ {})", parts.join(" ")),
             Form::Compose => format!("({})", parts.join(" ")),
+            Form::Imaginary => format!("{{{}}}", parts.join(" ")),
             Form::Call => format!("({text} {})", parts.join(" ")).replace(" )", ")"),
             Form::Function(params) => {
                 format!("(~ {text} ({}) {})", params.join(" "), parts[0])
@@ -3266,7 +4483,11 @@ impl Mandala {
             Form::Program => parts.join("\n"),
         };
         Ok(match &node.model {
-            Some(model) => format!("{out}/{model}"),
+            // A per-form pin writes the routing form around the one form it
+            // pins. It used to write a postfix suffix, which the language no
+            // longer has: routing is a scope now, and a pin is the smallest
+            // possible one.
+            Some(model) => format!("(/ {model} {out})"),
             None => out,
         })
     }
@@ -3292,22 +4513,17 @@ impl fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 /// Deterministic schematic layout: the syntax tree becomes a left-to-right
-/// circuit. Nesting depth is the column; a tidy row packing stacks subtrees so
-/// each form's operands sit in the next column and wire back to it.
+/// spiral. The outermost level winds from here, exactly as a boundary's interior
+/// winds from its own middle.
 const CIRCUIT_ORIGIN: (f64, f64) = (150.0, 130.0);
 /// Vertical gap between rows (component pitch).
-const ROW_GAP: f64 = 132.0;
+const ROW_GAP: f64 = 96.0;
 /// Clear canvas left between the resized bounds of vertically packed forms.
 const ROW_GUTTER: f64 = ROW_GAP - NODE_R * 2.0;
-/// The golden ratio. The column pitch is the row pitch times PHI, so the grid
-/// the circuit sits on keeps a golden aspect — the earlier "divine geometry"
-/// proportion, now expressed as the board's cell shape.
+/// The golden ratio, the one proportion the drawing is built on: the aspect a box's
+/// contents are gridded to, and the step a ring mark grows by as the form it names
+/// is enlarged.
 const PHI: f64 = 1.618_033_988_749_895;
-/// Horizontal gap between columns (one nesting level), a golden step wider than
-/// the row pitch so signals have room to route between stages.
-const COL_GAP: f64 = ROW_GAP * PHI;
-/// Clear canvas left between the resized bounds of adjacent depth columns.
-const COLUMN_GUTTER: f64 = COL_GAP - NODE_R * 2.0;
 
 /// Structural 3D projection: one plane per nesting layer. Generous so the
 /// arrow between two layers has room to draw its head between the shapes.
@@ -3324,81 +4540,179 @@ const CONE_SHRINK: f64 = 1.0 / PHI;
 /// so cones never line up and hide one another.
 const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
 
-/// Angle each successive item advances along the interior spiral. A shade under
-/// a sixth of a turn, so one arm carries roughly six forms before it comes back
-/// around and the next winding settles outside the one beneath it.
-const SPIRAL_STEP: f64 = 1.0;
-
-/// Keeps equality on the non-overlapping side despite floating-point rounding
-/// in the geometry cache that measures these positions afterwards.
-const SPIRAL_SLACK: f64 = 1.0 + 1e-9;
-
-/// The open interval of radii along a ray for which this axis fails to separate.
+/// The radius of the smallest circle that contains this form.
 ///
-/// A spot at radius `r` on a ray of direction `dir` has coordinate `r * dir` on
-/// this axis, so it clears a neighbour sitting at `centre` exactly when
-/// `|r * dir - centre| >= half`. `None` means the axis separates at every
-/// radius; an infinite interval means it separates at none.
-fn blocked_radii(dir: f64, centre: f64, half: f64) -> Option<(f64, f64)> {
-    if dir.abs() <= f64::EPSILON {
-        // The ray never moves along this axis, so the answer is the same
-        // everywhere on it.
-        return (centre.abs() < half).then_some((f64::NEG_INFINITY, f64::INFINITY));
+/// What the packer clears around each form. A box has to count its CORNER, so a
+/// square reaches its half-diagonal; every other shape on the canvas is inscribed
+/// in its own bounds, so the wider half already contains it.
+///
+/// The distinction is worth a rule of its own because assuming corners everywhere
+/// costs √2 on the common case: measured, clearing round forms as though they were
+/// boxes left every diagonal neighbour 1.4× further away than it needed to be.
+fn circumscribed_reach(shape: Shape, extent: (f64, f64)) -> f64 {
+    if shape == Shape::Square {
+        extent.0.hypot(extent.1)
+    } else {
+        extent.0.max(extent.1)
     }
-    let (near, far) = ((centre - half) / dir, (centre + half) / dir);
-    Some((near.min(far), near.max(far)))
 }
 
-/// The smallest radius at or beyond zero that lies in none of the intervals.
-fn first_clear_radius(mut blocked: Vec<(f64, f64)>) -> f64 {
-    blocked.sort_by(|left, right| left.0.total_cmp(&right.0));
-    let mut radius = 0.0_f64;
-    for (low, high) in blocked {
-        if low <= radius && radius < high {
-            radius = high * SPIRAL_SLACK;
+/// Keeps equality on the non-overlapping side despite floating-point rounding in
+/// the geometry cache that measures these positions afterwards.
+const SPIRAL_SLACK: f64 = 1.0 + 1e-9;
+
+/// Where the arm sits, and how far apart its turns are.
+///
+/// The curve is `r = b·θ` — Archimedean, the plain one: every turn sits the same
+/// distance outside the turn within it. A logarithmic spiral was the other
+/// candidate and it is the more beautiful figure, but its radius multiplies where
+/// this one adds, so a boundary holding eight forms spanned φ⁷ ≈ 29 times its
+/// innermost radius and the page grew past reading.
+///
+/// `b` is chosen from the widest form a boundary holds, so consecutive turns are
+/// exactly far enough apart for the widest pair to clear. That makes every
+/// cross-turn pair safe by construction — two forms a whole turn apart differ in
+/// radius by `2πb` or more — and leaves only neighbours ALONG the arm to place.
+fn spiral_turn(widest_reach: f64) -> f64 {
+    (2.0 * widest_reach + CONTENT_GAP) * SPIRAL_SLACK / std::f64::consts::TAU
+}
+
+/// The point at angle `angle` on the spiral of turn spacing `b`.
+fn spiral_at(b: f64, angle: f64) -> (f64, f64) {
+    (b * angle * angle.cos(), b * angle * angle.sin())
+}
+
+/// The first angle past `from` at which the spiral stands `clearance` away from
+/// `anchor`.
+///
+/// Forms advance along the arm by what each PAIR needs rather than by a constant,
+/// which is what "shrunk together according to their size" means: a small form
+/// takes a small step and a large one takes a large step, so no form is handed room
+/// another form's size.
+///
+/// By chord, not by arc length. Near the middle the arm curves hard, so an arc of
+/// 80 units spans a chord of only 45 — placing by arc length there put the first two
+/// forms squarely on top of each other. The chord is the distance that has to clear,
+/// so the chord is what is solved for. Distance from a fixed inner point grows over
+/// the turn ahead, so a bisection finds the first crossing exactly.
+fn spiral_advance(b: f64, from: f64, anchor: (f64, f64), clearance: f64) -> f64 {
+    let mut low = from;
+    let mut high = from + std::f64::consts::TAU;
+    for _ in 0..60 {
+        let mid = f64::midpoint(low, high);
+        let at = spiral_at(b, mid);
+        if (at.0 - anchor.0).hypot(at.1 - anchor.1) < clearance {
+            low = mid;
+        } else {
+            high = mid;
         }
     }
-    radius
+    high
+}
+
+
+/// The golden-section positions for one BOX's direct contents.
+///
+/// A box is not a circle and should not be packed like one. Where a circle gets the
+/// spiral — a figure with a centre and no sides — a box gets the figure its own
+/// notation implies: rows and columns cut so the whole comes out a golden rectangle,
+/// φ wide for every 1 tall.
+///
+/// The column count is chosen, not assumed. Given `n` forms in cells of one size,
+/// each candidate width yields an aspect ratio, and the one landing nearest φ wins;
+/// ties go to the wider arrangement, because a mediator reads left-to-right and a
+/// tall stack of branches does not. So three branches lay out in a row, four in
+/// 3×2 or 2×2 depending on the cell, and a dozen in the grid closest to the golden
+/// rectangle rather than in whatever the spiral happened to give.
+///
+/// Tighter than the spiral, besides: a grid of equal cells wastes nothing between
+/// them, where a spiral must leave the gaps its curve implies.
+fn golden_grid_spots(items: &[(NodeId, (f64, f64), f64)]) -> Vec<(NodeId, f64, f64)> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    // One cell size for the whole grid — the widest form decides it, so the rows and
+    // columns line up and the figure reads as a grid rather than as a drift.
+    let cell = items.iter().fold((0.0_f64, 0.0_f64), |cell, (_, extent, _)| {
+        (cell.0.max(extent.0), cell.1.max(extent.1))
+    });
+    let (pitch_x, pitch_y) = (
+        2.0 * cell.0 + CONTENT_GAP,
+        2.0 * cell.1 + CONTENT_GAP,
+    );
+    #[allow(clippy::cast_precision_loss)]
+    let count = items.len() as f64;
+    let mut best = (1usize, f64::INFINITY);
+    for columns in 1..=items.len() {
+        #[allow(clippy::cast_precision_loss)]
+        let wide = columns as f64;
+        let rows = (count / wide).ceil();
+        let aspect = (wide * pitch_x) / (rows * pitch_y);
+        // Distance in log space, so φ wide and φ tall are equally wrong.
+        let off = (aspect.ln() - PHI.ln()).abs();
+        if off < best.1 - 1e-12 {
+            best = (columns, off);
+        }
+    }
+    let columns = best.0.max(1);
+    let rows = items.len().div_ceil(columns);
+    #[allow(clippy::cast_precision_loss)]
+    let origin = (
+        -(columns as f64 - 1.0) * pitch_x / 2.0,
+        -(rows as f64 - 1.0) * pitch_y / 2.0,
+    );
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, (id, _, _))| {
+            #[allow(clippy::cast_precision_loss)]
+            let (column, row) = ((index % columns) as f64, (index / columns) as f64);
+            (*id, origin.0 + column * pitch_x, origin.1 + row * pitch_y)
+        })
+        .collect()
 }
 
 /// The tightest non-overlapping spiral positions for one boundary's direct
 /// contents.
 ///
-/// Each item takes the next ray around — a constant angular step, so the set
-/// reads outward along one continuous arm — and is then pulled in along that ray
-/// as far as it will go: to the smallest radius that clears every item already
-/// placed, which is nearly always the middle for the first of them. A boundary
-/// is only ever as large as its contents force it to be, so packing them at the
-/// least radius each admits is what keeps the circle or square around them
-/// shrunk to its contents.
+/// Every form sits exactly on one Archimedean spiral, and each one advances along
+/// it by what IT and its neighbour need — not by a constant step, and not by
+/// opening the whole arm until the worst pair fits. That last one is what was here
+/// before, and it is why a boundary holding two dozen small forms came out twelve
+/// times an item's own radius when a tight packing needs seven: the arm was opened
+/// until the tightest pair anywhere cleared, and every other form was handed the
+/// same room whether it asked for it or not.
 ///
-/// The clearance test is the separating axis for two axis-aligned bounds: two
-/// items miss each other when their X bounds separate or their Y bounds do.
-/// Along one ray each axis fails over a single interval of radii, so the radii a
-/// neighbour forbids are known exactly rather than searched for.
-fn spiral_spots(items: &[(NodeId, (f64, f64))]) -> Vec<(NodeId, f64, f64)> {
+/// Advancing pairwise gives the density back. Cross-turn pairs are safe by
+/// construction — see [`spiral_turn`] — so only neighbours along the arm are solved
+/// for, and each is placed at the first angle where its own chord clears. A
+/// correction pass then applies the smallest uniform opening that satisfies the
+/// exact box test, which is a no-op unless a diagonal pair needs a hair more than
+/// its circumscribed reach implied; a uniform opening keeps the figure the same
+/// spiral, since scaling `r = bθ` gives `r = kbθ`.
+fn spiral_spots(items: &[(NodeId, (f64, f64), f64)]) -> Vec<(NodeId, f64, f64)> {
     if items.is_empty() {
         return Vec::new();
     }
-    let mut spots: Vec<(NodeId, f64, f64, (f64, f64))> = Vec::with_capacity(items.len());
-    for (index, (id, extent)) in items.iter().enumerate() {
-        let angle = index as f64 * SPIRAL_STEP;
-        let (cos, sin) = (angle.cos(), angle.sin());
-        let blocked = spots
-            .iter()
-            .filter_map(|(_, x, y, placed)| {
-                let half_w = extent.0 + placed.0 + CONTENT_GAP;
-                let half_h = extent.1 + placed.1 + CONTENT_GAP;
-                let (low_x, high_x) = blocked_radii(cos, *x, half_w)?;
-                let (low_y, high_y) = blocked_radii(sin, *y, half_h)?;
-                // Overlapping means failing to separate on BOTH axes at once.
-                let (low, high) = (low_x.max(low_y), high_x.min(high_y));
-                (low < high).then_some((low, high))
-            })
-            .collect::<Vec<_>>();
-        let radius = first_clear_radius(blocked);
-        spots.push((*id, radius * cos, radius * sin, *extent));
+    let widest = items
+        .iter()
+        .map(|(_, _, reach)| *reach)
+        .fold(0.0_f64, f64::max);
+    let turn = spiral_turn(widest);
+    let mut points = Vec::with_capacity(items.len());
+    let mut angle = 0.0_f64;
+    points.push(spiral_at(turn, angle));
+    for pair in items.windows(2) {
+        let clearance = (pair[0].2 + pair[1].2 + CONTENT_GAP) * SPIRAL_SLACK;
+        let anchor = *points.last().expect("the first form is placed");
+        angle = spiral_advance(turn, angle, anchor, clearance);
+        points.push(spiral_at(turn, angle));
     }
+    let mut spots = items
+        .iter()
+        .zip(&points)
+        .map(|((id, extent, _), (x, y))| (*id, *x, *y, *extent))
+        .collect::<Vec<_>>();
     let (min_x, max_x, min_y, max_y) = spots.iter().fold(
         (
             f64::INFINITY,
@@ -3446,13 +4760,18 @@ impl Mandala {
 
         // Every arm is the same move: pick the form and text, then attach the
         // ordered children. The uniformity is the point of the abstraction.
-        let (expr, model) = match expr {
-            Expr::Model { selector, body } => (body.as_ref(), Some(selector.to_string())),
-            expr => (expr, None),
-        };
+        // A route is a form now, so it is built like one. `Node::model` is
+        // still set by the panel for a per-form pin; it is simply no longer how
+        // a written `(/ …)` arrives.
+        let model: Option<String> = None;
         let (form, text, kids): (Form, String, Vec<&Expr>) = match expr {
             Expr::Prompt(s) => (Form::Prompt, s.clone(), vec![]),
             Expr::Symbol(s) => (Form::Symbol, s.clone(), vec![]),
+            Expr::Source => (Form::Source, String::new(), vec![]),
+            Expr::Meta(v) => (Form::Meta, String::new(), v.iter().collect()),
+            Expr::Numeric(v) => (Form::Numeric, String::new(), v.iter().collect()),
+            Expr::Supersede { topic, body } => (Form::Supersede, String::new(), vec![topic, body]),
+            Expr::Invariant { check, body } => (Form::Invariant, String::new(), vec![check, body]),
             Expr::Import { module } => (Form::Import, module.to_string(), vec![]),
             Expr::Quote(x) => (Form::Quote, String::new(), vec![x]),
             Expr::Unquote(x) => (Form::Unquote, String::new(), vec![x]),
@@ -3474,16 +4793,34 @@ impl Mandala {
                 vec![condition.as_ref(), when_yes.as_ref(), when_no.as_ref()],
             ),
             Expr::Concat(v) => (Form::Concat, String::new(), v.iter().collect()),
+            Expr::Flashback(v) => (Form::Flashback, String::new(), v.iter().collect()),
+            Expr::Dream(x) => (Form::Dream, String::new(), vec![x]),
+            Expr::Bind { name, value, body } => (
+                Form::Bind,
+                name.clone(),
+                vec![value.as_ref(), body.as_ref()],
+            ),
             Expr::Compose(v) => (Form::Compose, String::new(), v.iter().collect()),
+            Expr::Imaginary(v) => (Form::Imaginary, String::new(), v.iter().collect()),
             Expr::Call { name, args } => (Form::Call, name.clone(), args.iter().collect()),
             Expr::Function { name, params, body } => (
                 Form::Function(params.clone()),
                 name.clone(),
                 vec![body.as_ref()],
             ),
-            Expr::Input { name, body } => (Form::Input, name.clone(), vec![body.as_ref()]),
+            Expr::Ask => (Form::Input, String::new(), vec![]),
+            Expr::Load(path) => (Form::Load, String::new(), vec![path.as_ref()]),
+            Expr::Context { context, body } => (
+                Form::Context,
+                String::new(),
+                vec![context.as_ref(), body.as_ref()],
+            ),
             Expr::Program(v) => (Form::Program, String::new(), v.iter().collect()),
-            Expr::Model { .. } => unreachable!("model wrapper was unwrapped above"),
+            Expr::Model { selector, body } => (
+                Form::Route,
+                selector.to_string(),
+                vec![body.as_ref()],
+            ),
         };
 
         let indents = form.opens_indentation();
@@ -3531,27 +4868,49 @@ impl Mandala {
             if self.is_written_prefix(id) {
                 continue;
             }
+            // A flow claims none either: it is the arrow drawn between the two
+            // forms it routes, so those two take the places, side by side in the
+            // boundary that encloses the flow. Giving the flow a slot of its own
+            // drew a circle around the pair and made the connection look like a
+            // container.
+            if self.node(id).is_some_and(|node| node.form.is_flow()) {
+                continue;
+            }
             if self.holder(id).is_none() {
                 let _ = self.hold(container, id);
             }
         }
     }
 
-    /// Lay the syntax tree out as a left-to-right, size-aware circuit.
+    /// Lay the syntax tree out, innermost first, everything on a spiral.
     ///
-    /// Nesting depth is the **column**. Column centres are separated by the
-    /// largest symbol on either side, so resizing a circle or square also
-    /// increases the visible indentation it occupies. Subtrees are packed into
-    /// non-overlapping vertical bands using each symbol's current extent.
+    /// Boundaries are packed from the inside out, so an outer arm sees the final
+    /// size of every circle and square within it. Each boundary arranges its own
+    /// contents along its own arm — a circle on a spiral, a box on the golden grid
+    /// — and then the OUTERMOST level does the same, winding from
+    /// [`CIRCUIT_ORIGIN`] as though the program itself were the boundary holding
+    /// everything.
     ///
-    /// Explicit contents are formatted first. Each circle or square receives a
-    /// compact phyllotaxis layout: item `n` sits at `sqrt(n)` turns of the
-    /// golden angle, with the smallest global radius coefficient that keeps all
-    /// resized bounds apart. Nested containers are packed from the inside out.
+    /// That last part used to be a circuit: nesting depth chose the column and the
+    /// rows were packed beneath it. It read badly for the commonest shape of
+    /// program there is — a file of top-level definitions, all one deep, every one
+    /// of them in the same column, the drawing a ribbon far taller than a screen.
+    /// A spiral spends both directions.
+    ///
     /// Coordinates and content placement are presentation only and never affect
     /// generated Rebis.
     fn layout(&mut self, depths: &[(NodeId, usize)]) {
         use std::cmp::Reverse;
+
+        // Floors go first. A floor is a size a boundary was held at so a shrinking
+        // content could not drag its wall in; formatting states what the drawing is
+        // at the least size it can honestly be drawn at, so every wall is handed back
+        // to its contents here. Hand-set sizes are NOT cleared — the circuit layout
+        // reserves columns and rows for a symbol someone deliberately made larger.
+        for node in &mut self.nodes {
+            node.floor = None;
+        }
+        self.invalidate_geometry();
 
         #[derive(Default)]
         struct PackedBand {
@@ -3628,6 +4987,29 @@ impl Mandala {
 
         let depth_of = depths.iter().copied().collect::<HashMap<NodeId, usize>>();
 
+        // Under `Sizing::Even`, every form that holds nothing takes the one size
+        // first — including the ones standing at the top level, which belong to
+        // no boundary and so are never reached by the pass below. Sizing them
+        // before anything is packed is also what lets each boundary close on
+        // contents that are already final.
+        if self.sizing == Sizing::Even {
+            let size = self.even_mark_size();
+            let marks = self
+                .nodes
+                .iter()
+                .map(|node| node.id)
+                .filter(|id| self.contained_children(*id).is_empty())
+                // A size set by hand at the top level is a deliberate
+                // statement about one form, and formatting has never undone
+                // one. Inside a boundary the level rules, exactly as it does
+                // under `ByLevel`.
+                .filter(|id| self.is_inlined(*id) || self.hand_size(*id).is_none())
+                .collect::<Vec<_>>();
+            for id in marks {
+                self.resize(id, size.0, size.1);
+            }
+        }
+
         // Pack nested boundaries first so an outer spiral sees the final extent
         // of every inner square or circle.
         let mut containers = self
@@ -3638,19 +5020,7 @@ impl Mandala {
             })
             .map(|node| node.id)
             .collect::<Vec<_>>();
-        containers.sort_by_key(|container| {
-            let mut depth = 0usize;
-            let mut cursor = *container;
-            let mut seen = HashSet::new();
-            while seen.insert(cursor) {
-                let Some(holder) = self.holder(cursor) else {
-                    break;
-                };
-                depth += 1;
-                cursor = holder;
-            }
-            Reverse(depth)
-        });
+        containers.sort_by_key(|container| Reverse(self.indentation_depth(*container)));
         for container in containers {
             self.layout_contents(container);
         }
@@ -3692,49 +5062,35 @@ impl Mandala {
             );
         }
 
-        let max_depth = active
-            .iter()
-            .filter_map(|id| depth_of.get(id))
-            .copied()
-            .max()
-            .unwrap_or_default();
-        let mut column_half_widths = vec![NODE_R; max_depth + 1];
-        for id in &active {
-            let depth = depth_of.get(id).copied().unwrap_or_default();
-            column_half_widths[depth] = column_half_widths[depth].max(self.extent(*id).0);
+        // The outermost level is a boundary like any other — the program itself —
+        // so its forms wind along the same spiral its interiors do.
+        //
+        // They used to be laid out as a circuit: nesting depth chose the column and
+        // the rows were packed beneath it. For a program that is mostly one deep —
+        // a file of twenty-two top-level definitions, say — every one of them shares
+        // a column, and the drawing comes out a ribbon eleven thousand units tall
+        // that has to be read at six percent zoom. A spiral spends both directions.
+        //
+        // Source order along the arm, so the first definition is at the middle and
+        // reading outward is reading down the file.
+        let mut ordered = Vec::new();
+        let mut placed = HashSet::new();
+        for (id, _) in depths {
+            if active.contains(id) && placed.insert(*id) {
+                let footprint = self.footprint(*id);
+                let shape = self.node(*id).map_or(Shape::Circle, |node| node.shape());
+                ordered.push((*id, footprint, circumscribed_reach(shape, footprint)));
+            }
         }
-        let mut columns = vec![CIRCUIT_ORIGIN.0; max_depth + 1];
-        for depth in 1..columns.len() {
-            columns[depth] = columns[depth - 1]
-                + column_half_widths[depth - 1]
-                + COLUMN_GUTTER
-                + column_half_widths[depth];
-        }
-        let first_row = rows.values().copied().fold(f64::INFINITY, f64::min);
-        let first_row = if first_row.is_finite() {
-            first_row
-        } else {
-            0.0
-        };
-        let positions = depths
-            .iter()
-            .filter(|(id, _)| active.contains(id))
-            .map(|(id, depth)| {
-                (
-                    *id,
-                    columns.get(*depth).copied().unwrap_or(CIRCUIT_ORIGIN.0),
-                    CIRCUIT_ORIGIN.1 + rows.get(id).copied().unwrap_or(first_row) - first_row,
-                )
-            })
-            .collect::<Vec<_>>();
-        for (id, x, y) in positions {
+        for (id, x, y) in spiral_spots(&ordered) {
+            let at = (CIRCUIT_ORIGIN.0 + x, CIRCUIT_ORIGIN.1 + y);
             if self
                 .node(id)
                 .is_some_and(|node| is_visual_container(&node.form))
             {
-                self.move_group_to(id, x, y);
+                self.move_group_to(id, at.0, at.1);
             } else {
-                self.move_to(id, x, y);
+                self.move_to(id, at.0, at.1);
             }
         }
     }
@@ -3786,6 +5142,7 @@ mod tests {
         assert_round_trip("([\"m\"] \"a\" \"b\")"); // Square
         assert_round_trip("(% \"question\" \"yes\" \"no\")"); // Conditional
         assert_round_trip("($ \"x\" \"y\")"); // Concat
+        assert_round_trip("(? \"a topic\")"); // Flashback
         assert_round_trip("((\"local\") \"sub\")"); // Compose
         assert_round_trip("(f \"a\" \"b\")"); // Call
         assert_round_trip("\"p\" \"q\""); // Program
@@ -3793,45 +5150,92 @@ mod tests {
     }
 
     #[test]
-    fn model_bindings_are_node_metadata_and_round_trip() {
-        let source = "(-> \"a\"/ollama:qwen4:4b \
-                      ([\"judge\"] \"b\" \"c\")/openrouter:anthropic/claude-opus-4)\
-                      /claude:opus5";
+    fn a_flashback_is_drawn_and_written_like_the_indentation_it_is() {
+        // `?` is parenthesised, so the canvas rule applies without exception: one
+        // circle, wearing its own sigil, holding its topic as contents.
+        for source in [
+            "(? \"a topic\")",
+            "(? retry queue)",
+            "($ \"given \" (? topic) \" decide\")",
+            "(-> (? topic) \"act on it\")",
+            "(~ recall (topic) '(? ,topic))",
+            "(? topic)/claude:opus5",
+        ] {
+            assert_round_trip(source);
+        }
+
+        let mandala = Mandala::from_rebis("(? retry queue)").expect("the fixture parses");
+        let root = mandala.root().expect("the drawing has a root");
+        let node = mandala.node(root).expect("the root exists");
+        assert_eq!(node.form, Form::Flashback);
+        assert_eq!(node.shape(), Shape::Circle, "an indentation is a circle");
+        assert_eq!(node.mark(), "?", "the sigil rides the ring");
+        assert_eq!(
+            mandala.children(root).len(),
+            2,
+            "the topic words are its contents"
+        );
+    }
+
+    #[test]
+    fn routing_is_a_drawn_form_and_round_trips() {
+        // Routing used to be a postfix suffix, unwrapped into a field, so a
+        // drawing could not show which part of a program ran on which model —
+        // the one consequential thing about a program that the canvas was
+        // blind to. As a form it has a circle, and the routed subtree is drawn
+        // inside it.
+        let source = "(/ claude:opus5 \
+                        (-> (/ ollama:qwen4:4b \"a\") \
+                            (/ openrouter:anthropic/claude-opus-4 ([\"judge\"] \"b\" \"c\"))))";
         let mandala = Mandala::from_rebis(source).unwrap();
 
-        // Model wrappers annotate existing forms; they do not add geometry.
-        assert_eq!(mandala.nodes().len(), 6);
-        let flow = mandala
+        let routes: Vec<&Node> = mandala
             .nodes()
             .iter()
-            .find(|node| node.form == Form::Forward)
-            .expect("flow");
-        let square = mandala
-            .nodes()
-            .iter()
-            .find(|node| node.form == Form::Square)
-            .expect("square");
-        let prompt = mandala
-            .nodes()
-            .iter()
-            .find(|node| node.text == "a")
-            .expect("bound prompt");
-        assert_eq!(flow.model.as_deref(), Some("claude:opus5"));
+            .filter(|node| node.form == Form::Route)
+            .collect();
+        assert_eq!(routes.len(), 3, "every route is a node");
+        // Each wears its selector on its ring, which is what makes the routing
+        // legible without opening a panel.
+        let mut worn: Vec<String> = routes.iter().map(|node| node.mark()).collect();
+        worn.sort();
         assert_eq!(
-            square.model.as_deref(),
-            Some("openrouter:anthropic/claude-opus-4")
+            worn,
+            vec![
+                "/ claude:opus5".to_string(),
+                "/ ollama:qwen4:4b".to_string(),
+                "/ openrouter:anthropic/claude-opus-4".to_string(),
+            ]
         );
-        assert_eq!(prompt.model.as_deref(), Some("ollama:qwen4:4b"));
-        assert!(mandala
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.text.as_str(), "judge" | "b" | "c"))
-            .all(|node| node.model.is_none()));
+        // A route is an indentation like every other parenthesised form, and
+        // holds exactly the one thing it routes.
+        for route in &routes {
+            assert!(route.form.opens_indentation());
+            assert_eq!(route.shape(), Shape::Circle);
+            assert_eq!(route.form.arity(), Arity::Exactly(1));
+            assert_eq!(mandala.children(route.id).len(), 1);
+        }
 
         let regenerated = mandala.to_rebis().unwrap();
         assert_eq!(
             rebis_lang::parse(&regenerated).unwrap(),
             rebis_lang::parse(source).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_per_form_model_pin_is_still_metadata() {
+        // The panel pins one form's model without wrapping it, and that stays
+        // a field: it is an exception to a scope, not a scope of its own, and
+        // giving it a circle would draw a boundary around a single form.
+        let mut mandala = Mandala::new();
+        let prompt = mandala.add(Form::Prompt, "draft", 0.0, 0.0);
+        mandala.set_model(prompt, Some("ollama:qwen4:4b".to_string()));
+        assert_eq!(mandala.nodes().len(), 1, "a pin added geometry");
+        let regenerated = mandala.to_rebis().unwrap();
+        assert_eq!(
+            rebis_lang::parse(&regenerated).unwrap(),
+            rebis_lang::parse("(/ ollama:qwen4:4b \"draft\")").unwrap()
         );
     }
 
@@ -3941,9 +5345,10 @@ mod tests {
         let ident = m.add(Form::Symbol, "surviving-verified-design", 0.0, 0.0);
         assert_eq!(m.node(ident).unwrap().glyph(), "surviving-ve…");
 
-        // An indentation shows the sigil that opened it, never its text.
+        // An indentation shows the line that opened it — whole, because the
+        // ring is where a boundary says which boundary it is.
         let macro_form = m.add(Form::Function(vec!["x".into()]), "twice", 0.0, 0.0);
-        assert_eq!(m.node(macro_form).unwrap().glyph(), "~");
+        assert_eq!(m.node(macro_form).unwrap().glyph(), "~ twice (x)");
 
         // And a bare compose has nothing to say: its circle is the statement.
         let compose = m.add(Form::Compose, "", 0.0, 0.0);
@@ -3953,13 +5358,14 @@ mod tests {
     #[test]
     fn every_parenthesised_form_is_a_circle_wearing_its_own_sigil() {
         // One rule: a form that writes its operands inside its own parentheses
-        // is an indentation, an indentation is a circle, and the notation that
+        // is an indentation, an indentation is a circle, and the line that
         // opened it is written on the ring instead of loose among its contents.
         for (form, mark) in [
             (Form::Concat, "$"),
+            (Form::Flashback, "?"),
             (Form::Invert, "^"),
             (Form::Conditional, "%"),
-            (Form::Function(vec![]), "~"),
+            (Form::Function(vec![]), "~ ()"),
             (Form::Input, "&"),
             (Form::Compose, ""),
         ] {
@@ -3972,6 +5378,18 @@ mod tests {
             // Its interior belongs to what it holds, never to a label.
             assert_eq!(node.caption(), "", "{form:?} keeps its interior clear");
         }
+
+        // And a form whose head has words in it wears the words. Two macros
+        // side by side are two circles; without their names on the rings the
+        // drawing cannot say which is which, and a caller cannot see what to
+        // pass.
+        let mut mandala = Mandala::new();
+        let named = mandala.add(Form::Function(vec!["url".into(), "depth".into()]), "fetch", 0.0, 0.0);
+        assert_eq!(mandala.node(named).unwrap().mark(), "~ fetch (url depth)");
+        let port = mandala.add(Form::Input, "review", 0.0, 0.0);
+        assert_eq!(mandala.node(port).unwrap().mark(), "& review");
+        let call = mandala.add(Form::Call, "fetch", 0.0, 0.0);
+        assert_eq!(mandala.node(call).unwrap().mark(), "fetch");
 
         // The square is the other delimiter and keeps its own outline.
         assert_eq!(Form::Square.shape(), Shape::Square);
@@ -4401,38 +5819,182 @@ mod tests {
     }
 
     #[test]
-    fn a_flow_is_an_untitled_circle_with_its_arrow_drawn_inside() {
-        // `(-> A B)` is parenthesised like any other form, so it gets a circle —
-        // which is what gives the arrow above it a block to point at, instead of
-        // the nesting being flattened into one long chain. The circle wears no
-        // mark: a circle titled with an arrow is nothing the palette can build,
-        // and the arrow it would name is already drawn inside it.
+    fn a_flow_is_the_arrow_and_claims_no_circle_of_its_own() {
+        // A connection is not a container. `(-> A B)` draws A and B side by side in
+        // whatever boundary encloses the flow, with the arrow between them — no
+        // circle around the pair, because a circle says "these two are one thing"
+        // when what is meant is "this one feeds that one".
         for flow in [Form::Forward, Form::Backflow] {
             assert!(flow.is_flow());
-            assert!(flow.opens_indentation(), "a flow expression is a `( )`");
-            assert_eq!(flow.shape(), Shape::Circle);
+            assert!(!flow.opens_indentation(), "a flow is not an indentation");
+            assert_eq!(flow.shape(), Shape::Arrow);
+            let mut probe = Mandala::new();
+            let id = probe.add(flow.clone(), "", 0.0, 0.0);
+            assert_eq!(
+                probe.node(id).unwrap().mark(),
+                "",
+                "a flow wears no title: the arrow is the whole of it"
+            );
         }
 
-        let m = Mandala::from_rebis("(-> (-> \"a\" \"b\") \"c\")").unwrap();
-        let flows = m
+        // Inside a boundary, the two operands are the boundary's own contents —
+        // the flow takes no slot beside them.
+        let mandala = Mandala::from_rebis("((-> \"a\" \"b\") \"c\")").unwrap();
+        let compose = mandala
             .nodes()
             .iter()
-            .filter(|n| n.form.is_flow())
-            .map(|n| n.id)
+            .find(|node| node.form == Form::Compose)
+            .expect("the group")
+            .id;
+        let held = mandala.contained_children(compose);
+        assert_eq!(held.len(), 3, "two flow operands and the third form: {held:?}");
+        assert!(
+            held.iter().all(|id| mandala
+                .node(*id)
+                .is_some_and(|node| !node.form.is_flow())),
+            "a flow claimed a slot of its own"
+        );
+        assert_eq!(mandala.to_rebis().unwrap(), "((-> \"a\" \"b\") \"c\")");
+    }
+
+    #[test]
+    fn a_chain_is_one_ordered_thing_however_it_was_written() {
+        // `(-> a b c)` folds into nested flows, so three stages live across two `->`
+        // nodes. A reader sees one chain; so does the panel, and so does a click.
+        for source in [
+            "(-> \"a\" \"b\" \"c\")",
+            "(-> (-> \"a\" \"b\") \"c\")",
+            "(-> \"a\" (-> \"b\" \"c\"))",
+        ] {
+            let mandala = Mandala::from_rebis(source).expect("the fixture parses");
+            let at = |text: &str| {
+                mandala
+                    .nodes()
+                    .iter()
+                    .find(|node| node.text == text)
+                    .unwrap_or_else(|| panic!("{source}: no form {text:?}"))
+                    .id
+            };
+            let root = mandala
+                .flow_chain_root(at("b"))
+                .unwrap_or_else(|| panic!("{source}: the middle stage is in no chain"));
+            let names = mandala
+                .flow_stages(root)
+                .into_iter()
+                .filter_map(|id| mandala.node(id).map(|node| node.text.clone()))
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["a", "b", "c"], "{source}: stages read wrong");
+            assert_eq!(mandala.flow_stage_number(at("a")), Some((1, 3)));
+            assert_eq!(mandala.flow_stage_number(at("c")), Some((3, 3)));
+            // Every stage finds the same chain, from anywhere in it.
+            for text in ["a", "b", "c"] {
+                assert_eq!(mandala.flow_chain_root(at(text)), Some(root));
+            }
+        }
+
+        // A form in no chain reports none, so the panel shows the section exactly
+        // when there is something to reorder.
+        let plain = Mandala::from_rebis("(\"a\" \"b\")").expect("parses");
+        for node in plain.nodes() {
+            assert_eq!(plain.flow_chain_root(node.id), None, "{:?}", node.form);
+        }
+    }
+
+    #[test]
+    fn a_chain_stage_can_be_moved_like_a_child() {
+        // The stages are permuted where they SIT — the arrows keep their shape and
+        // the forms exchange slots — so the order is editable as an order rather
+        // than by rewriting the source.
+        let mut mandala = Mandala::from_rebis("(-> \"a\" \"b\" \"c\")").expect("parses");
+        let at = |mandala: &Mandala, text: &str| {
+            mandala
+                .nodes()
+                .iter()
+                .find(|node| node.text == text)
+                .expect("the form")
+                .id
+        };
+        let stage_names = |mandala: &Mandala| {
+            let root = mandala
+                .flow_chain_root(at(mandala, "a"))
+                .expect("a chain");
+            mandala
+                .flow_stages(root)
+                .into_iter()
+                .filter_map(|id| mandala.node(id).map(|node| node.text.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(stage_names(&mandala), ["a", "b", "c"]);
+
+        // Last to first.
+        let c = at(&mandala, "c");
+        assert!(mandala.set_flow_stage_number(c, 1));
+        assert_eq!(stage_names(&mandala), ["c", "a", "b"]);
+        assert_eq!(mandala.to_rebis().unwrap(), "(-> (-> \"c\" \"a\") \"b\")");
+
+        // Moving to where it already is changes nothing and reports so.
+        assert!(!mandala.set_flow_stage_number(c, 1));
+        // Out of range is refused rather than clamped.
+        assert!(!mandala.set_flow_stage_number(c, 0));
+        assert!(!mandala.set_flow_stage_number(c, 4));
+        assert_eq!(stage_names(&mandala), ["c", "a", "b"]);
+
+        // And back, so the operation is reversible.
+        assert!(mandala.set_flow_stage_number(c, 3));
+        assert_eq!(stage_names(&mandala), ["a", "b", "c"]);
+        assert_eq!(mandala.to_rebis().unwrap(), "(-> (-> \"a\" \"b\") \"c\")");
+    }
+
+    #[test]
+    fn a_chain_of_flows_draws_as_a_chain() {
+        // `(-> (-> a b) c)` means a feeds b feeds c, so that is what it draws. The
+        // outer arrow leaves the inner flow's VALUE — `b` — rather than leaving the
+        // flow itself, which is not a shape and would have left the arrow starting
+        // from empty canvas.
+        let mandala = Mandala::from_rebis("(-> (-> \"a\" \"b\") \"c\")").unwrap();
+        let named = |text: &str| {
+            mandala
+                .nodes()
+                .iter()
+                .find(|node| node.text == text)
+                .unwrap_or_else(|| panic!("no form {text:?}"))
+                .id
+        };
+        let flows = mandala
+            .nodes()
+            .iter()
+            .filter(|node| node.form.is_flow())
+            .map(|node| node.id)
             .collect::<Vec<_>>();
         assert_eq!(flows.len(), 2);
         let (outer, inner) = (flows[0], flows[1]);
 
-        assert_eq!(m.node(outer).unwrap().mark(), "", "no arrow as a title");
-        assert_eq!(m.node(inner).unwrap().mark(), "");
+        // The inner flow supplies `b` and receives at `a`.
+        assert_eq!(mandala.flow_endpoint(inner, true), named("b"));
+        assert_eq!(mandala.flow_endpoint(inner, false), named("a"));
+        // So the outer arrow runs from `b` to `c`, and the two arrows chain.
+        assert_eq!(mandala.flow_endpoint(outer, true), named("c"));
+        let kids = mandala.children(outer);
+        assert_eq!(mandala.flow_endpoint(kids[0], true), named("b"));
+        assert_eq!(mandala.flow_endpoint(kids[1], false), named("c"));
 
-        // The inner flow is a circle around its own two forms, and the outer
-        // arrow connects THAT circle to the third — not its innermost result.
-        for operand in m.children(inner) {
-            assert_eq!(m.holder(operand), Some(inner), "drawn inside its circle");
-        }
-        assert_eq!(m.holder(inner), Some(outer), "and itself inside the outer");
-        assert_eq!(m.to_rebis().unwrap(), "(-> (-> \"a\" \"b\") \"c\")");
+        // Read the other way round, a backflow resolves to the mirror ends.
+        let back = Mandala::from_rebis("(<- \"a\" \"b\")").unwrap();
+        let flow = back
+            .nodes()
+            .iter()
+            .find(|node| node.form.is_flow())
+            .unwrap()
+            .id;
+        let at = |text: &str| {
+            back.nodes()
+                .iter()
+                .find(|node| node.text == text)
+                .unwrap()
+                .id
+        };
+        assert_eq!(back.flow_endpoint(flow, true), at("a"), "(<- a b) yields a");
+        assert_eq!(back.flow_endpoint(flow, false), at("b"));
     }
 
     #[test]
@@ -4536,16 +6098,21 @@ mod tests {
         let interior = m.interior(square.id);
         assert_eq!(
             interior.len(),
-            5,
-            "the flow circle, its two operands, and both branches"
+            4,
+            "the flow's two operands and both branches — the flow itself is the \
+             arrow between them and claims no slot"
         );
         assert_eq!(
             m.contained_children(square.id).len(),
-            3,
-            "the box directly holds the flow circle and its two branches"
+            4,
+            "the box directly holds the mediating flow's two operands and its two \
+             branches — the flow itself is the arrow between them"
         );
         assert!(interior.iter().all(|id| m.is_inlined(*id)));
-        let mediator = m.inlined_mediator(square.id).expect("held mediator");
+        // The mediator here IS a flow, so it is not among the box's contents: it is
+        // the arrow drawn between two of them. What has to stay inside the brackets
+        // is the pair it routes.
+        let mediator = m.mediator(square.id).expect("the square names a mediator");
         assert_eq!(
             m.node(mediator).map(|node| &node.form),
             Some(&Form::Forward)
@@ -4554,7 +6121,7 @@ mod tests {
             m.children(mediator)
                 .into_iter()
                 .all(|child| m.is_inlined(child)),
-            "the mediator's children stay inside the source-written brackets"
+            "the mediator's operands stay inside the source-written brackets"
         );
 
         // The box grew past its empty size to hold the mediator itself.
@@ -4612,11 +6179,16 @@ mod tests {
         let interior = m.interior(compose.id);
         assert_eq!(
             interior.len(),
-            4,
-            "the direct prompt, the flow circle, and its two operands"
+            3,
+            "the direct prompt and the flow's two operands — the flow itself is the \
+             arrow between them and claims no slot"
         );
         assert!(interior.iter().all(|id| m.is_inlined(*id)));
-        assert_eq!(m.contained_children(compose.id).len(), 2);
+        assert_eq!(
+            m.contained_children(compose.id).len(),
+            3,
+            "the prompt plus the flow's two operands, all at one level"
+        );
         let flow = m
             .nodes()
             .iter()
@@ -4634,12 +6206,14 @@ mod tests {
         assert!(radius_x > NODE_R, "the circle grew around its operands");
         for id in &interior {
             let node = m.node(*id).unwrap();
-            let child_extent = m.extent(*id);
-            let far_corner = ((node.x - compose.x).abs() + child_extent.0)
-                .hypot((node.y - compose.y).abs() + child_extent.1);
+            // The circle has to contain the SHAPE, which is the centre distance plus
+            // the radius of the smallest circle around it — not the corner of its
+            // bounding box, which only a square actually reaches.
+            let reach = (node.x - compose.x).hypot(node.y - compose.y)
+                + circumscribed_reach(node.shape(), m.extent(*id));
             assert!(
-                far_corner + MEDIATOR_PAD <= radius_x + 1e-9,
-                "{:?} escaped the compose circle",
+                reach + MEDIATOR_PAD <= radius_x + 1e-6,
+                "{:?} escaped the compose circle: reaches {reach:.1} of {radius_x:.1}",
                 node.form
             );
         }
@@ -4736,10 +6310,10 @@ mod tests {
     fn structural_forms_use_their_declared_outlines() {
         assert_eq!(Form::Prompt.shape(), Shape::Hexagon);
         assert_eq!(Form::Compose.shape(), Shape::Circle);
-        // The box belongs to the mediator alone: a square on the canvas can
-        // only mean a mediation. The implicit top-level scope is a triangle.
+        // The box belongs to the mediator alone: a square on the canvas can only mean
+        // a mediation. The implicit top-level scope is a compose like any other.
         assert_eq!(Form::Square.shape(), Shape::Square);
-        assert_eq!(Form::Program.shape(), Shape::Triangle);
+        assert_eq!(Form::Program.shape(), Shape::Circle);
         // A call and an input port both write their operands inside their own
         // parentheses, so both are indentations and both are drawn as the
         // circle they open, named by the notation that opened it.
@@ -4775,11 +6349,14 @@ mod tests {
                     "{form:?} is drawn as a circle without being an indentation"
                 );
             }
-            if form.is_flow() {
-                // Flow shares the plain circle with compose by design: what
-                // tells them apart is the arrow drawn between the two forms
-                // inside it, and a circle titled with an arrow is nothing the
-                // palette could build.
+            if form.is_flow() || form == Form::Program {
+                // Flow shares the plain circle with compose by design: what tells
+                // them apart is the arrow drawn between the two forms inside it, and
+                // a circle titled with an arrow is nothing the palette could build.
+                //
+                // A program shares it for a stronger reason — it IS a compose, the
+                // outermost one, and the language draws no distinction between them.
+                // Told apart by position: it is the boundary nothing else holds.
                 continue;
             }
             let mut mandala = Mandala::new();
@@ -4796,7 +6373,6 @@ mod tests {
         let shapes = seen.iter().map(|(shape, _)| *shape).collect::<Vec<_>>();
         assert!(shapes.contains(&Shape::Square));
         assert!(shapes.contains(&Shape::Circle));
-        assert!(shapes.contains(&Shape::Triangle));
         assert!(shapes.contains(&Shape::Hexagon));
     }
 
@@ -4813,12 +6389,7 @@ mod tests {
         ] {
             assert!(!s.strokes().is_empty(), "{s:?} draws nothing");
         }
-        for s in [
-            Shape::Circle,
-            Shape::Triangle,
-            Shape::Square,
-            Shape::Diamond,
-        ] {
+        for s in [Shape::Circle, Shape::Square, Shape::Diamond] {
             assert!(s.strokes().is_empty(), "{s:?} is an outline, not a sigil");
         }
     }
@@ -4881,16 +6452,36 @@ mod tests {
     }
 
     #[test]
-    fn program_triangles_use_their_outline_for_hit_testing() {
-        assert_eq!(Form::Program.shape(), Shape::Triangle);
-        assert!(Shape::Triangle.contains(0.0, 0.0));
-        assert!(Shape::Triangle.contains(NODE_R * 0.9, NODE_RY * 0.9));
-        assert!(!Shape::Triangle.contains(NODE_R * 0.8, -NODE_RY * 0.8));
-        assert!(!Shape::Triangle.contains(0.0, NODE_RY + 1.0));
+    fn a_program_is_a_compose_and_is_drawn_as_one() {
+        // Nothing in the language distinguishes a program from a compose: every
+        // evaluator and runtime site reads `Program(items) | Compose(items)` as one
+        // case, and the only difference is that the outermost level prints without its
+        // parentheses. It had a shape of its own — a triangle — which claimed a form
+        // the language does not have, and cost a great deal besides: a triangle only
+        // holds a round arrangement out to 0.41 of its half-width, so the drawing came
+        // out roughly twenty times the area a circle needs.
+        assert_eq!(Form::Program.shape(), Form::Compose.shape());
+        assert_eq!(Form::Program.shape(), Shape::Circle);
+        assert!(Form::Program.opens_indentation(), "and it holds what it names");
 
-        for (x, y) in Shape::triangle_points() {
-            assert!(Shape::Triangle.contains(x as f64 * 0.98, y as f64 * 0.98));
-        }
+        // Told apart by position and by name, not by outline: it is the boundary
+        // nothing else holds, and its label appears when it is selected.
+        let source = "(~ f (x) x)\n(~ g (x) x)";
+        let mandala = Mandala::from_rebis(source).expect("the fixture parses");
+        let program = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Program)
+            .expect("two top-level forms make an implicit program");
+        assert_eq!(mandala.holder(program.id), None, "nothing holds a program");
+        assert_eq!(
+            program.caption(),
+            Form::Compose.name().replace("compose", ""),
+            "a program says no more on the canvas than a bare compose does"
+        );
+        assert_eq!(program.mark(), "", "it wears no sigil, as a bare compose does not");
+        // And it still prints as a bare sequence rather than gaining parentheses.
+        assert_eq!(mandala.to_rebis().unwrap(), source);
     }
 
     #[test]
@@ -4936,14 +6527,14 @@ mod tests {
         assert_eq!(m.node(i).unwrap().caption(), "");
         assert_eq!(m.node(circle).unwrap().caption(), "");
         assert_eq!(m.node(square).unwrap().caption(), "");
-        // An indentation writes its notation on its ring, leaving the interior
-        // to the forms it holds.
+        // An indentation writes its head on its ring, leaving the interior to
+        // the forms it holds.
         let f = m.add(Form::Function(vec!["x".into()]), "twice", 0.0, 0.0);
         assert_eq!(m.node(f).unwrap().caption(), "");
         assert_eq!(
             m.node(f).unwrap().mark(),
-            "~",
-            "the head alone, not its arguments"
+            "~ twice (x)",
+            "the head, whole — but only the head, never the body it holds"
         );
     }
 
@@ -5234,7 +6825,119 @@ mod tests {
     }
 
     #[test]
-    fn format_drawing_reserves_proportional_columns_and_rows_for_resized_symbols() {
+    fn a_program_holds_everything_it_names() {
+        // The program is a boundary, not a mark floating beside the forms it names.
+        // Its contents wind on the same spiral every interior uses, and since it is
+        // drawn as the compose it is, the circle closes on them at their own radius —
+        // where a triangle would have had to be two and a half times wider to hold the
+        // same arrangement without its corners cutting through them.
+        assert!(Form::Program.opens_indentation(), "a program is a boundary");
+
+        let source = (0..7)
+            .map(|index| format!("(~ f{index} (x) x)"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mandala = Mandala::from_rebis(&source).expect("the fixture parses");
+        let program = mandala
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Program)
+            .expect("an implicit program");
+        let held = mandala.contained_children(program.id);
+        assert_eq!(held.len(), 7, "every definition is inside it: {held:?}");
+
+        // Every content's own outline, sampled all the way round, lies within the
+        // program's circle.
+        let (radius, _) = mandala.extent(program.id);
+        for id in &held {
+            let node = mandala.node(*id).expect("held");
+            let footprint = mandala.footprint(*id);
+            let reach = (node.x - program.x).hypot(node.y - program.y)
+                + footprint.0.max(footprint.1);
+            assert!(
+                reach <= radius + 1e-6,
+                "{:?} reaches {reach:.0} of the program's {radius:.0}",
+                node.form
+            );
+        }
+
+        // And the circle is no larger than that containment requires.
+        let reach = held
+            .iter()
+            .filter_map(|id| {
+                let node = mandala.node(*id)?;
+                let footprint = mandala.footprint(*id);
+                Some(
+                    (node.x - program.x).hypot(node.y - program.y)
+                        + footprint.0.max(footprint.1),
+                )
+            })
+            .fold(0.0_f64, f64::max);
+        assert!(
+            (radius - reach - MEDIATOR_PAD).abs() < 1e-6,
+            "the program closes at {radius:.0} where its contents reach {reach:.0}"
+        );
+    }
+
+    #[test]
+    fn a_file_of_definitions_draws_as_a_page_not_a_ribbon() {
+        // The commonest shape of program there is: top-level definitions, all one
+        // deep. The outer level used to be a circuit with nesting depth as the
+        // column, so every one of them shared a column and the drawing came out a
+        // ribbon — measured on the collection, eleven thousand units tall against
+        // four thousand wide, readable only at six percent zoom. A spiral spends both
+        // directions, so the page stays roughly square however many definitions
+        // there are.
+        for count in [4usize, 12, 24] {
+            let source = (0..count)
+                .map(|index| format!("(~ f{index} (x) x)"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mandala = Mandala::from_rebis(&source).expect("the fixture parses");
+            let bounds = mandala.bounds().expect("the drawing has bounds");
+            let (width, height) = (
+                bounds.max_x - bounds.min_x,
+                bounds.max_y - bounds.min_y,
+            );
+            let aspect = width / height;
+            assert!(
+                (0.4..2.5).contains(&aspect),
+                "{count} definitions drew a ribbon: {width:.0} x {height:.0} \
+                 (aspect {aspect:.2})"
+            );
+        }
+
+        // And the outermost forms really are on one arm rather than one column: a
+        // column would put them all at the same x.
+        let source = (0..8)
+            .map(|index| format!("(~ g{index} (x) x)"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mandala = Mandala::from_rebis(&source).expect("parses");
+        let outer = mandala
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.form, Form::Function(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(outer.len(), 8);
+        let columns = outer
+            .iter()
+            .map(|node| (node.x / 10.0).round() as i64)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            columns.len() > 2,
+            "the definitions are stacked in {} column(s), not wound on an arm",
+            columns.len()
+        );
+    }
+
+    #[test]
+    fn formatting_keeps_hand_resized_forms_apart_and_keeps_their_sizes() {
+        // Two guarantees, both older than the layout that used to provide them. The
+        // top level was a circuit — depth chose the column, rows packed beneath —
+        // and it reserved room for a form someone had deliberately enlarged. It is a
+        // spiral now, and it has to reserve the same room: a hand-set size survives
+        // formatting, and nothing formatting places overlaps anything else.
         let mut mandala = Mandala::new();
         let father = mandala.add(Form::Square, "", 0.0, 0.0);
         let upper = mandala.add(Form::Prompt, "upper", 0.0, 0.0);
@@ -5242,30 +6945,292 @@ mod tests {
         mandala.father_of(father, upper);
         mandala.father_of(father, lower);
         mandala.resize(father, 220.0, 90.0);
-        // The children scale whole, so each one's half-extents come back in its
-        // own proportions; the layout must reserve whatever that works out to.
+        // The children scale whole, so each one's half-extents come back in its own
+        // proportions; the layout must reserve whatever that works out to.
         mandala.resize(upper, 70.0, 100.0);
         mandala.resize(lower, 80.0, 110.0);
-        let upper_extent = mandala.extent(upper);
-        let lower_extent = mandala.extent(lower);
+        let sizes = [
+            mandala.extent(father),
+            mandala.extent(upper),
+            mandala.extent(lower),
+        ];
 
         mandala.relayout();
 
-        let father_node = mandala.node(father).unwrap();
-        let upper_node = mandala.node(upper).unwrap();
-        let lower_node = mandala.node(lower).unwrap();
-        let child_column = upper_node.x - father_node.x;
-        let widest = upper_extent.0.max(lower_extent.0);
-        assert!(
-            (child_column - (220.0 + COLUMN_GUTTER + widest)).abs() < 1e-9,
-            "column indentation must include both resized half-widths"
+        // The sizes are still what they were dragged to.
+        assert_eq!(
+            [
+                mandala.extent(father),
+                mandala.extent(upper),
+                mandala.extent(lower),
+            ],
+            sizes,
+            "formatting must not undo a hand-set size on the outer level"
         );
-        assert_eq!(upper_node.x, lower_node.x);
-        assert!(
-            (upper_node.y - lower_node.y).abs()
-                >= upper_extent.1 + lower_extent.1 + ROW_GUTTER - 1e-9,
-            "resized child rows must not overlap"
+
+        // And none of the three overlaps another.
+        let placed = [father, upper, lower];
+        for (index, left) in placed.iter().copied().enumerate() {
+            for right in placed.iter().copied().skip(index + 1) {
+                let (a, b) = (
+                    mandala.node(left).expect("placed"),
+                    mandala.node(right).expect("placed"),
+                );
+                let apart = (a.x - b.x).hypot(a.y - b.y);
+                let needed = circumscribed_reach(a.shape(), mandala.footprint(left))
+                    + circumscribed_reach(b.shape(), mandala.footprint(right));
+                assert!(
+                    apart >= needed - 1e-6,
+                    "{:?} and {:?} overlap after formatting: {apart:.1} apart, needing \
+                     {needed:.1}",
+                    a.form,
+                    b.form
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_prefix_can_be_written_onto_a_form_and_taken_off_again() {
+        // The palette can place `'` and `,`, but a prefix is a mark on a form,
+        // not a shape you drop somewhere. Without a way to attach one, placing
+        // it was a dead end: it could never become `'x`.
+        // Quoted prompts, because `(x y)` would parse as a call to `x`.
+        let mut m = Mandala::from_rebis("(\"a\" \"b\")").unwrap();
+        let symbol = m
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Prompt)
+            .unwrap()
+            .id;
+        let circle = m.holder(symbol).unwrap();
+        let was = m.child_number(circle, symbol);
+
+        let quote = m
+            .wrap(symbol, Form::Quote)
+            .expect("a prefix may be written");
+        assert_eq!(m.written_prefix(symbol), "'");
+        assert_eq!(m.to_rebis().unwrap(), "('\"a\" \"b\")");
+        // The marked form keeps its place: the prefix took it over.
+        assert_eq!(m.child_number(circle, quote), was);
+        assert_eq!(m.prefixed_with(symbol, &Form::Quote), Some(quote));
+
+        // And taking it off returns the drawing exactly as it was.
+        let kept = m.unwrap_form(quote);
+        assert_eq!(kept, vec![symbol], "the form it marked is kept");
+        assert_eq!(m.written_prefix(symbol), "");
+        assert_eq!(m.to_rebis().unwrap(), "(\"a\" \"b\")");
+        assert_eq!(
+            m.child_number(circle, symbol),
+            was,
+            "in its own place again"
         );
+        assert_eq!(m.holder(symbol), Some(circle));
+    }
+
+    #[test]
+    fn a_mark_can_be_taken_off_from_the_form_it_is_written_on() {
+        // Marks come off one at a time, outermost first, and the form they were
+        // written on stays exactly where it was drawn.
+        let mut m = Mandala::from_rebis("(\"a\" ',\"b\")").unwrap();
+        let marked = m
+            .nodes()
+            .iter()
+            .filter(|node| node.form == Form::Prompt)
+            .map(|node| node.id)
+            .find(|id| !m.written_prefix(*id).is_empty())
+            .expect("a form carrying marks");
+        let circle = m.holder(marked).expect("the form itself holds the slot");
+        assert_eq!(m.written_prefix(marked), "',");
+
+        // The outermost mark is the top of the chain standing over the form.
+        let outermost = |m: &Mandala| {
+            let mut cursor = marked;
+            while let Some(father) = m.father(cursor).filter(|f| m.is_written_prefix(*f)) {
+                cursor = father;
+            }
+            cursor
+        };
+        assert_ne!(outermost(&m), marked, "two marks stand over it");
+
+        m.unwrap_form(outermost(&m));
+        assert_eq!(m.written_prefix(marked), ",", "the outer `'` came off");
+        assert_eq!(m.holder(marked), Some(circle), "still in its boundary");
+
+        m.unwrap_form(outermost(&m));
+        assert_eq!(m.written_prefix(marked), "", "and then the inner one");
+        assert_eq!(outermost(&m), marked, "nothing stands over it now");
+        assert_eq!(m.holder(marked), Some(circle));
+        assert_eq!(m.to_rebis().unwrap(), "(\"a\" \"b\")");
+    }
+
+    #[test]
+    fn removing_a_level_keeps_what_it_held() {
+        // Deleting a boundary takes its contents with it. Removing the level
+        // and keeping them is a different move: the operands are spliced into
+        // the hole, inheriting its place and the boundary that drew it.
+        let mut m = Mandala::from_rebis("(\"a\" (\"b\" \"c\") \"d\")").unwrap();
+        let outer = m
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Compose && m.holder(node.id).is_none())
+            .unwrap()
+            .id;
+        let inner = m
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Compose && m.holder(node.id) == Some(outer))
+            .unwrap()
+            .id;
+        let at = m.child_number(outer, inner).unwrap();
+
+        let kept = m.unwrap_form(inner);
+        assert_eq!(kept.len(), 2, "both forms it held moved up");
+        assert!(m.node(inner).is_none(), "and the level itself is gone");
+        for (offset, id) in kept.iter().copied().enumerate() {
+            assert_eq!(m.holder(id), Some(outer), "drawn in the boundary above");
+            assert_eq!(m.child_number(outer, id), Some(at + offset), "in its place");
+        }
+        assert_eq!(m.to_rebis().unwrap(), "(\"a\" \"b\" \"c\" \"d\")");
+    }
+
+    #[test]
+    fn a_resized_form_reserves_room_for_the_larger_mark_it_actually_draws() {
+        // The canvas magnifies a sigil with the boundary it names, so the room
+        // reserved has to grow with it. A flat band was right for an unresized
+        // circle and short by up to six times for a resized one — which is how a
+        // scaled-up `~` ended up drawn under its container's wall.
+        let mut m = Mandala::new();
+        let outer = m.add(Form::Compose, "", 0.0, 0.0);
+        let macro_form = m.add(Form::Function(vec!["x".into()]), "pr-fetched", 0.0, 0.0);
+        m.hold(outer, macro_form);
+
+        let small = m.footprint(macro_form).0 - m.extent(macro_form).0;
+        assert!(
+            small >= LABEL_BAND,
+            "an unresized mark reserves at least the label band, got {small}"
+        );
+        // A head is a line, not a character, so the room it takes follows the
+        // words in it: `~ pr-fetched (x)` needs more than a bare `$` beside it.
+        let bare = {
+            let mut m = Mandala::new();
+            let outer = m.add(Form::Compose, "", 0.0, 0.0);
+            let concat = m.add(Form::Concat, "", 0.0, 0.0);
+            m.hold(outer, concat);
+            m.footprint(concat).0 - m.extent(concat).0
+        };
+        assert!(
+            small > bare,
+            "a named macro reserved no more room than a bare sigil: {small} vs {bare}"
+        );
+
+        // Scale the macro's circle up hard, as dragging its wall does.
+        m.resize(macro_form, 900.0, 900.0);
+        let band = m.footprint(macro_form).0 - m.extent(macro_form).0;
+        let weight = mark_weight((
+            m.extent(macro_form).0 / macro_form_base(&m, macro_form),
+            m.extent(macro_form).1 / macro_form_base(&m, macro_form),
+        ));
+        assert!(weight > 1.0, "the mark is magnified at this size");
+        assert!(
+            band >= MARK_HEIGHT * weight / 2.0,
+            "band {band} does not cover a mark drawn at {}",
+            MARK_HEIGHT * weight
+        );
+        assert!(band > LABEL_BAND * 3.0, "the band did not grow: {band}");
+
+        // And the container closes outside the mark, not through it.
+        let (inner_x, inner_y) = (
+            m.node(macro_form).unwrap().x,
+            m.node(macro_form).unwrap().y,
+        );
+        let centre = m.node(outer).unwrap();
+        let reach = (inner_x - centre.x).hypot(inner_y - centre.y) + m.footprint(macro_form).0;
+        assert!(
+            m.extent(outer).0 >= reach,
+            "the container at {} closes inside the mark's reach {reach}",
+            m.extent(outer).0
+        );
+    }
+
+    fn macro_form_base(m: &Mandala, id: NodeId) -> f64 {
+        m.node(id).unwrap().base_extent().0
+    }
+
+    #[test]
+    fn a_circle_reserves_room_for_its_ring_label_whether_or_not_it_wears_one() {
+        // The mark is written centred on the outline, so half of it stands
+        // outside. Room for it is reserved on every circle: a bare `( )` takes
+        // the same space as a `$`, so a row of them reads as a row.
+        let mut m = Mandala::new();
+        let bare = m.add(Form::Compose, "", 0.0, 0.0);
+        let marked = m.add(Form::Concat, "", 0.0, 0.0);
+        let square = m.add(Form::Square, "", 0.0, 0.0);
+
+        assert_eq!(
+            m.footprint(bare),
+            m.footprint(marked),
+            "a circle with no mark must take the room one with a mark takes"
+        );
+        // The outline itself is untouched: what is drawn and what is clicked are
+        // the same size as before.
+        assert_eq!(m.extent(bare), (NODE_R, NODE_R));
+        assert_eq!(m.footprint(bare).0, m.extent(bare).0 + LABEL_BAND);
+        // The square writes `[ ]` with its own outline and needs no band.
+        assert_eq!(m.footprint(square), m.extent(square));
+
+        // Framing sees the label, so the mark on the outermost circle cannot
+        // fall off the edge of the window.
+        let bounds = m.bounds().unwrap();
+        assert!(bounds.width() >= (m.extent(bare).0 + LABEL_BAND) * 2.0 - 1e-9);
+
+        // And a boundary closes outside its contents' labels rather than through
+        // them.
+        let outer = m.add(Form::Compose, "", 0.0, 0.0);
+        m.father_of(outer, marked);
+        m.hold(outer, marked);
+        assert!(
+            m.extent(outer).0 >= m.footprint(marked).0,
+            "the wall cut through the mark of what it holds"
+        );
+    }
+
+    #[test]
+    fn a_connection_attaches_to_what_is_actually_drawn() {
+        // A prefix sigil is painted on the front of the form it marks, so it is
+        // never a shape a line can point at. An arrow whose operand is one must
+        // attach to the form underneath it — otherwise the line arrives from
+        // empty canvas with a head on the end, aimed at nothing.
+        let m = Mandala::from_rebis("(~ f (worker critic) '(-> ,worker ,critic))").unwrap();
+        let flow = m.nodes().iter().find(|node| node.form.is_flow()).unwrap();
+        let operands = m.children(flow.id);
+        assert_eq!(operands.len(), 2);
+
+        for operand in operands {
+            // The operand as written is the invisible sigil...
+            assert!(m.is_written_prefix(operand), "the operand is a prefix");
+            // ...and the form the line must reach is the one it marks.
+            let drawn = m.drawn_form(operand);
+            assert_ne!(drawn, operand, "the sigil is not what is drawn");
+            assert!(!m.is_written_prefix(drawn), "and what is drawn is a form");
+            assert_eq!(m.node(drawn).unwrap().form, Form::Symbol);
+        }
+
+        // Resolution walks a whole chain, not one step, and a form that is
+        // already drawn resolves to itself.
+        let stacked = Mandala::from_rebis("(~ f (x) '(-> ',x ,x))").unwrap();
+        for node in stacked.nodes() {
+            let drawn = stacked.drawn_form(node.id);
+            assert!(
+                !stacked.is_written_prefix(drawn),
+                "{:?} left a sigil",
+                node.id
+            );
+        }
+        let plain = Mandala::from_rebis("(-> \"a\" \"b\")").unwrap();
+        for node in plain.nodes() {
+            assert_eq!(plain.drawn_form(node.id), node.id, "nothing to resolve");
+        }
     }
 
     #[test]
@@ -5355,6 +7320,665 @@ mod tests {
         assert_eq!(m.child_number(circle, added), Some(held.len()));
     }
 
+    /// Where a mark is written, how big it is, and what it says.
+    struct WrittenMark {
+        centre: (f64, f64),
+        half: (f64, f64),
+        text: String,
+    }
+
+    /// The box a mark actually occupies on the canvas: centred on the boundary's
+    /// topmost point, as wide as its text at the size it is drawn.
+    fn written_mark_box(mandala: &Mandala, id: NodeId) -> Option<WrittenMark> {
+        let node = mandala.node(id)?;
+        let mark = format!("{}{}", mandala.written_prefix(id), node.mark());
+        if mark.is_empty() || mandala.is_written_prefix(id) {
+            return None;
+        }
+        let extent = mandala.extent(id);
+        let base = node.base_extent();
+        let height = MARK_HEIGHT
+            * mark_weight((
+                extent.0 / base.0.max(f64::EPSILON),
+                extent.1 / base.1.max(f64::EPSILON),
+            ));
+        #[allow(clippy::cast_precision_loss)]
+        let half_w = mark.chars().count() as f64 * height * MARK_ADVANCE / 2.0;
+        Some(WrittenMark {
+            centre: (node.x, node.y - extent.1),
+            half: (half_w, height / 2.0),
+            text: mark,
+        })
+    }
+
+    #[test]
+    fn shrinking_a_form_leaves_the_walls_around_it_where_they_are() {
+        // A boundary's size is derived from what it holds, so making one form smaller
+        // pulled its container in after it, and that container's container, out to
+        // the page — one circle made smaller rearranged the whole drawing, and only
+        // ever the form that happened to sit farthest out, which reads as a glitch
+        // rather than as a rule.
+        //
+        // Growing is different and stays: a wall has to keep containing what it
+        // holds. So a hand gesture may push a wall out and never pull it in, and
+        // `format mandala` is what hands a boundary back to its contents.
+        let mut mandala = Mandala::from_rebis("(((\"a\")) ((\"b\")) ((\"c\")))").unwrap();
+        mandala.relayout();
+        let root = mandala
+            .nodes()
+            .iter()
+            .find(|node| mandala.holder(node.id).is_none())
+            .expect("a root")
+            .id;
+        let held = mandala.contained_children(root);
+        assert_eq!(held.len(), 3);
+
+        // Whichever content sits farthest out is the one that used to drag the wall.
+        let centre = mandala.node(root).map(|node| (node.x, node.y)).unwrap();
+        let farthest = held
+            .iter()
+            .copied()
+            .max_by(|left, right| {
+                let reach = |id: NodeId| {
+                    let node = mandala.node(id).unwrap();
+                    (node.x - centre.0).hypot(node.y - centre.1)
+                };
+                reach(*left).total_cmp(&reach(*right))
+            })
+            .expect("a farthest content");
+
+        // Growing carries the wall out, or a form would escape the boundary that
+        // owns it. A form can never be drawn below its own base size, so this is
+        // also the only way to have something to shrink.
+        let wall = mandala.extent(root).0;
+        let natural = mandala.extent(farthest).0;
+        mandala.resize_group(farthest, natural * 4.0, natural * 4.0);
+        let opened = mandala.extent(root).0;
+        assert!(
+            opened > wall,
+            "a growing content must push its wall out: {wall:.1} -> {opened:.1}"
+        );
+
+        // Shrinking it back does NOT bring the wall in with it.
+        let grown = mandala.extent(farthest).0;
+        mandala.resize_group(farthest, natural, natural);
+        assert!(
+            mandala.extent(farthest).0 < grown,
+            "the form did not actually get smaller"
+        );
+        assert!(
+            (mandala.extent(root).0 - opened).abs() < 1e-6,
+            "the wall came in from {opened:.1} to {:.1} because a content shrank",
+            mandala.extent(root).0
+        );
+
+        // And formatting hands every wall back to its contents, so the hold is not
+        // permanent.
+        let held_wall = mandala.extent(root).0;
+        assert!(held_wall > wall, "the wall is still being held open");
+        mandala.relayout();
+        assert!(
+            mandala.extent(root).0 < held_wall,
+            "formatting must tighten a wall that was held open: still {:.1}",
+            mandala.extent(root).0
+        );
+        assert!(
+            mandala.nodes().iter().all(|node| node.floor.is_none()),
+            "formatting must drop every floor"
+        );
+    }
+
+    #[test]
+    fn a_boundary_never_writes_its_mark_over_something_it_holds() {
+        // A mark is centred on the outline, so half of it hangs INSIDE the ring. With
+        // one content — which sits at the middle — a boundary's radius exceeded its
+        // content's by only the content's band plus a pad, so the two marks sat a few
+        // units apart and ran through each other. The reserve has to cover the
+        // container's own mark, and count a bare prefix as one: a quoted `( )` wears
+        // `'` and nothing else.
+        for source in [
+            // A macro whose body is a quoted conditional: `~` outside, `'%` within.
+            "(~ f (a b) '(% a b a))",
+            // Two levels of prefix on nested boundaries.
+            "(~ g (x) '((\"one\") ,x))",
+            // A deep chain, every level marked.
+            "(~ h (x) '(% ($ \"a\" \"b\") (^ (\"c\")) x))",
+        ] {
+            let mut mandala = Mandala::from_rebis(source).expect("the fixture parses");
+            mandala.relayout();
+            let boxes: Vec<_> = mandala
+                .nodes()
+                .iter()
+                .filter_map(|node| written_mark_box(&mandala, node.id))
+                .collect();
+            assert!(boxes.len() >= 2, "{source}: needs marks to compare");
+            for (index, left) in boxes.iter().enumerate() {
+                for right in boxes.iter().skip(index + 1) {
+                    let (dx, dy) = (
+                        (left.centre.0 - right.centre.0).abs(),
+                        (left.centre.1 - right.centre.1).abs(),
+                    );
+                    assert!(
+                        dx >= left.half.0 + right.half.0
+                            || dy >= left.half.1 + right.half.1,
+                        "{source}: {:?} and {:?} overlap — {dx:.0} apart across \
+                         (needs {:.0}) and {dy:.0} up (needs {:.0})",
+                        left.text,
+                        right.text,
+                        left.half.0 + right.half.0,
+                        left.half.1 + right.half.1
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_circles_written_name_clears_its_neighbours_names() {
+        // A mark is not always one sigil: a call wears its callee's NAME, written
+        // across the top of its circle, reaching much further sideways than up. Room
+        // reserved from the glyph's height alone gave a seventeen-character name the
+        // same sixteen units a `$` gets, and neighbouring names ran through one
+        // another.
+        let source = "((std-with-evidence \"a\") (std-final-only \"b\") \
+                      (pr-fetched \"c\") (std-reconciled \"d\"))";
+        let mut mandala = Mandala::from_rebis(source).expect("the fixture parses");
+        mandala.relayout();
+        let root = mandala
+            .nodes()
+            .iter()
+            .find(|node| mandala.holder(node.id).is_none())
+            .expect("a root")
+            .id;
+        let held = mandala.contained_children(root);
+        assert!(held.len() >= 4, "four named circles: {held:?}");
+
+        // Where each name is actually written: centred on its circle's topmost
+        // point, as wide as its text.
+        let written = |id: NodeId| {
+            let node = mandala.node(id).expect("the form");
+            let mark = format!("{}{}", mandala.written_prefix(id), node.mark());
+            let extent = mandala.extent(id);
+            let height = MARK_HEIGHT;
+            #[allow(clippy::cast_precision_loss)]
+            let half_w = mark.chars().count() as f64 * height * MARK_ADVANCE / 2.0;
+            (
+                (node.x, node.y - extent.1),
+                (half_w, height / 2.0),
+                mark,
+            )
+        };
+        for (index, left) in held.iter().copied().enumerate() {
+            let (a, ha, name_a) = written(left);
+            if name_a.is_empty() {
+                continue;
+            }
+            for right in held.iter().copied().skip(index + 1) {
+                let (b, hb, name_b) = written(right);
+                if name_b.is_empty() {
+                    continue;
+                }
+                assert!(
+                    (a.0 - b.0).abs() >= ha.0 + hb.0 || (a.1 - b.1).abs() >= ha.1 + hb.1,
+                    "the names {name_a:?} and {name_b:?} overlap"
+                );
+            }
+        }
+
+        // And a longer name really does claim more room than a shorter one — the
+        // whole point, and what a height-only band could not express.
+        let band = |id: NodeId| mandala.footprint(id).0 - mandala.extent(id).0;
+        let mut named: Vec<(usize, f64)> = held
+            .iter()
+            .filter_map(|id| {
+                let node = mandala.node(*id)?;
+                let length = node.mark().chars().count();
+                (length > 0).then(|| (length, band(*id)))
+            })
+            .collect();
+        named.sort_by_key(|(length, _)| *length);
+        assert!(named.len() >= 2, "at least two named circles to compare");
+        assert!(
+            named[0].1 < named[named.len() - 1].1,
+            "a {}-character name reserved {:.1} and a {}-character one {:.1}",
+            named[0].0,
+            named[0].1,
+            named[named.len() - 1].0,
+            named[named.len() - 1].1
+        );
+    }
+
+    #[test]
+    fn a_boundary_closes_one_pad_outside_what_it_holds() {
+        // "Least possible space" ends at the wall: a circle stands exactly
+        // MEDIATOR_PAD outside the farthest thing it holds, and not a unit more.
+        // What used to be more was the corner of a round form's bounding box —
+        // reached for as though every shape were a box, which cost every nesting
+        // level a further √2.
+        for source in [
+            "((# a) (# b) (# c) (# d) (# e) (# f))",
+            "((\"x\") (\"y\") (\"z\"))",
+            "((\"one\" \"two\") (\"three\" \"four\") x)",
+        ] {
+            let mut mandala = Mandala::from_rebis(source).expect("the fixture parses");
+            mandala.relayout();
+            let root = mandala
+                .nodes()
+                .iter()
+                .find(|node| mandala.holder(node.id).is_none())
+                .expect("a root")
+                .id;
+            let centre = mandala.node(root).map(|node| (node.x, node.y)).unwrap();
+            let reach = mandala
+                .contained_children(root)
+                .into_iter()
+                .filter_map(|id| {
+                    let node = mandala.node(id)?;
+                    Some(
+                        (node.x - centre.0).hypot(node.y - centre.1)
+                            + circumscribed_reach(node.shape(), mandala.footprint(id)),
+                    )
+                })
+                .fold(0.0_f64, f64::max);
+            let wall = mandala.extent(root).0;
+            assert!(
+                (wall - reach - MEDIATOR_PAD).abs() < 1e-6,
+                "{source}: wall at {wall:.1}, contents reach {reach:.1} — slack is \
+                 {:.1}, should be exactly {MEDIATOR_PAD}",
+                wall - reach
+            );
+        }
+    }
+
+    #[test]
+    fn a_box_lays_its_contents_on_the_golden_section() {
+        // The figure follows the boundary: rows and columns inside something with
+        // sides, a curve inside something without. The column count is chosen so the
+        // whole comes out as near a golden rectangle as integer rows and a fixed cell
+        // allow — exactly φ is not reachable, since the aspect can only be the cell's
+        // own times a ratio of whole numbers, and padding it out to φ would buy the
+        // proportion with empty space.
+        for count in [2usize, 3, 4, 6, 9, 12] {
+            let branches = (0..count)
+                .map(|index| format!("\"b{index}\""))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut mandala = Mandala::from_rebis(&format!("([\"m\"] {branches})"))
+                .expect("the fixture parses");
+            mandala.relayout();
+            let square = mandala
+                .nodes()
+                .iter()
+                .find(|node| node.form == Form::Square)
+                .expect("the box")
+                .id;
+            let held = mandala.contained_children(square);
+            assert_eq!(held.len(), count + 1, "the mediator is held too");
+
+            // Contents sit on a grid: every form shares a row or a column with
+            // another, and no two overlap.
+            let at = |id: NodeId| {
+                let node = mandala.node(id).unwrap();
+                (node.x, node.y)
+            };
+            let rows: std::collections::BTreeSet<i64> = held
+                .iter()
+                .map(|id| (at(*id).1 * 1000.0).round() as i64)
+                .collect();
+            let columns: std::collections::BTreeSet<i64> = held
+                .iter()
+                .map(|id| (at(*id).0 * 1000.0).round() as i64)
+                .collect();
+            assert!(
+                rows.len() * columns.len() >= held.len(),
+                "{count}: contents are not on a grid — {} rows × {} columns for {} \
+                 forms",
+                rows.len(),
+                columns.len(),
+                held.len()
+            );
+            for (index, left) in held.iter().copied().enumerate() {
+                for right in held.iter().copied().skip(index + 1) {
+                    let (a, b) = (at(left), at(right));
+                    let (ea, eb) = (mandala.footprint(left), mandala.footprint(right));
+                    assert!(
+                        (a.0 - b.0).abs() >= ea.0 + eb.0 + CONTENT_GAP - 1e-6
+                            || (a.1 - b.1).abs() >= ea.1 + eb.1 + CONTENT_GAP - 1e-6,
+                        "{count}: grid forms {left:?} and {right:?} overlap"
+                    );
+                }
+            }
+
+            // And the box is landscape, near φ — never a tall stack, because a
+            // mediator and its branches read across.
+            let extent = mandala.extent(square);
+            let aspect = extent.0 / extent.1;
+            assert!(
+                aspect > 1.0,
+                "{count}: the box came out taller than wide ({aspect:.2})"
+            );
+            assert!(
+                (aspect.ln() - PHI.ln()).abs() < 0.5,
+                "{count}: aspect {aspect:.2} is nowhere near φ"
+            );
+        }
+    }
+
+    #[test]
+    fn many_equal_forms_pack_tightly_instead_of_spreading() {
+        // The failure this guards: at a constant angular step, two neighbours at
+        // radius `R` sit `R·step` apart, so the innermost pair sets the scale and
+        // every form outside it is handed far more room than it needs. Twenty-four
+        // identical imports needed a circle SIXTY-TWO times an import's own radius,
+        // and the ratio grew with the count rather than with its square root — so
+        // the more a boundary held, the emptier it looked.
+        let ratio = |count: usize| {
+            let source = format!(
+                "({})",
+                (0..count)
+                    .map(|index| format!("(# m{index})"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let mut mandala = Mandala::from_rebis(&source).expect("the fixture parses");
+            mandala.relayout();
+            let root = mandala
+                .nodes()
+                .iter()
+                .find(|node| mandala.holder(node.id).is_none())
+                .expect("the group")
+                .id;
+            let held = mandala.contained_children(root);
+            assert_eq!(held.len(), count);
+            let leaf = mandala.extent(held[0]).0;
+            mandala.extent(root).0 / leaf
+        };
+
+        // Area grows with the count, so the RADIUS may only grow with its square
+        // root. A hexagonal packing of `n` equal discs needs about 1.1·√n of their
+        // radius; a spiral cannot reach that, and pays the content gap besides, so
+        // the bound here is 1.7·√n. Linear growth blows it at once.
+        #[allow(clippy::cast_precision_loss)]
+        for count in [4usize, 8, 16, 24, 40] {
+            let seen = ratio(count);
+            let bound = 1.7 * (count as f64).sqrt();
+            assert!(
+                seen < bound,
+                "{count} equal forms needed {seen:.1}× their own radius, over the \
+                 √n bound of {bound:.1}× — the interior is spreading, not packing"
+            );
+        }
+        // And the growth really is sub-linear: six times the forms must not cost
+        // anything like six times the radius.
+        let (few, many) = (ratio(4), ratio(24));
+        assert!(
+            many / few < 2.6,
+            "6× the forms cost {:.1}× the radius; √6 is 2.4×",
+            many / few
+        );
+    }
+
+    #[test]
+    fn brothers_are_drawn_at_one_size_and_the_figure_settles() {
+        // Peers inside one boundary come out equal, so size stops carrying
+        // accidental information at a level. Equal within a KIND: a boundary
+        // matches the boundaries beside it and a bare form matches the bare forms,
+        // because a boundary's size is derived from what it holds and dragging a
+        // symbol up to a loaded circle's width compounds outward through every
+        // level above it.
+        let source = "((\"a\" \"b\" (\"deep\" \"deeper\" \"deepest\")) \"c\" (\"x\"))";
+        let mut m = Mandala::from_rebis(source).expect("the fixture parses");
+        // The per-level reading, which is what this rule belongs to: under
+        // `Sizing::Even` there are no levels to equalise, by design.
+        m.set_sizing(Sizing::ByLevel);
+        m.relayout();
+
+        let root = m
+            .nodes()
+            .iter()
+            .find(|node| m.holder(node.id).is_none() && node.form == Form::Compose)
+            .expect("the outermost group")
+            .id;
+        let brothers = m.contained_children(root);
+        assert!(brothers.len() >= 3, "the fixture has several brothers");
+
+        let mut kinds: std::collections::BTreeMap<bool, Vec<(f64, f64)>> =
+            std::collections::BTreeMap::new();
+        for id in &brothers {
+            kinds
+                .entry(!m.contained_children(*id).is_empty())
+                .or_default()
+                .push(m.extent(*id));
+        }
+        assert_eq!(kinds.len(), 2, "the fixture mixes boundaries and bare forms");
+        for (holds, sizes) in &kinds {
+            let first = sizes[0];
+            assert!(
+                sizes
+                    .iter()
+                    .all(|size| (size.0 - first.0).abs() < 1e-6
+                        && (size.1 - first.1).abs() < 1e-6),
+                "brothers that {} are drawn at mixed sizes: {sizes:?}",
+                if *holds { "hold something" } else { "hold nothing" }
+            );
+        }
+
+        // Equalising reads a fit that it also feeds — a raised sibling raises its
+        // parent's fit — so the rule has to settle, or every press of
+        // `format mandala` would inflate the page a little more.
+        let area = |m: &Mandala| {
+            let bounds = m.bounds().expect("the drawing has bounds");
+            (bounds.max_x - bounds.min_x) * (bounds.max_y - bounds.min_y)
+        };
+        let settled = area(&m);
+        for pass in 1..4 {
+            m.relayout();
+            let now = area(&m);
+            assert!(
+                (now - settled).abs() / settled < 1e-9,
+                "format {pass} grew the drawing: {settled} -> {now}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_boundary_given_more_wall_than_it_needs_hands_it_to_its_contents() {
+        // Brothers are drawn at one size, so the circle holding a single form
+        // gets the same wall as the crowded one beside it. What it holds has to
+        // grow into that wall — a speck alone in a large circle says only that
+        // some other circle was large.
+        let source = "((\"a\" \"b\" \"c\" \"d\" \"e\") (\"x\"))";
+        let mut m = Mandala::from_rebis(source).expect("the fixture parses");
+        // Filling a wall is a per-level move: it exists because that reading
+        // hands a boundary more wall than it needs. `Sizing::Even` gives it
+        // exactly the wall it needs, so there is nothing to fill.
+        m.set_sizing(Sizing::ByLevel);
+        let alone = |m: &Mandala| {
+            m.nodes()
+                .iter()
+                .find(|node| {
+                    node.form == Form::Compose && m.contained_children(node.id).len() == 1
+                })
+                .expect("one circle holds a single form")
+                .id
+        };
+        let lonely = alone(&m);
+        let inner = m.contained_children(lonely)[0];
+        let base = m.node(inner).expect("the held form").base_extent();
+
+        m.relayout();
+
+        let grown = m.extent(inner);
+        assert!(
+            grown.0 > base.0 * 1.5,
+            "the lone form stayed a speck: {base:?} -> {grown:?}"
+        );
+        // Filled, not merely enlarged: the wall now rests on what it holds, so
+        // there is no slack left between them.
+        let (fit, wall) = (m.fit_extent(lonely), m.extent(lonely));
+        assert!(
+            (wall.0 - fit.0) / wall.0 < 0.01 && (wall.1 - fit.1) / wall.1 < 0.01,
+            "the wall stands off its contents: fit {fit:?}, wall {wall:?}"
+        );
+        // And the contents are scaled, never stretched.
+        assert!(
+            ((grown.0 / base.0) - (grown.1 / base.1)).abs() < 1e-6,
+            "the held form was distorted to fit: {base:?} -> {grown:?}"
+        );
+    }
+
+    #[test]
+    fn a_dream_draws_as_a_circle_and_returns_to_its_own_source() {
+        let source = "(-> (! (research \"retry queues\")) \"now design from that\")";
+        let m = Mandala::from_rebis(source).expect("the fixture parses");
+        let dream = m
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Dream)
+            .expect("the dream is drawn");
+        // An indentation like every other parenthesised form, wearing the sigil
+        // it was written with.
+        assert!(dream.form.opens_indentation());
+        assert_eq!(dream.shape(), Shape::Circle);
+        assert_eq!(dream.mark(), "!");
+        assert_eq!(dream.caption(), "", "its interior belongs to what it holds");
+        // Exactly one operand, because a dream keeps one answer.
+        assert_eq!(dream.form.arity(), Arity::Exactly(1));
+        assert_eq!(m.children(dream.id).len(), 1);
+        assert_eq!(m.to_rebis().unwrap(), source);
+    }
+
+    #[test]
+    fn a_page_of_several_forms_writes_itself_out_while_it_is_still_several() {
+        // Every drawing is several roots on its way to being one: a form is a
+        // root from the moment it is placed until it is linked. The panel has
+        // to keep writing the program out through that, or it goes quiet for
+        // the whole of the gesture that is creating it.
+        let mut m = Mandala::new();
+        let first = m.add(Form::Prompt, "draft the plan", 0.0, 0.0);
+        assert_eq!(m.to_rebis_page().unwrap(), "\"draft the plan\"");
+
+        let second = m.add(Form::Symbol, "review", 200.0, 0.0);
+        assert!(
+            m.to_rebis().is_err(),
+            "two roots are still not one expression"
+        );
+        assert_eq!(
+            m.to_rebis_page().unwrap(),
+            "\"draft the plan\"\nreview",
+            "the page stopped writing itself out when it grew a second root"
+        );
+
+        // Linked, the page and the expression agree again.
+        let group = m.add(Form::Compose, "", 100.0, 0.0);
+        m.father_of(group, first);
+        m.father_of(group, second);
+        assert_eq!(m.to_rebis_page().unwrap(), m.to_rebis().unwrap());
+
+        // And what is genuinely wrong stays wrong.
+        let mut cyclic = Mandala::new();
+        let a = cyclic.add(Form::Compose, "", 0.0, 0.0);
+        let b = cyclic.add(Form::Compose, "", 0.0, 0.0);
+        cyclic.father_of(a, b);
+        cyclic.father_of(b, a);
+        assert!(cyclic.to_rebis_page().is_err(), "a loop is still a loop");
+    }
+
+    #[test]
+    fn whole_text_grows_a_form_until_its_own_words_fit_inside_it() {
+        let sentence = "a prompt long enough that it needs several lines of its own";
+        let mut m = Mandala::from_rebis(&format!("({sentence:?} x)")).expect("the fixture parses");
+        let prompt = m
+            .nodes()
+            .iter()
+            .find(|node| node.form == Form::Prompt)
+            .expect("the prompt is drawn")
+            .id;
+        let token = m.extent(prompt);
+
+        assert!(m.set_legend(Legend::Whole), "the legend did not change");
+        m.relayout();
+        let whole = m.extent(prompt);
+        assert!(
+            whole.0 > token.0 * 2.0,
+            "the form did not grow for its text: {token:?} -> {whole:?}"
+        );
+
+        // Grown by enough, and demonstrably: the room the renderer will set type
+        // in has to cover the block that type makes.
+        let lines = wrap_caption(sentence, LABEL_WRAP);
+        let columns = lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0) as f64;
+        let area = caption_area(m.node(prompt).unwrap().shape());
+        assert!(lines.len() > 1, "the fixture does not wrap: {lines:?}");
+        assert!(
+            whole.0 * area.width >= columns * LABEL_HEIGHT * LABEL_ADVANCE - 1e-6,
+            "the text is wider than the room it was given"
+        );
+        assert!(
+            whole.1 * area.height >= lines.len() as f64 * LABEL_HEIGHT * LABEL_LEADING - 1e-6,
+            "the text is taller than the room it was given"
+        );
+
+        // And it is a setting, not a one-way door.
+        assert!(m.set_legend(Legend::Token));
+        m.relayout();
+        assert_eq!(m.extent(prompt), token, "going back did not go back");
+    }
+
+    #[test]
+    fn evening_the_sizes_draws_a_deep_form_like_a_shallow_one() {
+        // A program with one heavy branch and several light ones, nested three
+        // deep: the shape that makes the per-level reading expensive.
+        let source = "(~ objective () \"Research and implement a falsifiable foundation for a new \
+                      architecture\")\n(~ tiny () x)\n(~ deep () (((a b) (c d)) ((\"inner note\") e)))";
+        let measure = |sizing| {
+            let mut m = Mandala::from_rebis(source).expect("the fixture parses");
+            m.set_sizing(sizing);
+            m.relayout();
+            let leaves: Vec<(f64, f64)> = m
+                .nodes()
+                .iter()
+                .map(|node| node.id)
+                .filter(|id| m.contained_children(*id).is_empty())
+                .map(|id| m.extent(id))
+                .collect();
+            let smallest = leaves.iter().fold(f64::MAX, |least, e| least.min(e.0));
+            let largest = leaves.iter().fold(0.0_f64, |most, e| most.max(e.0));
+            let bounds = m.bounds().expect("the drawing has bounds");
+            let page = (bounds.max_x - bounds.min_x).max(bounds.max_y - bounds.min_y);
+            (smallest, largest, page)
+        };
+        let (even_small, even_large, even_page) = measure(Sizing::Even);
+        let (level_small, level_large, level_page) = measure(Sizing::ByLevel);
+
+        // Evened: what is left of the spread is the shapes' own proportions — a
+        // hexagon is wider than a diamond at the same size — never depth.
+        assert!(
+            even_large / even_small < 1.5,
+            "evened sizes still vary by {:.1}×: {even_small}..{even_large}",
+            even_large / even_small
+        );
+        assert!(
+            level_large / level_small > 3.0,
+            "the fixture does not exercise the per-level spread: {level_small}..{level_large}"
+        );
+
+        // And the page pays for it, which is the point: one magnification reads
+        // the whole drawing instead of one level of it.
+        assert!(
+            even_page < level_page * 0.75,
+            "evening did not compact the page: {even_page:.0} vs {level_page:.0}"
+        );
+        assert!(
+            even_page / even_small < level_page / level_small * 0.6,
+            "the smallest form is no larger a share of the page than before"
+        );
+    }
+
     #[test]
     fn formatting_takes_the_least_room_it_honestly_can() {
         let source = "(\"one\" \"two\" \"three\" \"four\" \"five\" \"six\" \"seven\" \"eight\")";
@@ -5372,25 +7996,34 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        // Eight forms holding nothing come out at the size they are naturally
-        // drawn at — no slack, and nothing inflated to match a neighbour.
+        // Eight brothers come out at ONE size, and — since none of them holds
+        // anything — that size is the plain size a form is drawn at. Nothing gains
+        // slack for sitting further along the arm.
         let drawn = sizes(&m);
         assert_eq!(drawn.len(), 8);
         assert!(
-            drawn.iter().all(|extent| *extent == (NODE_R, NODE_RY)),
-            "forms holding nothing should be at their own size: {drawn:?}"
+            drawn
+                .iter()
+                .all(|extent| (extent.0 - NODE_R).abs() < 1e-6
+                    && (extent.1 - NODE_RY).abs() < 1e-6),
+            "brothers holding nothing are drawn at their own size: {drawn:?}"
         );
 
         // A form enlarged by hand is brought back to what it needs, and the
-        // boundary that had grown around it closes again.
+        // boundary closes exactly on its contents afterwards.
+        //
+        // Not "smaller than before": with the arm stepping a quarter turn per
+        // form, the span of the spiral dominates a boundary's size, so one form's
+        // width no longer decides it. What formatting still guarantees is that the
+        // boundary is no larger than what it holds requires.
         let held = m.contained_children(circle)[3];
         m.resize(held, NODE_R * 6.0, NODE_RY * 6.0);
-        let swollen = m.extent(circle).0;
         m.relayout();
         assert_eq!(sizes(&m), drawn, "formatting must undo a hand-set size");
+        let (fit, drawn_extent) = (m.fit_extent(circle), m.extent(circle));
         assert!(
-            m.extent(circle).0 < swollen,
-            "and close the boundary that had grown around it"
+            (drawn_extent.0 - fit.0).abs() < 1e-6,
+            "the boundary must close on its contents: drawn {drawn_extent:?}, fit {fit:?}"
         );
 
         // Formatting states what the drawing is; it does not change it further.
@@ -5414,61 +8047,64 @@ mod tests {
         mandala.resize(items[2], 96.0, 72.0);
         mandala.relayout();
 
-        // Every pair is separated by at least the content gutter even though
-        // one symbol is much larger than the others.
+        // No two forms overlap, and the measure is the CIRCUMSCRIBED radius: every
+        // shape here is inscribed in its own bounds, so a circle of the wider half
+        // contains it. Clearing them as boxes instead would demand a diagonal
+        // neighbour stand 1.4× further off than it has to, which is most of what
+        // made a boundary bigger than its contents.
+        let reach = |id: NodeId| {
+            let node = mandala.node(id).unwrap();
+            circumscribed_reach(node.shape(), mandala.footprint(id))
+        };
+        let placed = |id: NodeId| {
+            let node = mandala.node(id).unwrap();
+            (node.x, node.y)
+        };
         for (index, left) in items.iter().copied().enumerate() {
-            let left_node = mandala.node(left).unwrap();
-            let left_extent = mandala.extent(left);
             for right in items.iter().copied().skip(index + 1) {
-                let right_node = mandala.node(right).unwrap();
-                let right_extent = mandala.extent(right);
+                let (a, b) = (placed(left), placed(right));
+                let apart = (a.0 - b.0).hypot(a.1 - b.1);
                 assert!(
-                    (left_node.x - right_node.x).abs()
-                        >= left_extent.0 + right_extent.0 + CONTENT_GAP - 1e-6
-                        || (left_node.y - right_node.y).abs()
-                            >= left_extent.1 + right_extent.1 + CONTENT_GAP - 1e-6,
-                    "spiral items {left:?} and {right:?} overlap"
+                    apart >= reach(left) + reach(right) + CONTENT_GAP - 1e-3,
+                    "spiral forms {left:?} and {right:?} overlap: {apart:.1} apart, \
+                     needing {:.1}",
+                    reach(left) + reach(right) + CONTENT_GAP
                 );
             }
         }
 
-        // Relative to item zero, every point sits on the spiral's own ray: the
-        // angle advances by a constant step, one continuous arm rather than a
-        // phyllotaxis of separate golden rays.
-        let origin = mandala.node(items[0]).unwrap();
-        let mut radii = Vec::new();
-        for (index, id) in items.iter().copied().enumerate().skip(1) {
-            let node = mandala.node(id).unwrap();
-            let delta = (node.x - origin.x, node.y - origin.y);
-            let actual_angle = delta.1.atan2(delta.0);
-            let expected_angle = index as f64 * SPIRAL_STEP;
-            let angle_error = (actual_angle - expected_angle)
-                .rem_euclid(std::f64::consts::TAU)
-                .min((expected_angle - actual_angle).rem_euclid(std::f64::consts::TAU));
-            assert!(angle_error < 1e-9, "item {index} left the spiral arm");
-            radii.push((index, id, delta.0.hypot(delta.1)));
+        // And no form stands FURTHER off than it has to: each one sits at exactly
+        // the clearance its own size and its neighbour's demand, to the last unit.
+        // That is the whole of "least possible space" — the arm advances by what
+        // each pair needs, so a small form takes a small step and no form is handed
+        // room another form's size. An arm opened by one global scale until the
+        // worst pair fit is what this replaced, and it cost a boundary holding two
+        // dozen small forms twelve times an item's radius where a tight packing
+        // needs eight.
+        for pair in items.windows(2) {
+            let (a, b) = (placed(pair[0]), placed(pair[1]));
+            let apart = (a.0 - b.0).hypot(a.1 - b.1);
+            let needed = reach(pair[0]) + reach(pair[1]) + CONTENT_GAP;
+            assert!(
+                apart <= needed * 1.001,
+                "consecutive forms sit {apart:.1} apart, needing only {needed:.1}"
+            );
         }
 
-        // And each one is as far in as its ray allows: pulled a hair closer to
-        // the middle, it would run into something already placed. That is what
-        // keeps the boundary around them no larger than its contents demand.
-        for (index, id, radius) in radii {
-            let angle = index as f64 * SPIRAL_STEP;
-            let closer = radius * (1.0 - 1e-6);
-            let spot = (
-                origin.x + closer * angle.cos(),
-                origin.y + closer * angle.sin(),
-            );
-            let extent = mandala.extent(id);
-            let crowded = items.iter().copied().take(index).any(|earlier| {
-                let node = mandala.node(earlier).unwrap();
-                let other = mandala.extent(earlier);
-                (spot.0 - node.x).abs() < extent.0 + other.0 + CONTENT_GAP
-                    && (spot.1 - node.y).abs() < extent.1 + other.1 + CONTENT_GAP
-            });
+        // The arm winds outward: one spiral, not a ring or a scatter. Measured from
+        // the FIRST form, which is where the curve starts — the boundary's own
+        // centre is not the spiral's, because the arrangement is re-centred on its
+        // own bounds so it sits squarely inside the circle drawn around it.
+        let origin = placed(items[0]);
+        let radius = |id: NodeId| {
+            let at = placed(id);
+            (at.0 - origin.0).hypot(at.1 - origin.1)
+        };
+        for pair in items.windows(2) {
             assert!(
-                crowded,
-                "item {index} could have sat closer to the middle of its boundary"
+                radius(pair[1]) > radius(pair[0]) - 1e-6,
+                "the arm turned back inward at {:?}",
+                pair[1]
             );
         }
     }
@@ -5671,13 +8307,17 @@ mod tests {
     // ── hit testing ────────────────────────────────────────────────────────
 
     #[test]
-    fn hit_finds_a_triangle_only_inside_its_outline() {
+    fn hit_finds_a_circle_only_inside_its_disc() {
+        // The outline is the hit region, so a corner of the bounding box misses. That
+        // is what makes a circle's whole circumference draggable for a resize without
+        // the empty corners swallowing clicks meant for what is behind them.
         let mut m = Mandala::new();
-        let a = m.add(Form::Program, "", 100.0, 100.0);
+        let a = m.add(Form::Compose, "", 100.0, 100.0);
         assert_eq!(m.hit(100.0, 100.0), Some(a));
-        assert_eq!(m.hit(100.0 + NODE_R * 0.8, 100.0 + NODE_RY * 0.8), Some(a));
-        assert_eq!(m.hit(100.0 + NODE_R * 0.8, 100.0 - NODE_RY * 0.8), None);
-        assert_eq!(m.hit(100.0, 100.0 + NODE_RY + 1.0), None);
+        assert_eq!(m.hit(100.0 + NODE_R * 0.7, 100.0 + NODE_R * 0.7), Some(a));
+        // The corner of the box the circle sits in is outside the circle.
+        assert_eq!(m.hit(100.0 + NODE_R * 0.95, 100.0 + NODE_R * 0.95), None);
+        assert_eq!(m.hit(100.0, 100.0 + NODE_R + 1.0), None);
     }
 
     #[test]
@@ -6365,4 +9005,46 @@ mod tests {
         m.add(Form::Prompt, "a", 0.0, 0.0);
         assert_eq!(m.hit(500.0, 500.0), None);
     }
+    /// Every recent operator survives being drawn and read back.
+    ///
+    /// The mandala is one-to-one with the language, so a form that draws but
+    /// does not re-read is one the canvas can lose — and the failure is
+    /// silent: a program opened on the canvas and saved comes back changed.
+    ///
+    /// Written for the numeric plane and immediately found four other forms
+    /// with the same gap. `=` had NO equivalence arm at all, so a binding has
+    /// never round-tripped; `<>`, `><`, `*` and `@` were each missing too. The
+    /// list below is deliberately every one of them.
+    #[test]
+    fn every_operator_round_trips_through_the_canvas() {
+        for source in [
+            "|($ 2 3)|",
+            "(= n |($ 2 3)| |($ n 1)|)",
+            "|([sum] (/ 9 38) (^ 7))|",
+            r#"($ "read " <>)"#,
+            r#"(>< "write a program")"#,
+            r#"(* "topic" "correct it")"#,
+            r#"(@ "rule" (-> "a" "b"))"#,
+            r#"{"speculate" "conclude"}"#,
+            r#"(+ "framing" "work")"#,
+            // Syntax as a value: a held program, and the empty list. The
+            // canvas has to draw what a program can now hold, or a run that
+            // works is one nobody can see.
+            r#"(= p '("hi") (p))"#,
+            "'()",
+            r#"($ "e=" '())"#,
+        ] {
+            let mandala = Mandala::from_rebis(source).expect("draw");
+            let back = match mandala.to_rebis_page() {
+                Ok(back) => back,
+                Err(error) => panic!("{source} did not read back: {error:?}"),
+            };
+            assert_eq!(
+                back.replace(char::is_whitespace, ""),
+                source.replace(char::is_whitespace, ""),
+                "the canvas changed the program:\n  in  {source}\n  out {back}"
+            );
+        }
+    }
+
 }

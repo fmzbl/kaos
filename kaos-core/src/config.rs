@@ -18,9 +18,101 @@ use std::path::{Path, PathBuf};
 /// Every persistent, user-facing setting understood by Kaos. Runtime transport
 /// variables (`KAOS_SESSION`, `KAOS_RESUME`, `KAOS_FOLD`) and provider secrets
 /// intentionally live elsewhere.
+/// Environment values that are NOT persistent settings.
+///
+/// Credentials, private child-process flags, and hosted-run transport paths.
+/// They are documented so a reader can tell the difference between a setting
+/// they can save and a value supplied by a parent process, a credentials store,
+/// or the run transport — and so that nothing kaos reads is invisible.
+///
+/// Kept here rather than in a frontend because both frontends need it. It lived
+/// in the visual settings pane, which meant the terminal never showed it and
+/// the two inventories could drift apart with nothing to notice.
+///
+/// **Never write a credential here into the config file.** That is the whole
+/// reason this list is separate from [`CONFIG_DOCS`]: these are read from the
+/// environment and must stay there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnvironmentDoc {
+    pub key: &'static str,
+    pub details: &'static str,
+}
+
+pub const ENVIRONMENT_DOCS: &[EnvironmentDoc] = &[
+    EnvironmentDoc {
+        key: "OPENAI_API_KEY",
+        details: "OpenAI credential; use `kaos auth` or an explicit shell export, never the persistent config.",
+    },
+    EnvironmentDoc {
+        key: "ANTHROPIC_API_KEY",
+        details: "Anthropic API credential; the Claude subscription CLI uses `claude login` instead.",
+    },
+    EnvironmentDoc {
+        key: "OPENROUTER_API_KEY",
+        details: "OpenRouter credential; use `kaos auth` or an explicit shell export.",
+    },
+    EnvironmentDoc {
+        key: "REBIS_COLLECTION_PATH",
+        details: "Optional Rebis collection root or modules directory used to discover source-only imports.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_CONFORMANCE_MODEL",
+        details: "Overrides the model the conformance suite runs against; a test-harness setting rather than a preference, so it is not persisted.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_BIN",
+        details: "Optional visual-editor override for the Kaos executable used to launch terminal runs.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_FOLD",
+        details: "Private child-process flag that asks the terminal parent to render foldable progress groups.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_SESSION",
+        details: "Private session identifier passed to child chats so transcripts can be resumed.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_RESUME",
+        details: "Private child-process flag selecting resume versus create for a chat session.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_REBIS_CONTEXT",
+        details: "Private flag that injects Rebis authoring and validation guidance into a coding chat.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_RAW_CHAT_TASK_STDIN",
+        details: "Private flag selecting a raw task from standard input for visual and terminal chat.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_CHAT_OUTPUT",
+        details: "Private flag requesting a clean assistant-only response from a child chat.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_PAUSE_ON_TRANSIENT",
+        details: "Hosted-run transport flag enabling continuation-safe pauses after retryable model failures.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_RUN_PROCESS_GROUP",
+        details: "Hosted-run transport flag that lets pause and cancellation include command descendants.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_REBIS_CHECKPOINT",
+        details: "Private path for the Rebis prompt journal used to resume an interrupted hosted run.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_REBIS_DIRECTIVE",
+        details: "Private path for supervisor directives sent to a live Rebis child.",
+    },
+    EnvironmentDoc {
+        key: "KAOS_REBIS_INLET",
+        details: "Private path for user input delivered to a live Rebis child.",
+    },
+];
+
 pub const CONFIG_KEYS: &[&str] = &[
     "theme",
     "vim_mode",
+    "KAOS_CHAOS",
     "KAOS_MODEL",
     "KAOS_TIMEOUT_S",
     "KAOS_CHAT_TIMEOUT_S",
@@ -29,6 +121,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "KAOS_FABLE_FALLBACK_MODEL",
     "KAOS_PROVIDER_SORT",
     "KAOS_PROVIDER_ONLY",
+    "KAOS_ROUTE_ALLOW",
     "OPENAI_BASE_URL",
     "OPENROUTER_BASE_URL",
     "OLLAMA_HOST",
@@ -47,6 +140,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "KAOS_BASH_TIMEOUT_S",
     "KAOS_GATE_TIMEOUT_S",
     "KAOS_QUIET",
+    "KAOS_SEARCH",
     "KAOS_UNIT",
     "KAOS_BASE",
     "KAOS_RUNGS",
@@ -128,6 +222,13 @@ pub const CONFIG_DOCS: &[ConfigDoc] = &[
         example: "vim_mode = true",
     },
     ConfigDoc {
+        key: "KAOS_CHAOS",
+        kind: ValueKind::Boolean,
+        summary: "Compose the work as a Rebis program before running it.",
+        details: "Off, an agent is handed the intent and works it. On, the intent is first written as a Rebis program and the program is what runs — so the cost can be read off the page, and the result is an artifact you can edit, save to the sigil wall, and run again. It applies to chats, Rebis runs, and sigil stacks alike, and every child process inherits it. Composition costs one model call before any work starts, which is why it is a stance you adopt rather than a default.",
+        example: "KAOS_CHAOS = true",
+    },
+    ConfigDoc {
         key: "KAOS_MODEL",
         kind: ValueKind::Text,
         summary: "Provider and model binding for model calls.",
@@ -182,6 +283,13 @@ pub const CONFIG_DOCS: &[ConfigDoc] = &[
         summary: "OpenRouter provider allow-list.",
         details: "Optional comma-separated provider slugs. When set, OpenRouter is told to use only those providers and not fall back to another provider.",
         example: "KAOS_PROVIDER_ONLY = together,novita",
+    },
+    ConfigDoc {
+        key: "KAOS_ROUTE_ALLOW",
+        kind: ValueKind::Text,
+        summary: "Models a run may route ITSELF to.",
+        details: "Optional comma-separated model prefixes. A Rebis program can choose its own model with `(/ ,name …)`, and a program that can pick its own backend can pick an expensive one nobody agreed to. When set, only selectors starting with one of these prefixes are permitted; empty leaves it unrestricted. A selector written in the source is never checked — a person already chose it.",
+        example: "KAOS_ROUTE_ALLOW = ollama:",
     },
     ConfigDoc {
         key: "OPENAI_BASE_URL",
@@ -310,6 +418,13 @@ pub const CONFIG_DOCS: &[ConfigDoc] = &[
         example: "KAOS_QUIET = true",
     },
     ConfigDoc {
+        key: "KAOS_SEARCH",
+        kind: ValueKind::Text,
+        summary: "Which search service the web tools use.",
+        details: "Names the provider an agent's `search` tool goes through: `duckduckgo` (the default, needs no key), `brave`, `serper`, or `tavily`. The keyed providers read their credential from the same store as the model providers, so `brave`, `serper` and `tavily` can be set with the credential commands. An unrecognised name is refused rather than silently replaced by the default.",
+        example: "KAOS_SEARCH = duckduckgo",
+    },
+    ConfigDoc {
         key: "KAOS_UNIT",
         kind: ValueKind::Integer,
         summary: "Twin-ladder charge per transcript step.",
@@ -400,6 +515,12 @@ theme = dark
 # Use Vim-style bindings in newly opened Rebis editors.
 vim_mode = false
 
+# The chaos stance. Off, an agent is handed an intent and works it. On, the
+# intent is written as a Rebis program first and the program is what runs, so
+# its cost can be read before it is paid. Applies to chats, Rebis runs, and
+# sigil stacks; every child process inherits it.
+KAOS_CHAOS = false
+
 # Mind and provider selection. `sim` is offline; use provider:model for a live
 # backend, for example `ollama:qwen3:4b` or `openrouter:provider/model`.
 KAOS_MODEL = sim
@@ -417,6 +538,9 @@ KAOS_FABLE_FALLBACK_MODEL =
 KAOS_PROVIDER_SORT =
 # Optional comma-separated OpenRouter provider allow-list; no fallbacks.
 KAOS_PROVIDER_ONLY =
+# Model prefixes a run may route ITSELF to with `(/ ,name …)`; empty is
+# unrestricted. Selectors written in the source are never checked.
+KAOS_ROUTE_ALLOW =
 # OpenAI-compatible, OpenRouter, and Ollama endpoint roots.
 OPENAI_BASE_URL = https://api.openai.com
 OPENROUTER_BASE_URL = https://openrouter.ai/api
@@ -452,6 +576,9 @@ KAOS_BASH_TIMEOUT_S = 600
 KAOS_GATE_TIMEOUT_S = 300
 # Suppress live agentic progress, not the final verdict.
 KAOS_QUIET = 0
+# Which search service the agents' `search` tool goes through. The default needs
+# no account; brave, serper and tavily read a key from the credential store.
+KAOS_SEARCH = duckduckgo
 
 # Twin-ladder transcript compaction: per-rung charge, middle floor, and rung count.
 KAOS_UNIT = 700
@@ -472,6 +599,28 @@ KAOS_REBIS_TIMEOUT_S = 600
 
 # Shared-component diagnostics: 1 on, 0 off.
 KAOS_DEBUG = 0
+
+# ── Environment only — NOT settings ──────────────────────────────────────────
+#
+# Kaos also reads the variables below, and none of them belong in this file.
+# They are listed so that everything Kaos reads is visible in one place, and so
+# a reader can tell a preference from a credential or a private flag.
+#
+# Credentials come from `kaos auth` or an explicit shell export. Writing one
+# here would put it on disk in plain text, and Kaos will not read it from here.
+# The rest are set by a parent process or the run transport, not by a person.
+#
+# The complete list with descriptions is in the visual Settings tab and in
+# `docs/CONFIGURATION.md`; a test keeps all three in step with the source.
+#
+#   OPENAI_API_KEY  ANTHROPIC_API_KEY  OPENROUTER_API_KEY   — credentials
+#   REBIS_COLLECTION_PATH                                   — collection root
+#   KAOS_BIN  KAOS_SESSION  KAOS_RESUME  KAOS_FOLD          — child process
+#   KAOS_CHAT_OUTPUT  KAOS_REBIS_CONTEXT                    — child process
+#   KAOS_RAW_CHAT_TASK_STDIN  KAOS_CONFORMANCE_MODEL        — child / harness
+#   KAOS_PAUSE_ON_TRANSIENT  KAOS_RUN_PROCESS_GROUP         — run transport
+#   KAOS_REBIS_CHECKPOINT  KAOS_REBIS_DIRECTIVE             — run transport
+#   KAOS_REBIS_INLET                                        — run transport
 "#;
 
 /// `~/.config/kaos/config`, honouring `XDG_CONFIG_HOME`.

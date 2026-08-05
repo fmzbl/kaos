@@ -7,6 +7,7 @@
 //! lives here once and is tested without either of them on screen.
 //!
 //! - [`config`] — the persistent, non-secret settings file.
+//! - [`chaos`] — the stance: compose the work as a program, then run it.
 //! - [`chat`] — shared Rebis-aware conversation and run-context prompts.
 //! - [`theme`] — the monochrome palette and its two modes.
 //! - [`sessions`] — durable chat transcripts.
@@ -14,12 +15,20 @@
 //! - [`sigils`] — the personal library of saved Rebis programs.
 //! - [`tabs`] — an ordered set of tabs, generic over what they hold.
 //! - [`visual`] — the mandala model, Rebis code generation and loading.
+//! - [`music`] — a program as sound: Fibonacci numbers, and a small synth.
+//! - [`dream`] — what a run's `(! A)` decided to remember after it ended.
 
+pub mod chaos;
 pub mod chat;
 pub mod config;
+pub mod dream;
+pub mod ink;
+pub mod music;
+pub mod nest;
 pub mod retained;
 pub mod run_model;
 pub mod runs;
+pub mod scribe;
 pub mod sessions;
 pub mod sigils;
 pub mod tabs;
