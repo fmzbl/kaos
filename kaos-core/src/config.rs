@@ -367,13 +367,13 @@ pub const CONFIG_DOCS: &[ConfigDoc] = &[
         kind: ValueKind::Expression,
         summary: "Rebis orchestration expression used by `/conclave`.",
         details: "The expression is parsed by Kaos's myth language. `${KAOS_K}` is expanded while the config loads, so the default spread width follows the quorum setting. Override it to compose a different gather, vote, spread, or agentic flow.",
-        example: "KAOS_MYTH = (gather vote (spread ${KAOS_K} fire))",
+        example: "KAOS_MYTH = (= task (&) ([vote] ($ task) ($ task) ($ task) ($ task) ($ task)))",
     },
     ConfigDoc {
         key: "KAOS_K",
         kind: ValueKind::Integer,
         summary: "Default number of conclave leaves.",
-        details: "Controls the default myth's `(spread k fire)` width. Values below one are normalized to one when `/conclave` starts; custom `KAOS_MYTH` expressions may use their own spread width.",
+        details: "The width `kaos conclave` uses when it composes a myth for itself, and the width an old-syntax `KAOS_MYTH` writing `${KAOS_K}` expands to. It does NOT drive `KAOS_MYTH`\u{2019}s shipped default any more: a Rebis program writes its branches out, so the number of firings is read off the page instead of resolved from a setting.",
         example: "KAOS_K = 5",
     },
     ConfigDoc {
@@ -569,10 +569,11 @@ KAOS_NO_PARADIGM = 0
 # Claude authority: empty asks, 1 grants shell, 0 accepts edits without shell.
 KAOS_CLAUDE_YOLO =
 
-# Conclave and myth. `${KAOS_K}` follows the quorum below when expanded.
+# Conclave. `${KAOS_K}` follows the quorum below when expanded.
 KAOS_K = 5
-# Rebis orchestration expression used by `/conclave`.
-KAOS_MYTH = (gather vote (spread ${KAOS_K} fire))
+# The Rebis program `/conclave` runs. `(&)` obtains the task; the branches are
+# written out, so the five firings this costs are countable by reading it.
+KAOS_MYTH = (= task (&) ([vote] ($ task) ($ task) ($ task) ($ task) ($ task)))
 # Make myth leaves full read/edit/bash agents instead of completions.
 KAOS_AGENTIC = 0
 # Root copied for agentic leaves.
@@ -844,10 +845,16 @@ mod tests {
         for key in CONFIG_KEYS {
             assert!(values.contains_key(*key), "missing default for {key}");
         }
+        // The default is a Rebis program, and its price is countable by
+        // reading it: five branches, five firings, nothing resolved from a
+        // setting. That is the whole of what `ValueKind::Expression` promised
+        // and did not deliver while this key held myth syntax.
+        let myth = expand(values.get("KAOS_MYTH").unwrap(), &values);
         assert_eq!(
-            expand(values.get("KAOS_MYTH").unwrap(), &values),
-            "(gather vote (spread 5 fire))"
+            myth,
+            "(= task (&) ([vote] ($ task) ($ task) ($ task) ($ task) ($ task)))"
         );
+        assert_eq!(myth.matches("($ task)").count(), 5);
         assert_eq!(
             values.get("KAOS_REBIS_TIMEOUT_S").map(String::as_str),
             Some("600")

@@ -176,6 +176,138 @@ impl Node {
     }
 }
 
+// ── the way out: a myth, written as Rebis ───────────────────────────────────
+
+/// The name a translated myth binds the task to.
+///
+/// A myth is a *template* — `run(node, task, cast)` supplies the task from
+/// outside. A Rebis program has no outside: the program is the prompt. So the
+/// translation obtains the task once and names it, and every leaf composes it.
+const TASK: &str = "task";
+
+/// What a translated myth loses, if anything.
+///
+/// Returned beside the source rather than printed, because the caller decides
+/// whether a lossy translation is a notice, a refusal, or acceptable.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Losses(pub Vec<String>);
+
+impl Losses {
+    /// Whether the translation is faithful.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Write a myth as the Rebis program that means the same thing.
+///
+/// This is the shim that lets `myth` retire. The mapping is the one
+/// `tests/myth_equivalence.rs` established, and the two gates it could not
+/// establish are reported in [`Losses`] rather than silently mistranslated:
+///
+/// | myth | Rebis |
+/// |---|---|
+/// | `fire` | `($ task)` — compose the task and fire it |
+/// | `(ask "role")` | `(+ "role" ($ task))` — framing reaches the prompt |
+/// | `(gather G (spread N X))` | `([g] X X … X)`, N branches written out |
+/// | `(pipe A B …)` | `(-> A B …)` |
+/// | `vote` `first` | `[vote]` `[first]` — host mediators, see [`crate::gate`] |
+/// | `(check "cmd")` | `[check]` — **the command is lost**, see below |
+/// | `(mirror P)` | `[mirror]` — **the threshold is lost** |
+///
+/// **The spread width becomes a written count.** `(spread 8 fire)` becomes eight
+/// branches on the page. That is the point rather than a cost of the
+/// translation: the price of a Rebis program is countable by reading it, and a
+/// width hidden behind a variable is exactly what makes a myth's price not be.
+///
+/// # Errors
+///
+/// Returns the reason when the myth has no Rebis form at all.
+pub fn to_rebis(node: &Node) -> Result<(String, Losses), String> {
+    let mut losses = Losses::default();
+    let body = write_node(node, &mut losses)?;
+    Ok((format!("(= {TASK} (&) {body})"), losses))
+}
+
+/// One myth node as Rebis, without the task binding around it.
+fn write_node(node: &Node, losses: &mut Losses) -> Result<String, String> {
+    match node {
+        Node::Fire => Ok(format!("($ {TASK})")),
+        Node::Ask(instruction) => Ok(format!("(+ \"{}\" ($ {TASK}))", escape_prompt(instruction))),
+        // A bare spread has no gate of its own; `run` applies an implicit final
+        // vote, so the translation writes the vote that was always there.
+        Node::Spread(width, child) => {
+            let branch = write_node(child, losses)?;
+            Ok(square("vote", &branch, *width))
+        }
+        Node::Gather(gate, child) => {
+            let name = gate_name(gate, losses);
+            match child.as_ref() {
+                Node::Spread(width, inner) => {
+                    let branch = write_node(inner, losses)?;
+                    Ok(square(name, &branch, *width))
+                }
+                other => {
+                    let branch = write_node(other, losses)?;
+                    Ok(square(name, &branch, 1))
+                }
+            }
+        }
+        Node::Pipe(stages) => {
+            if stages.is_empty() {
+                return Err("a pipe with no stages has no Rebis form".to_string());
+            }
+            let written: Result<Vec<String>, String> = stages
+                .iter()
+                .map(|stage| write_node(stage, losses))
+                .collect();
+            Ok(format!("(-> {})", written?.join(" ")))
+        }
+    }
+}
+
+/// A mediator square with `width` copies of one branch.
+///
+/// A square of one branch is still a square: it mediates over the single answer
+/// and yields it, which is what a `gather` over a non-spread already meant.
+fn square(mediator: &str, branch: &str, width: usize) -> String {
+    let branches = vec![branch.to_string(); width.max(1)];
+    format!("([{mediator}] {})", branches.join(" "))
+}
+
+/// The mediator name a gate becomes, recording what the name cannot carry.
+fn gate_name(gate: &Gate, losses: &mut Losses) -> &'static str {
+    match gate {
+        Gate::Vote => "vote",
+        Gate::First => "first",
+        Gate::Check(command) => {
+            // A mediator head is one atom, so the command cannot travel with it.
+            // That is a deliberate narrowing — a shared program should not be
+            // able to name a subprocess — but it means this translation is not
+            // complete on its own and the operator has to finish it.
+            losses.0.push(format!(
+                "the gate command `{command}` cannot be written in a Rebis mediator; \
+                 set it as `KAOS_GATE` and run with `--allow-tools`"
+            ));
+            "check"
+        }
+        Gate::Mirror(percent) => {
+            losses.0.push(format!(
+                "`(mirror {percent})`'s threshold is lost: `[mirror]` is judged by \
+                 the calculus against the mediator's own word, not against the task \
+                 at {percent}%"
+            ));
+            "mirror"
+        }
+    }
+}
+
+/// A myth instruction as the body of a Rebis prompt.
+fn escape_prompt(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Run a myth on a task; the single collapsed answer (an implicit final
 /// vote if the top node left more than one candidate).
 pub fn run<C: Cast>(node: &Node, task: &str, cast: &C) -> Option<String> {
@@ -514,5 +646,108 @@ mod tests {
 
     fn s(x: &str) -> Option<String> {
         Some(x.to_string())
+    }
+
+    // ── the translation ─────────────────────────────────────────────────────
+
+    /// Translate, and assert the result is a Rebis program that parses.
+    fn rebis_of(source: &str) -> (String, Losses) {
+        let node = parse(source).expect("the myth parses");
+        let (written, losses) = to_rebis(&node).expect("it translates");
+        rebis_lang::parse(&written).unwrap_or_else(|error| {
+            panic!("{source}\n  became {written}\n  which does not parse: {error}")
+        });
+        (written, losses)
+    }
+
+    #[test]
+    fn the_conclave_becomes_a_written_square() {
+        let (written, losses) = rebis_of("(gather vote (spread 3 fire))");
+        assert_eq!(written, "(= task (&) ([vote] ($ task) ($ task) ($ task)))");
+        assert!(losses.is_empty());
+    }
+
+    #[test]
+    fn a_role_becomes_a_framing() {
+        let (written, _) = rebis_of(r#"(ask "Propose an approach")"#);
+        assert_eq!(written, "(= task (&) (+ \"Propose an approach\" ($ task)))");
+    }
+
+    #[test]
+    fn a_pipe_becomes_an_arrow() {
+        let (written, _) = rebis_of(r#"(pipe (ask "Draft") (ask "Refine"))"#);
+        assert_eq!(
+            written,
+            "(= task (&) (-> (+ \"Draft\" ($ task)) (+ \"Refine\" ($ task))))"
+        );
+    }
+
+    #[test]
+    fn a_bare_spread_writes_the_implicit_final_vote() {
+        // `run` votes when the top node leaves several candidates, so the
+        // translation must write that vote or it would change the answer.
+        let (written, _) = rebis_of("(spread 2 fire)");
+        assert_eq!(written, "(= task (&) ([vote] ($ task) ($ task)))");
+    }
+
+    #[test]
+    fn the_spread_width_becomes_a_countable_number_of_branches() {
+        // The payoff, and the reason the width is not kept as a variable: the
+        // price of the program is now on the page.
+        for width in [1_usize, 4, 8] {
+            let (written, _) = rebis_of(&format!("(gather vote (spread {width} fire))"));
+            assert_eq!(written.matches("($ task)").count(), width);
+        }
+    }
+
+    #[test]
+    fn a_translated_myth_costs_what_the_myth_cost() {
+        // The invariant that makes the shim safe to run: the same number of
+        // firings, counted two ways.
+        for source in [
+            "fire",
+            "(gather vote (spread 8 fire))",
+            r#"(pipe (gather vote (spread 4 fire)) (ask "x") (gather first (spread 3 fire)))"#,
+        ] {
+            let node = parse(source).expect("parses");
+            let (written, _) = to_rebis(&node).expect("translates");
+            // Every leaf is one `($ task)`, and nothing else composes the task.
+            assert_eq!(
+                written.matches("($ task)").count(),
+                node.leaves(),
+                "{source} became {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shell_gate_says_what_the_operator_must_finish() {
+        let (written, losses) = rebis_of(r#"(gather (check "pytest -q") (spread 2 fire))"#);
+        assert!(written.contains("[check]"));
+        assert!(
+            !written.contains("pytest"),
+            "the command cannot travel: {written}"
+        );
+        assert_eq!(losses.0.len(), 1);
+        assert!(
+            losses.0[0].contains("KAOS_GATE") && losses.0[0].contains("pytest -q"),
+            "{:?}",
+            losses.0
+        );
+    }
+
+    #[test]
+    fn a_mirror_gate_says_what_it_loses() {
+        let (written, losses) = rebis_of("(gather (mirror 40) (spread 2 fire))");
+        assert!(written.contains("[mirror]"));
+        assert_eq!(losses.0.len(), 1);
+        assert!(losses.0[0].contains("40"), "{:?}", losses.0);
+    }
+
+    #[test]
+    fn an_instruction_containing_a_quote_survives_the_round_trip() {
+        let (written, _) = rebis_of(r#"(ask "say \"hello\" twice")"#);
+        let parsed = rebis_lang::parse(&written).expect("parses");
+        assert!(rebis_lang::format(&parsed).contains("hello"), "{written}");
     }
 }

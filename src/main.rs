@@ -690,21 +690,166 @@ fn conclave(session: &Session, task: &str) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(5usize)
         .max(1);
-    let sexpr =
-        std::env::var("KAOS_MYTH").unwrap_or_else(|_| format!("(gather vote (spread {k} fire))"));
+    // With nothing configured, compose the default at `KAOS_K`'s width. Written
+    // out rather than spelled `(spread k …)`, because the price of a Rebis
+    // program is meant to be countable by reading it.
+    let sexpr = setting("KAOS_MYTH").unwrap_or_else(|| {
+        let branches = vec!["($ task)"; k].join(" ");
+        format!("(= task (&) ([vote] {branches}))")
+    });
     run_myth(session, &sexpr, task);
 }
 
-/// Parse a myth S-expression and run it on the bound mind, printing the myth and
-/// the collapsed verdict. Shared by `/conclave` and `/myth`.
+/// Run a composition on the bound mind, printing it and the collapsed verdict.
+/// Shared by `/conclave` and `/myth`.
+///
+/// `sexpr` is a **Rebis program**. The older myth syntax is still accepted for
+/// one release: it is recognised by its own grammar — five closed forms, none of
+/// which is a Rebis operator — translated on read, and the replacement is
+/// printed so the value in a user's config can be updated once and forgotten.
 fn run_myth(session: &Session, sexpr: &str, task: &str) {
-    let node = match kaos::myth::parse(sexpr) {
-        Ok(n) => n,
-        Err(e) => {
-            println!("  {} {}", fg(GREEN(), "\u{2734} myth:"), ash(&e));
+    // `KAOS_AGENTIC` makes every leaf a full read/edit/bash session in an
+    // isolated copy of the tree. The Rebis conclave does not do that — its
+    // leaves answer, they do not act — so the myth evaluator stays reachable
+    // for exactly this, and stays honest about why. `kaos rebis run --chaos`
+    // is the Rebis path that acts.
+    let agentic = kaos::config::enabled("KAOS_AGENTIC");
+
+    // Myth first, because its grammar is the closed one: `fire`, `ask`,
+    // `spread`, `gather`, `pipe` and nothing else. Anything it refuses is
+    // Rebis's, which is the right way round — Rebis would happily PARSE
+    // `(gather vote …)` as a call to an undefined macro and only fail at
+    // runtime, so it cannot be the discriminator.
+    if let Ok(node) = kaos::myth::parse(sexpr) {
+        if agentic {
+            println!(
+                "  {}",
+                ash("agentic leaves act, which only the myth evaluator does \u{2014} running it")
+            );
+            return run_myth_natively(session, node, sexpr, task);
+        }
+        match kaos::myth::to_rebis(&node) {
+            Ok((replacement, losses)) => {
+                println!(
+                    "  {} {}",
+                    fg(
+                        GREEN(),
+                        "\u{2734} myth syntax is going away \u{2014} write:"
+                    ),
+                    bone(&replacement)
+                );
+                for loss in &losses.0 {
+                    println!("  {}", ash(&format!("\u{00b7} {loss}")));
+                }
+                return run_rebis_composition(session, &replacement, task);
+            }
+            Err(why) => {
+                println!("  {} {}", fg(GREEN(), "\u{2734} myth:"), ash(&why));
+                return;
+            }
+        }
+    }
+    if agentic {
+        // Silently answering instead of acting would be the worst outcome: the
+        // run looks the same and does a fraction of the work.
+        println!(
+            "  {} {}",
+            fg(RED(), "\u{2734} KAOS_AGENTIC does nothing here \u{2014}"),
+            ash("a Rebis conclave's leaves answer rather than act; use `kaos rebis run --chaos`")
+        );
+    }
+    run_rebis_composition(session, sexpr, task);
+}
+
+/// Run a Rebis composition as a conclave: `(&)` obtains the task, the leaves
+/// fire it, and the mediators Kaos claims decide.
+fn run_rebis_composition(session: &Session, source: &str, task: &str) {
+    let expr = match rebis_lang::parse(source) {
+        Ok(expr) => expr,
+        Err(error) => {
+            println!(
+                "  {} {}",
+                fg(GREEN(), "\u{2734} rebis:"),
+                ash(&error.to_string())
+            );
             return;
         }
     };
+    if let Err(error) = session.model.readiness() {
+        println!(
+            "  {} {}",
+            fg(RED(), "\u{2734} the mind is unreachable \u{2014}"),
+            ash(&error)
+        );
+        return;
+    }
+    println!("{}", rule(64));
+    println!("  {}  {}", bold(GREEN(), "conclave"), dim(ASH(), source));
+    let task = format!("{}{}", attachment_block(session), task);
+
+    let allow_tools = kaos::config::enabled("KAOS_CLAUDE_YOLO");
+    let conclave = kaos::solve::RebisConclave::new(
+        kaos::solve::ChatCast {
+            spec: &session.model,
+            timeout: std::time::Duration::from_secs(call_timeout_s()),
+        },
+        kaos_agent::gate::Mediators::standard(
+            setting("KAOS_GATE").unwrap_or_default(),
+            std::time::Duration::from_secs(
+                setting("KAOS_GATE_TIMEOUT_S")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(300),
+            ),
+            allow_tools,
+        ),
+    );
+    let mut record = rebis_lang::Record::from_texts::<&str>(&[]);
+    let result = rebis_lang::orchestrate_with_inlet(
+        &expr,
+        &mut record,
+        &conclave,
+        &HypersigilModules::user(
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        ),
+        &kaos::solve::TaskInlet(task),
+        // The standard budgets: a conclave is a written program and its price is
+        // on the page, so nothing here needs the hosted run's renewable slice.
+        rebis_lang::RuntimeLimits::standard(),
+        &mut |_| {},
+    );
+    for diagnostic in &result.diagnostics {
+        println!(
+            "  {} {}",
+            fg(RED(), "\u{2734}"),
+            ash(&diagnostic.to_string())
+        );
+    }
+    match result.output {
+        Some(answer) => println!(
+            "  {} {}",
+            bold(GREEN(), "\u{25c9} verdict"),
+            bone(&kaos::solve::render_verdict(&answer))
+        ),
+        // Three outcomes, not two, and the trace already says which. A gate that
+        // refused is not the same event as every branch fizzling, and reporting
+        // them alike is what D1 exists to stop.
+        None => println!(
+            "  {}  {}",
+            fg(RED(), "\u{2734} no verdict"),
+            ash(&format!(
+                "{} firings, and nothing survived the mediator",
+                conclave.firings()
+            ))
+        ),
+    }
+    println!("{}", rule(64));
+}
+
+/// The myth evaluator, kept for the one thing Rebis cannot express here:
+/// agentic leaves, which run a whole tool session per branch in an isolated
+/// copy of the tree. See `kaos-agent/tests/myth_equivalence.rs` for the rest of
+/// what did and did not translate.
+fn run_myth_natively(session: &Session, node: kaos::myth::Node, sexpr: &str, task: &str) {
     if let Err(e) = session.model.readiness() {
         println!(
             "  {} {}",
@@ -1137,6 +1282,20 @@ fn run_session_with_timeout(
 
 /// Step budget for the <act> loop (`KAOS_MAX_STEPS`, default 14). 14 suits the
 /// small devbench arenas; a large repo needs room to explore before editing.
+/// One setting, environment first and the config file behind it.
+///
+/// `config::load` seeds the environment from the file WITH `${…}` expanded, so
+/// the environment is the resolved value and the file is the raw one. Reading
+/// the file directly would hand a caller `(spread ${KAOS_K} fire)` and a parse
+/// error — which is exactly how this was found.
+fn setting(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| kaos::config::value(key))
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn max_steps() -> usize {
     std::env::var("KAOS_MAX_STEPS")
         .ok()
@@ -2092,9 +2251,9 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             // `[check]`'s authority is the run's. A program cannot name the
             // verifier and cannot acquire one partway through by writing it.
             mediators: kaos_agent::gate::Mediators::standard(
-                kaos::config::value("KAOS_GATE").unwrap_or_default(),
+                setting("KAOS_GATE").unwrap_or_default(),
                 std::time::Duration::from_secs(
-                    kaos::config::value("KAOS_GATE_TIMEOUT_S")
+                    setting("KAOS_GATE_TIMEOUT_S")
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(300),
                 ),

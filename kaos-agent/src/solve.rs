@@ -462,6 +462,80 @@ fn decode_patchset(s: &str) -> Option<BTreeMap<String, Option<String>>> {
     Some(out)
 }
 
+// ── the conclave, as a Rebis run ────────────────────────────────────────────
+
+/// A conclave's leaves and gates, as the seams Rebis asks for.
+///
+/// The same firing [`ChatCast`] does — a sampled completion with solar/lunar
+/// polarity per index, so branches are diverse yet reproducible — reached
+/// through [`rebis_lang::Oracle`] instead of [`Cast`]. Nothing about the model
+/// call changes; what changes is which language decides how many of them there
+/// are and what happens to the answers.
+///
+/// The gates come from [`crate::gate`]: `[vote]`, `[first]`, `[check]`.
+pub struct RebisConclave<'a> {
+    /// How a leaf fires.
+    pub cast: ChatCast<'a>,
+    /// The mediator names this run claims.
+    pub mediators: crate::gate::Mediators,
+    /// Leaf index, for the per-branch sampling seed. Rebis has its own stable
+    /// scope identity, but the seed only has to be *distinct* per branch, and a
+    /// counter is the same thing `myth`'s atomic was.
+    fired: std::sync::atomic::AtomicUsize,
+}
+
+impl<'a> RebisConclave<'a> {
+    /// A conclave firing through `cast`, gated by `mediators`.
+    #[must_use]
+    pub fn new(cast: ChatCast<'a>, mediators: crate::gate::Mediators) -> Self {
+        Self {
+            cast,
+            mediators,
+            fired: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// How many leaves have fired — the number the cost claim is about.
+    #[must_use]
+    pub fn firings(&self) -> usize {
+        self.fired.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl rebis_lang::Oracle for RebisConclave<'_> {
+    fn fire(&self, prompt: &str) -> Option<String> {
+        let index = self
+            .fired
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.cast.fire(prompt, index)
+    }
+
+    fn mediate(&self, mediator: &str, branches: &[String]) -> rebis_lang::Mediation {
+        self.mediators.judge(mediator, branches)
+    }
+}
+
+/// The task, handed to `(&)`.
+///
+/// A myth was a template and took its task as an argument; a Rebis program is
+/// the prompt and has no arguments. `(&)` is how a program says *the thing this
+/// run is about goes here*, so a conclave's task arrives through the inlet and
+/// the program binds it once.
+///
+/// It deliberately does not read files. `(&: source)` is left unimplemented, so
+/// a conclave program cannot open anything — running someone's conclave should
+/// not be an act of trust it does not look like.
+pub struct TaskInlet(pub String);
+
+impl rebis_lang::Inlet for TaskInlet {
+    fn ask(&self, _label: Option<&str>) -> Option<rebis_lang::Received> {
+        Some(rebis_lang::Received {
+            text: self.0.clone(),
+            attachments: Vec::new(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
