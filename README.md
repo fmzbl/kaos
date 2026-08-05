@@ -97,6 +97,18 @@ Rebis programs are made from a small set of structural forms:
 | `(A B C)` | Execute a group in source order. |
 | `($ A B C)` | Compose one string from the inert text of the operands, then fire it. |
 | `(& port body)` | Receive external input as `port`, then run `body`; a host may block until it arrives. |
+| `(? A B)` | Recall what the run already knows on a topic. No model fires. |
+| `(* topic A)` | Run `A`, and bury what the record held on that topic — the one way to correct it. |
+| `(@ check A)` | Hold a rule across every arrow in `A` — one check per arrow; a refusal stops the scope and names the edge. |
+| `(! A)` | Run `A`, answer what it answered, and keep that answer beyond the run. |
+| `(= n A body)` | Run `A` once, name its answer `n`, and run `body`. |
+| `(+ C body)` | Frame every prompt in `body` with the inert text of `C`. |
+| `(&: source)` | Load a source the program names — text becomes a value, a picture an attachment. |
+| `(% C A B)` | Lazy binary gate: `C` answers exactly `0` or `1`, and only one branch expands. |
+| `{A B C}` | An imaginary space: it runs, and only its own answer becomes evidence. |
+| `\|A B C\|` | The numeric plane: quantities, arithmetic, and a run measuring itself. `+` frames every quantity written inside. Fires nothing. |
+| `<>` | This program, as syntax. Interpolated it is text; executed it runs. |
+| `(>< A B)` | Meta: a prompt whose answer is parsed as Rebis, and runs. |
 | `(-> A B C)` | Route each accepted answer into the next stage as `INPUT:`. |
 | `(<- A B)` | Backflow: equivalent to `(-> B A)`. |
 | `(^ E)` | Purely invert syntax orientation by recursively exchanging `->` and `<-`. |
@@ -104,19 +116,36 @@ Rebis programs are made from a small set of structural forms:
 | `(~ name (args) body)` | Define a structural macro; its parameters are its variables. |
 | `(# module)` | Import definitions without executing the module. |
 | `'form` and `,value` | Quote a macro-template program and splice caller syntax. |
-| `E/provider:model` | Optionally route every model call in expression `E` through that model. |
+| `(/ provider:model E)` | Route every model call in `E` through that model. |
 | `; comment` | Comment to end of line, except inside a quoted prompt. |
 
-Model bindings are lexical. An inner suffix overrides its parent only for that
+Model bindings are lexical. An inner route overrides its parent only for that
 subtree; after it finishes, execution restores the parent, and an unbound form
-uses the session model selected by `/model`. Write the suffix adjacent to a
-closing quote or `)`, as in `"draft"/ollama:qwen4:4b`,
-`(-> "a" "b")/claude:opus5`, or
-`(["judge"] "a" "b")/openrouter:anthropic/claude-opus-4`. Kaos parses each
+uses the session model selected by `/model`. Routing is a form, so the `/` sits
+adjacent to the `(` that heads it: `(/ ollama:qwen4:4b "draft")`,
+`(/ claude:opus5 (-> "a" "b"))`, or
+`(/ openrouter:anthropic/claude-opus-4 (["judge"] "a" "b"))`. Kaos parses each
 selector through the same provider registry as `/model`; the binding changes
 routing only and adds no model call. Availability is checked for the effective
 model when a call actually fires, so an unused session default does not block a
 fully bound program.
+
+Four of those forms are about what a run remembers, what a program is, and what
+it has cost. `| |` is the other pole of the language: inside it values are
+quantities, `$` is addition, `[M]` is a fold, `^` is the inverse, `/` is a
+modulus, and nothing fires — so counting, comparing and reducing are free where
+they used to cost a model call each. A comparison answers `0` or `1`, which is
+what `%` already reads, so numbers steer ordinary programs with no new control
+flow.
+`{ }` runs work whose answer alone becomes evidence, so a program can explore
+six routes and remember one — and a `!` inside a space keeps its answer for
+the *next* space rather than for the run, which is how a search remembers its
+own dead ends without recording them. `<>` is the program itself, as syntax:
+interpolated it is the program's own text, executed it re-enters. `(>< …)`
+fires a prompt and parses the answer as Rebis, so a program can write the
+program it needs — generating and running are one act there, so a program
+meant to be reviewed first is asked for as ordinary text and handed to a host. Together the last two let a program read itself, write a
+better self, and run it — see [the language guide](docs/REBIS.md).
 
 Macro parameters hold Rebis syntax, not pre-evaluated strings. Passing a quoted
 prompt therefore keeps it executable after substitution:
@@ -180,8 +209,10 @@ Useful workspace commands:
 /format                 format valid Rebis source
 /format!                format even when comments will be removed
 /search TEXT            find the next literal source match; /search repeats
+/sigils QUERY           find a sigil by name, or by what is written in one
 /tree                   show the structural tree
 /mandala                show the o-[]-o flow projection
+/music                  hear the program: wave, score, and its Fibonacci sums
 /graph                  focus the right panel
 /source                 return focus to source
 /panel toggle|hide|show control the right panel
@@ -285,10 +316,34 @@ set to watch does. The Claude CLI backend brings its own tools and has no timer.
 
 Permission requests and decisions are retained inside the corresponding run.
 Parallel runs remain independent, while their authority questions are presented
-one at a time. `/chaos on` upgrades every prompt to a full Kaos pipeline agent;
-`/chaos off` returns to one direct tool agent per prompt. The non-interactive
-CLI stays completion-only by default: `--allow-tools` enables direct tool
-agents, and adding `--chaos` selects the pipeline.
+one at a time.
+
+### Chaos mode
+
+Chaos mode is one stance, and it reaches everything: **normally an agent is
+handed an intent and works it; in chaos mode the intent is written as a Rebis
+program first, and the program is what runs.**
+
+The point is that a program's cost can be read off the page before it is paid —
+one written prompt is one firing, countable by eye — while an agent's cost is
+discovered by running it. What you get back is also an artifact rather than a
+transcript: something to read, edit, save to the sigil wall, and run again.
+
+- **Chats.** A typed line asks for a program instead of an answer. The composed
+  program is registered in the run browser **queued, not started** (the visual
+  editor opens it as a `composed` source tab): composing costs one model call,
+  and what the program itself costs stays a separate decision at the authority
+  gate.
+- **Rebis runs.** Every prompt gets a full Kaos pipeline agent instead of one
+  direct tool agent per prompt.
+- **Sigil stacks.** The program the stack generates runs the same way.
+
+`/chaos [on|off]` toggles it in the terminal app, the chat pane has a `chaos`
+checkbox in the visual editor, and `KAOS_CHAOS = true` in `/config` makes it the
+default. Every child process inherits the stance, so a run that opens a nested
+run keeps it. The non-interactive CLI stays completion-only by default:
+`--allow-tools` enables direct tool agents, and adding `--chaos` selects the
+pipeline for one invocation.
 
 ## Results, records, and output
 
@@ -353,7 +408,8 @@ imported with `(# team/reviews)`. Importing `(# team)` recursively loads every
 `.rebis` module below that folder in stable order. Opening another sigil parks
 dirty source as a restorable `temp:N` entry instead of discarding it.
 
-The embedded `std` folder contains twenty documented modules and 77 `std-` macros:
+The embedded `std` folder contains twenty-six documented modules and 122
+`std-` macros:
 
 ```text
 std/flow         application, composition, and fan-out
@@ -376,6 +432,12 @@ std/spiral       Fibonacci restart scheduling, banishment, and the reverse twin
 std/sieve        short-circuit conjunction and disjunction over judges
 std/mirror       orientation duality (`^`) as a combinator
 std/seam         the `&` input port: host-in-the-loop and mechanical gates
+std/memory       the `?` flashback: reading what the run already learned
+std/imaginary    the `{}` space: exploring without remembering the exploration
+std/source       the `<>` operator: a program that reads or re-enters itself
+std/geometry     closed circuits, holonomy, and order-invariance
+std/divine-geometry  proportion, the Fibonacci recurrence, self-generating figures
+std/correspondence   holding one thing steady across the language's layers
 ```
 
 Import one module with `(# std/spread)` or all of them with `(# std)`. Expand
@@ -404,6 +466,30 @@ the collection — nothing depends on it being present. The current collection
 includes `archetypes/*` composition protocols, the `git/workflow`
 repository-workflow module, `forge/repair` (the coding repair loop wired onto
 `std/spiral`), and `science/method` (claims that have to survive something).
+
+### Finding a sigil
+
+`/sigils QUERY` searches the whole library — your saved sigils, the embedded
+`std/`, and the collection — and it searches two ways:
+
+```text
+/sigils std/            list that folder
+/sigils std/map         the module by name
+/sigils std-memo        nothing is named that, so it greps the sources
+```
+
+**Names first, contents only when nothing bears the name.** That is a fallback
+rather than a ranking, and the difference is the point: `std/` is a browse and
+should list that folder, not the several dozen modules that import from it —
+which is what a plain grep returns and is most of the library. `std-memo` is a
+hunt, nothing is called that, and the contents are where the answer is. Which
+one you meant is legible from whether anything bears the name, so you never
+have to say.
+
+A content match shows the line beside the result and **opening it goes there**,
+cursor on the match, rather than to the top of a file you then have to search
+again. Comments count, so the sentence explaining what a macro is for is
+searchable — usually that is what you half-remember, not the name.
 
 ## Non-interactive Rebis CLI
 
@@ -526,7 +612,7 @@ draw/edit/chat actions for personal and embedded `std/` entries, with delete
 limited to personal sigils.
 
 Chat browses and resumes the same durable sessions `/resume` reads in the
-terminal app. User and model turns have separate green/blue cards; headings,
+terminal app. User and model turns have separate accent/flow cards; headings,
 lists, quotes, and fenced code receive readable typography. Retained run output
 uses colored semantic tags (`EVENT`, `PROMPT`, `RESULT`, `PAUSED`, and so on)
 without changing the raw stream copied or written to disk. The **Actions** tab
@@ -633,7 +719,7 @@ thing — evidence for scoring, supplied before the run starts. Ports need a liv
 mode: a dry run is evaluated without an input seam and reports the port
 unavailable instead of waiting.
 
-Every standalone canvas symbol is resizable. Hover it to reveal a green dashed
+Every standalone canvas symbol is resizable. Hover it to reveal an accent-blue dashed
 scale outline, then drag a side or corner; the glyph, hit target, caption, edge
 clearance, and 2D/3D footprint scale together. Only the mediator square sizes its two
 walls independently; every other outline scales whole, on one shared factor, so
@@ -648,9 +734,9 @@ room. The program triangle stays unlabelled until clicked.
 Size and positions are presentation; crossing a nesting boundary is the
 intentional gesture that changes generated structure.
 
-Right-drag draws a green marquee and selects every touched form, including a
+Right-drag draws an accent-blue marquee and selects every touched form, including a
 flow arrow when the marquee crosses its rendered line. `Ctrl`-click toggles
-individual forms in that block; a blue arrow can be toggled by clicking
+individual forms in that block; a teal arrow can be toggled by clicking
 anywhere along its rendered line. Delete removes the whole selected block in
 one undoable edit. `Ctrl-C` copies the selection's exact induced subgraph and
 `Ctrl-V` pastes it with fresh IDs, retained internal links, a visible cascading
@@ -678,23 +764,222 @@ window is native egui on OpenGL, so it needs no system webkit — see
 [Install and start](#install-and-start). Built without the feature,
 `kaos visual` prints the instruction and exits.
 
-## Theme
+## Tearing a tab into its own window
 
-Kaos uses quiet frost-blue structure plus three semantic colors, in two modes.
-Green marks identity, focus, valid source, successful or active work, recursion,
-and the chaos star. Blue marks flow, navigation, models, live information,
-parallel state, and source ranges. Red is reserved for invalid source, failed
-or cancelled work, warnings, refusals, and destructive controls. Nesting needs
-no extra structural color because its circle/square boundary is the
-relationship. Both the terminal app and `kaos visual` read the same palette.
+A tab is a view, and some views are worth watching *while* you work on the
+drawing that produced them. Press **⇱** on an active tab to pull it out:
 
 ```text
-/theme dark     light on dark
-/theme light    dark on light
+⇱   open this tab in a window of its own
+×   close the window — the tab comes back on the bar
+```
+
+The window **runs on its own clock**. egui offers two kinds of extra window and
+the difference is the whole feature: an immediate viewport draws inside its
+parent's frame, so it freezes whenever the parent is idle; a deferred one has
+its own repaint loop. Torn tabs get the second, which is why a generation keeps
+stepping and a piece keeps playing beside an editor nobody is touching.
+
+The price of that independence is that the window's paint callback cannot
+borrow the editor — it does not run inside the editor's frame. So a tab can be
+torn off exactly when it draws from its own state: **Sound** and **Generation**
+today. That is not a list of blessed kinds, it is the same condition stated
+twice; a pane that needs the editor to draw itself is not independent, and
+giving it a window would only hide the coupling.
+
+The torn window carries what that view needs and nothing else — no tab bar, no
+palette, no side panel. Controls that would need the editor are left out rather
+than drawn dead: a torn Sound window plays, stops, loops and retunes, but
+re-read and export stay on the tab, since one takes a program from another tab
+and the other opens a file dialog.
+
+The pane *moves* rather than copying — a view cannot be in two places, and two
+copies under one name drift apart. Closing the window puts the tab back, so
+tearing off is a rearrangement, not a decision.
+
+## Sound
+
+A Rebis program is already a number, and the number is already music. The
+Sound section plays it: `+ sound` in the visual editor, `/music` in the
+terminal. Both are one desk in `kaos-core::music` wearing two faces — the same
+scale, the same synth, the same file — so a piece heard in one is the piece
+heard in the other, sample for sample.
+
+Four rules, each read off the program with nothing chosen by hand:
+
+- **Time is indentation.** The piece is one span, and a form's contents divide
+  the form's time in equal parts — not in proportion to how much each holds.
+  Writing something one level deeper is what makes it briefer, and nothing else
+  does. A form's sigil takes a short grace slot first, so an indentation
+  announces itself before what it holds.
+- **A parallel form is a chord.** `([m] a b …)` runs its branches
+  independently, so they sound together and the mediator answers after them.
+  Everything else is one voice moving in time.
+- **Every character is a number, and every number is Fibonacci.** A word's
+  value is its characters read in a positional system whose place values are
+  the Fibonacci numbers, so word order is audible. Zeckendorf's theorem then
+  decomposes that value into non-consecutive Fibonacci numbers in exactly one
+  way; the indices choose the scale degree, and each term becomes one partial.
+- **Minimal becomes full.** One character is one or two terms and very nearly a
+  sine. A word blooms into partials on the harmonic numbers 1, 2, 3, 5, 8, 13 —
+  Fibonacci again, and all but the last genuine overtones — normalised so the
+  growth is colour rather than volume.
+
+The scale is the first Fibonacci numbers folded into one octave, which lands on
+a just twelve: `1/1`, `17/16`, `9/8`, `305/256`, `5/4`, `21/16`, `89/64`,
+`377/256`, `3/2`, `13/8`, `55/32`, `233/128`. Nothing is tempered; every degree
+is a Fibonacci number over a power of two.
+
+```text
+/music                  read the buffer, draw the wave, list the score
+/music play             hand the rendered piece to the system player
+/music stop
+/music export [FILE]    write a 16-bit WAV
+/music root 220         the frequency the first degree sits on
+/music pace 0.22        seconds per atom; the piece is this times its atoms
+/music partials 4       how many Zeckendorf terms may sound
+/music octaves 4        octaves of indentation before depth wraps
+/music timbre sine      sine | triangle | saw | square
+```
+
+The terminal panel draws the wave in braille at eight times cell resolution,
+with a ruler carrying the playhead, then the score: onset, length, depth,
+pitch, and the Fibonacci sum each tone came from. The visual tab draws the same
+wave with a hover that writes out one tone's whole arithmetic — the word, the
+number, its decomposition, the degree it chose — because a claim about where
+the pitch comes from is only worth something if it is on screen to be checked.
+
+Playback shells out to the first of `pw-play`, `paplay`, `aplay`, `afplay`,
+`ffplay`, or `play` on the machine; with none installed the section still
+derives, draws, and exports. Synthesis is pure and deterministic: the same
+program is the same samples, with no clock and no randomness anywhere.
+
+## Files and images
+
+`(&: "./path")` loads a file. What happens next depends on what it is:
+
+```rebis
+(-> (&: "./failing.log") "What broke?")          ; text becomes the value
+
+(= shot (&: "./bug.png")                          ; a picture becomes an
+   (+ shot ("What is misaligned?")                ; attachment, and `+` is what
+          ("By how much?")))                      ; shows it to a model
+```
+
+A **text** file's value is its contents — interpolate it, route it, recall on
+it, anything a value does. A **picture or PDF** has no useful text, so the
+value is the path the program named and the bytes travel beside the prompt.
+They reach a model where a `+` puts them in scope: every prompt inside the
+framing sees them, nothing outside does.
+
+Recognised as attachments: `png`, `jpg`, `jpeg`, `gif`, `webp`, `pdf`.
+Everything else is read as text, and a binary that is not valid text is
+refused rather than sent as garbage.
+
+Paths resolve under the run's own directory and anything climbing out of it is
+refused — a Rebis program is a thing people share, so running someone else's
+should not be an act of trust it does not look like. A host grants file access
+by implementing `Inlet::load` at all; the default is to grant none.
+
+### What each provider carries
+
+| provider | images | PDFs |
+|---|---|---|
+| Anthropic API | ✅ `image` blocks | ✅ `document` blocks |
+| OpenAI · OpenRouter | ✅ data URIs | ❌ refused, with the reason |
+| Ollama | ✅ vision models | ❌ refused, with the reason |
+| Claude CLI | reads the path itself | reads the path itself |
+
+**A file a provider cannot carry is refused, never dropped.** The run prints
+`attach   not sent · spec.pdf is application/pdf — this provider takes images
+only; an Anthropic model or the Claude CLI can read it`, and the prompt is sent
+with what remains. Silently omitting it would mean a confident answer about a
+picture the model never saw, with nothing in the transcript to say so.
+
+The Claude CLI needs nothing on a wire: it is an agent with its own filesystem
+tools, and the path is already in the prompt because that is what `&:` answered
+with.
+
+One cost to know: `+` puts its framing in front of **every** prompt inside it,
+because a model call carries nothing but what the program put in it. That is
+the same as writing the text into each prompt by hand — but framing a
+forty-page PDF over a dozen prompts is easy to do by accident and expensive to
+do at all.
+
+## Dream
+
+A run remembers everything while it lasts. Every accepted answer is appended to
+the record as it is produced, which is why `(? topic)` can recall what an
+earlier stage of the same program answered. Then the run ends and the record
+goes with it.
+
+`(! A)` is the mark that says *not this one*. It runs `A`, answers exactly what
+`A` answered — so it can be dropped in anywhere without changing what a program
+computes — and keeps that answer in the project's own dream, which seeds the
+record of every later run.
+
+The memory belongs to the **repository Kaos was opened in**, at
+`<repo>/.kaos/dream` — the first ancestor holding a `.git`, so a run started in
+a subdirectory and one started at the top remember the same things. Recall is
+topical, so this is not filing: one global memory would mix every project a
+person has worked on into one corpus and make every recall vaguer. The store is
+a text file beside the code its answers are about, and it moves with the clone.
+Its first write leaves a `.gitignore` next to it, because the file is model
+output and `git add -A` does not ask — delete that one line to share what your
+programs learned with everyone who clones the repository.
+
+```rebis
+(! "What breaks the retry queue under load?")  ; today: asked, and kept
+(? "retry queue")                              ; tomorrow, anywhere: recalled
+```
+
+Forgetting is the default, and deliberately. `?` scores topical overlap across
+everything it can see, so a memory holding every answer of every run is a memory
+recall cannot find anything in. Three things hold that line: only marked answers
+are ever written; the same answer is never carried twice, so a nightly program
+cannot fill the store with copies of one sentence; and the file keeps the most
+recent 500 claims. What is kept carries when it was kept, so a recall that
+surprises you can be traced rather than wondered at.
+
+```text
+/dream                  what this machine remembers
+/dream forget N         drop one memory
+/dream forget all       drop all of them
+```
+
+The language decides *what* is worth keeping and the host decides what keeping
+means: Rebis reports marked answers in `Orchestration::kept` and does nothing
+else with them, so a host with no durable memory runs the same program to the
+same answer. On the canvas a dream is an indentation like any other — a circle
+wearing `!` on its ring — and it round-trips to source exactly.
+
+## Theme
+
+Black, white, grey, and blue, in two modes. The page is black and the text is
+white, or the page is turned over and it is the other way round; everything
+between them — panels, shape interiors, secondary text, rules — is a neutral
+cool grey separating by brightness alone. Nothing structural carries a hue,
+which is what lets the coloured voices stay quiet and still be seen.
+
+Blue marks identity, focus, valid source, successful or active work, recursion,
+and the chaos star. Teal — blue turned toward green — marks flow, navigation,
+models, live information, parallel state, and source ranges. They are told
+apart by which channel leads rather than by brightness, so they survive being
+drawn one pixel wide. Red is the one hue outside the scheme, reserved for
+invalid source, failed or cancelled work, warnings, refusals, and destructive
+controls: a failure that reads as a success is the single mistake an interface
+must not make, and a warning drawn in the palette's own colours is a warning
+the eye skims. Nesting needs no structural color because its circle/square
+boundary is the relationship. Both the terminal app and `kaos visual` read the
+same palette.
+
+```text
+/theme dark     white on black
+/theme light    black on white
 /theme          report the current mode
 ```
 
-In light mode the app paints its own ice-blue page rather than inheriting the
+In light mode the app paints its own white page rather than inheriting the
 terminal's background, so a light theme is genuinely light in both interfaces.
 
 The choice is persisted in the Kaos config and read by **both** interfaces, so

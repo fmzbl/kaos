@@ -52,6 +52,29 @@ default means that the optional override is disabled.
 | `theme` | `dark` | choice | Shared terminal and visual palette; accepts `dark` or `light`. |
 | `vim_mode` | `false` | boolean | Default Vim-style bindings for newly opened Rebis editors. |
 
+### Stance
+
+| Key | Default | Type | Meaning |
+| --- | --- | --- | --- |
+| `KAOS_CHAOS` | `false` | boolean | Compose the work as a Rebis program before running it. |
+
+Off, an agent is handed an intent and works it. On, the intent is written as a
+Rebis program first and the program is what runs — so its cost can be read off
+the page before it is paid, and the result is an artifact you can edit, save to
+the sigil wall, and run again.
+
+It is one stance across every surface. A chat turn is composed into a program
+instead of answered; a Rebis run gives each model node the whole Kaos pipeline
+instead of one node-scoped agent; a sigil stack's generated program runs the
+same way. `/chaos [on|off]` toggles it in the terminal app, the chat pane has a
+`chaos` checkbox in the visual editor, `kaos rebis run --chaos` turns it on for
+one run, and every child process inherits it.
+
+A composed program is **queued, not started**: composing costs one model call,
+and whatever the program itself costs stays a separate decision made at the
+authority gate. The terminal app registers it in the run browser; the visual
+editor opens it as a `composed` source tab.
+
 ### Mind and providers
 
 | Key | Default | Type | Meaning |
@@ -64,6 +87,7 @@ default means that the optional override is disabled.
 | `KAOS_FABLE_FALLBACK_MODEL` | *(empty)* | text | Claude model used as an optional fallback after a Fable refusal. |
 | `KAOS_PROVIDER_SORT` | *(empty)* | text | OpenRouter routing preference: commonly `throughput`, `latency`, or `price`. |
 | `KAOS_PROVIDER_ONLY` | *(empty)* | text | Comma-separated OpenRouter provider slugs; disables provider fallbacks. |
+| `KAOS_ROUTE_ALLOW` | *(empty)* | text | Comma-separated model prefixes a RUN may route itself to with `(/ ,name …)`. Empty means unrestricted. Selectors written in the source are never checked — only ones a program chose. |
 | `OPENAI_BASE_URL` | `https://api.openai.com` | URL | OpenAI-compatible API host root. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api` | URL | OpenRouter API host root. |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | URL | Ollama server; bare `host:port` values also work. |
@@ -192,6 +216,7 @@ boundary reference.
 | `OPENAI_API_KEY` | OpenAI or OpenAI-compatible provider credential. |
 | `ANTHROPIC_API_KEY` | Anthropic API credential; Claude CLI subscription mode uses `claude login`. |
 | `OPENROUTER_API_KEY` | OpenRouter provider credential. |
+| `KAOS_CONFORMANCE_MODEL` | Overrides the model the conformance suite runs against; a test-harness setting rather than a preference. |
 
 Use `kaos auth`, which stores credentials separately with owner-only file
 permissions, or export a key in the shell that launches Kaos.

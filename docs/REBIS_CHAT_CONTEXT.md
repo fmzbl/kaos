@@ -20,10 +20,96 @@ language but follow the node prompt and return only its flow value.
   through that Kaos model instead of the session default. The suffix is lexical:
   nested bindings override their parent only for their subtree, while unbound
   forms inherit. It changes no value and makes no call itself. Write it adjacent
-  to a closing quote or `)`, for example `"draft"/ollama:qwen4:4b`,
-  `(-> "a" "b")/claude:opus5`, or
-  `(["judge"] "a" "b")/openrouter:anthropic/claude-opus-4`. A slash inside a
-  symbol such as `std/loops` remains part of the symbol.
+  after the `(` that heads it, for example `(/ ollama:qwen4:4b "draft")`,
+  `(/ claude:opus5 (-> "a" "b"))`, or
+  `(/ openrouter:anthropic/claude-opus-4 (["judge"] "a" "b"))`. A slash inside
+  a symbol such as `std/loops` remains part of the symbol. Routing is a FORM,
+  not a suffix — a trailing `expr/model` is no longer a route and parses as a
+  stray symbol.
+- `|A B ...|` is the **numeric plane** — the other pole, where values are
+  quantities. NOTHING inside fires, so the whole block costs zero model calls.
+  `$` is the monoid operation and so ADDITION; `[M]` is a FOLD (`[sum]`,
+  `[product]`, `[max]`, `[min]`); `^` is the INVERSE, so `($ 10 (^ 3))` is 7 and
+  subtraction needs no glyph; `/` is the REGIME, a modulus, so `(/ 9 38)` is 2;
+  `%` is unchanged, and a comparison answers 0 or 1, which is what it already
+  reads. `+` FRAMES, and a framing has never applied to a result — it reaches
+  every quantity WRITTEN inside, so `|(+ 10 ([sum] 1 2 3))|` is 36, not 16. A
+  name is not written and so is not shifted: `|(+ 10 (= x 5 ($ x x)))|` is 30.
+  Nested framings accumulate without compounding. Quantities are integers and
+  rationals, never floats. `-` is available ONLY inside this boundary.
+- Text becomes quantity through a **crossing**, which is a mediator:
+  `([gematria] "text")`, `([length] "abc")`, `([lines] (? topic))`,
+  `([calls] <>)` for how many calls the run has made, `([atoms] <>)` for how
+  large the program is, `([count] a b c)` for how many branches there are
+  without reading them, `([abs] n)`, and `([round] n limit)` for the nearest
+  quantity whose denominator fits `limit`. A bare prompt inside `| |` is
+  REFUSED — pick a reading.
+- The crossing back OUT is interpolation: a `| |` block written inside a `$`
+  contributes its figures, so `($ "keep it under " |([product] 2 3)| " lines")`
+  asks for six. Nothing fires, so it costs no call.
+  A quantity crossing out is its decimal form and a numeral crossing back in
+  reads as itself, so `(= n |($ 2 3)| |($ n 1)|)` is 6.
+- `(* topic A)` is **supersede** — the one operation that corrects the record.
+  `A` runs and answers as usual; between the two, every line the topic reaches
+  DIRECTLY and that is older than this form is buried, so a later `?` on the
+  subject returns the correction rather than what it replaced. Without it a run
+  that changes its mind holds both beliefs, because only ties break toward the
+  newer line. It is a tombstone not a deletion (ids stay stable, the text stays
+  in the trace); it never buries its own correction; the topic is NOT broadened,
+  so it cannot evict a neighbour for co-occurring; a `nothing` buries nothing;
+  and what it buried is reported.
+- `(@ check A)` is an **invariant** over every arrow in `A`. After each stage
+  `check` receives both sides as `RESULT 1` and `RESULT 2` — the same transport
+  a square uses — and must answer exactly 0 or 1. It scopes like `+` — the whole subtree, any depth — but `+` rewords what
+  is asked and is free, while this ADDS A CALL at every arrow and can stop the
+  run. A
+  refusal STOPS the scope — the rest is skipped and it answers nothing — and
+  names the edge. Invariants do not apply inside their own check. Cost is one
+  check per arrow: a call each with a model judge, free through `std/seam`'s
+  port, nothing at all if the scope has no arrows.
+- `{A B ...}` is an **imaginary space** — a group in every respect but one:
+  what happens inside it does not become evidence. Operands run in source
+  order, the last one's answer is the space's answer, and only that answer is
+  appended to the record. Everything else the body produced is discarded when
+  the boundary closes. The boundary fires nothing, so `{A}` costs exactly what
+  `A` costs. Use it when a program must EXPLORE without the exploration
+  polluting what it remembers: six candidate routes leave six answers in the
+  record, and a later `?` on the subject returns the five dead ends ranked
+  against the one finding. Inside a space, memory works normally — a flashback
+  reaches what that space's own earlier stages answered — so multi-stage work
+  lives in one happily. Nesting is relative: an inner space's answer becomes
+  real to the space around it, and only the outermost crossing reaches the run.
+  `^` recurses through a space without touching the boundary. `{}` with nothing
+  in it is a syntax error.
+- `(! A)` **inside** a space keeps for the PLANE, not the run: it never reaches
+  the host's durable memory, but every space opened afterwards can recall it.
+  That is how a search remembers its own dead ends without recording them —
+  `{(! A) nothing}` learns something and leaves the record untouched. To keep
+  past the run, put the dream outside: `(! {...})` marks what crossed.
+- `<>` is **source** — the program itself, as syntax rather than as a string.
+  Rebis is homoiconic, so it needs no rules of its own: as a `$` or `?` operand
+  it contributes its canonical TEXT (like a macro's expanded text, without
+  firing); in an executable position it RUNS, which is genuine self-
+  application; inside a quote it is syntax. `($ "Improve this: " <>)` reads the
+  program; `("work" <>)` re-enters it. Reading costs nothing. Running has no
+  base case and spends the macro-expansion budget, exactly as a recursive macro
+  does — bound it with a gate. `<>` is punctuation, so it terminates a bare
+  word and cannot be bound away. A program that never writes `<>` is unchanged.
+- `(>< A B ...)` is **meta** — a prompt whose answer is a PROGRAM. The operands
+  interpolate to one prompt exactly as under `$`, it fires once, and the answer
+  is parsed as Rebis and RUNS — generating and running are one act, so under
+  `$` it contributes nothing and does not fire, like every executable form. To
+  review a program before paying for it, ask for source with an ordinary prompt
+  (that is text) and hand it out through `&`. It runs in the live definition
+  scope, so a
+  generated program may call the macros this one imported. Text that does not
+  parse is a diagnostic carrying what was written, never a silent skip. Charged
+  to the macro-expansion budget. Two warnings worth stating: what a generated
+  program costs cannot be read off the page, and a model's answer stops being
+  only data — under `><` it is executed. Execution is POSITIONAL, so wrap it to
+  control it: `{(>< ...)}` leaves no evidence, `(% gate (>< ...) fallback)`
+  runs it only if something accepted it. There is no destructuring, so macro
+  work means wrapping the generator, not transforming its output.
 - `($ A B ...)` is string composition — the one operator over the string value.
   It **interpolates** its operands into one string and yields that string;
   nothing inside `$` fires or runs. An operand contributes its text: a prompt its
@@ -36,16 +122,35 @@ language but follow the node prompt and return only its flow value.
   `$`. A text constant is just a macro whose body is a prompt — `(~ topic ()
   "the fall of Rome")`, used as `($ "Write on " (topic))`, weaves its text in
   without firing. To carry a model-*computed* value into a prompt, use `->`.
+- `(? A B ...)` is a **flashback** — the language's one read of memory, and its
+  one free form. It builds a topic exactly as `$` builds a string, then answers
+  with what the run's record already holds on that topic. **No model fires**, in
+  it or beneath it, and the recalled text is never appended back to the record.
+  Recall is TOPICAL, not addressed: the topic's content words are broadened one
+  hop through the record's co-occurrence graph, and the evidence lines they reach
+  come back strongest first, newest breaking a tie, at most eight. So `?` answers
+  "what has this run learned about X" — for the previous stage's exact value use
+  `->`, and for several values at once use `[M]`. A recall resolves where it
+  SITS, so two identical recalls answer differently once a stage between them has
+  added evidence: memory accumulates during a run. A topic the record holds
+  nothing on answers with `nothing`, which does not flow and adds no characters —
+  so a program degrades to its memoryless form rather than asserting a false
+  memory. Because recall is pure it interpolates inside `$`, which is how a
+  prompt is written around its own memory:
+  `($ "Given what we found: " (? "retry queue") " — now propose a fix.")`.
+  `(^ (? A))` is `(? A)`. See `std/memory` for the shapes built on it.
 - `(A B C)` is a group. Its executable children run in source order, but their
   answers do not automatically feed one another.
-- `(-> A B C)` is forward flow. `A` runs first; each accepted answer becomes an
+- `(-> A B C)` is forward flow, and needs AT LEAST TWO operands — an arrow is a
+  route between stages, so `(-> A)` is an error, not a wrapper. Write the bare
+  form when there is only one thing to run. `A` runs first; each accepted answer becomes an
   `INPUT:` to the next stage; the value is `C`.
 - `(<- A B)` is deliberately simple reverse-flow sugar and is exactly
   equivalent to `(-> B A)`. Do not assign adversarial or hidden semantics to it.
 - `(^ E)` is the pure syntax inverter. It recursively exchanges `->` and `<-`
   while preserving written operand order. Groups, squares, and quotes retain
   their structure; prompts, symbols, imports, macro definitions, and all of `$`
-  are fixed. A macro call expands before its resulting graph is inverted. It makes
+  or `?` are fixed. A macro call expands before its resulting graph is inverted. It makes
   no model call, and `(^ (^ E))` is exactly `E`. This is an orientation dual,
   not a semantic undo operation for natural-language prompts.
 - `([M] A B C)` is convergence. The branches run, absent answers and `nothing`
@@ -293,23 +398,53 @@ must return exactly `0` or `1`.
   done)
 ```
 
+## Example 8: a long program that does not forget its own beginning
+
+An arrow chain gives each stage only its predecessor's answer, so `(-> a b c)`
+leaves `a`'s finding two steps back and unreachable. `?` fixes that without a
+single extra model call: every stage recalls the whole record on the subject, and
+because a recall resolves where it sits, each one sees what the earlier stages
+added. The arrows here carry sequencing only.
+
+```rebis
+(# std/memory)
+
+(~ reproduce (subject) ($ "Reproduce the failure in " subject ". Report what you observed."))
+(~ diagnose  (subject) ($ "Give the mechanism behind " subject "."))
+(~ repair    (subject) ($ "Propose the smallest correct fix for " subject "."))
+
+(std-arc "the retry queue" reproduce diagnose repair)
+```
+
+Three calls — one per stage. `std-grounded` inside `std-arc` prefaces each
+prompt with the accumulated evidence, so `repair` reasons from what `reproduce`
+observed rather than re-deriving it. When a topic may have no memory yet, gate on
+it with `(std-recalled subject remembered forgotten)`: that costs one call for
+the gate and expands exactly one branch.
+
 ## Debugging checklist
 
 When correcting a Rebis program, check these before changing its design:
 
-1. Every `(` matches `)` and every mediator `<` matches `>`.
-2. A mediator is written inside a group: `([M] branch-a branch-b)`.
-3. Macro parameters occur as bare symbols, not as words inside quoted prompts.
-4. Higher-order macro calls use quote/unquote correctly: `(,worker ,value)`.
-5. Imported modules contain definitions/imports only; executable module bodies
+1. Every `->` and `<-` has at least two operands. A single-operand arrow is the
+   most common mistake: an arrow ROUTES between stages, so one stage is not an
+   arrow at all — write the form on its own.
+2. Every `(` matches `)`, and a mediator is written `[M]` — square brackets, never
+   angle brackets. `(<M> A B)` is NOT a syntax error: `<` is an ordinary symbol
+   character, so it silently parses as a call to a macro named `<` and fails later
+   with something unrelated.
+3. A mediator is written inside a group: `([M] branch-a branch-b)`.
+4. Macro parameters occur as bare symbols, not as words inside quoted prompts.
+5. Higher-order macro calls use quote/unquote correctly: `(,worker ,value)`.
+6. Imported modules contain definitions/imports only; executable module bodies
    are rejected.
-6. A `%` classifier returns exactly `0` or `1`.
-7. Repeated macro parameters intentionally repeat model work.
-8. `<-` has only reverse-flow semantics; rewrite it as `->` when direction is
+7. A `%` classifier returns exactly `0` or `1`.
+8. Repeated macro parameters intentionally repeat model work.
+9. `<-` has only reverse-flow semantics; rewrite it as `->` when direction is
    unclear.
-9. A model suffix is adjacent to a closing quote or `)` and names a Kaos model;
+10. A model suffix is adjacent to a closing quote or `)` and names a Kaos model;
    whitespace before `/` does not bind it.
-10. Use `/format` or `/tree` to validate structure before spending live model
+11. Use `/format` or `/tree` to validate structure before spending live model
    calls. `kaos rebis run --dry` also expands and traces model-free shapes, but
    a model-driven `%` gate will intentionally report no decision when its dry
    oracle returns `nothing`.

@@ -7,7 +7,11 @@ binary gate that evaluates only `A` or `B` from an exact `1`/`0` decision.
 `($ ...)` interpolates a string from
 the text of its operands (nothing inside it fires); standard control macros use
 that form to tell a decision prompt to reply with exactly one `0` or `1`
-token. Variables are macro parameters, and a text constant is simply a macro
+token. `(? ...)` builds a topic the same way and answers it from the run's own
+record instead of firing a model — a **flashback**, the language's one read of
+memory and its one free form. It is topical rather than addressed: it returns
+what the run has learned about a subject, where an arrow returns the previous
+stage's exact value. Variables are macro parameters, and a text constant is simply a macro
 whose body is a prompt.
 `(^ E)` purely dualizes syntax orientation by recursively exchanging `->` and
 `<-`; it makes no model call and applying it twice returns `E`.
@@ -103,11 +107,17 @@ requested file edits and commands after the run-level authority gate — a nativ
 Claude agent when the selected model is the Claude CLI, a single node-scoped
 Conductor agent on every other backend. A postfix selector chooses that same
 execution path with its local model for every prompt beneath it. `/chaos on`
-gives each prompt a full
-Kaos pipeline agent instead; `/chaos off` returns to direct mode. The
-non-interactive CLI is completion-only by default: `--allow-tools` enables
-direct tool agents, and adding `--chaos` selects the pipeline. `--dry` performs
-no model work and needs no permission.
+gives each prompt a full Kaos pipeline agent instead; `/chaos off` returns to
+direct mode. The non-interactive CLI is completion-only by default:
+`--allow-tools` enables direct tool agents, and adding `--chaos` selects the
+pipeline. `--dry` performs no model work and needs no permission.
+
+`/chaos` is no longer a setting on runs alone. It is one stance the host adopts,
+and it also changes what a **chat** is: in chaos mode a typed line is composed
+into a Rebis program rather than answered, and the program is registered as a
+queued run. The reason is cost readability — a program states its price on the
+page, an agent discovers it by running. `KAOS_CHAOS = true` in the config makes
+the stance the default, and every child process inherits it.
 
 Open the integrated editor directly with `kaos rebis edit <file>`, or enter
 `/rebis <file>` at the main Kaos command line. It supports paired `()` and `[]`,
@@ -117,7 +127,8 @@ repeats the previous query. Press `Ctrl-K` for Kaos commands such as `/search`,
 `/format`, `/run`, `/tree`, and `/mandala`. Vim `:` remains
 reserved for `:w`, `:e`, `:q`, `:q!`, and `:wq`.
 The top bar shows the complete Rebis punctuation set horizontally—symbols only:
-`( ) [ ] ~ # ' , $ % & ^ / -> <- ; "`. Structural operators and delimiters use one shared
+`( ) [ ] { } | ~ # ' , $ ? ! * = & &: + @ / % ^ <> >< -> <- ; "`. Structural operators
+and delimiters use one shared
 operator color in both that legend and source text.
 Semicolons begin line comments only outside quoted prompts. Inside `"..."`, a
 semicolon is ordinary prompt text, including in multiline strings and after an
@@ -162,6 +173,45 @@ current one lands. Several of them go out together as one turn, in the order
 they were written. Nothing queued is in the transcript until it is actually
 asked.
 
+A chat can also work in the library directly. Given a sigil toolset, it reads
+and edits sigils by emitting the same `<act>` blocks the Rebis conductor uses:
+
+```text
+<act tool="sigil_list"><arg name="query">repair</arg></act>
+<act tool="sigil_read"><arg name="name">team/reviews</arg></act>
+<act tool="sigil_edit"><arg name="name">team/reviews</arg>
+  <arg name="find">exact text</arg><arg name="replace">new text</arg></act>
+<act tool="sigil_write"><arg name="name">team/reviews</arg>
+  <arg name="source">(complete Rebis program)</arg></act>
+```
+
+Three rules hold, and they are the whole safety story.
+
+**Everything in the catalog is readable** — the embedded `std/` modules and the
+vendored collection included, because a model asked to improve a sigil should
+be able to read what it imports.
+
+**Only personal sigils are writable.** `std/` and the collection are read-only
+and a write there is refused by name, rather than failing in a way that reads
+like a bug.
+
+**A write must parse as Rebis first.** This is the rule with teeth. Kaos will
+save unparseable source for a person — a half-finished edit is a legitimate
+thing to keep, and the editor shows the error — but a model writing into the
+library unattended is different: an unparseable sigil is one that can never be
+imported, and it would fail later, in whichever program merely mentions it. The
+parse error goes back to the model instead, and nothing is written.
+
+`sigil_edit` replaces one exact passage and requires it to appear **exactly
+once**: a passage that matches twice is refused rather than guessed at, and one
+that matches nothing is reported rather than silently doing nothing. A refused
+edit leaves the sigil byte-for-byte unchanged. Prefer it to `sigil_write` when
+changing part of a sigil — rewriting a whole file is where parts get dropped.
+
+Every outcome, including every refusal, is reported back to the model in the
+next turn. A chat that failed silently would have the model assume its edit
+landed.
+
 `/sigil chat` is distinct from ordinary `/chat`: it does not suspend the Rebis
 workspace. It opens a durable God Agent transcript in the right panel and binds
 to the selected unfinished run (or the newest unfinished run when the selection
@@ -202,7 +252,7 @@ the folders that contain matches. The source editor stays visible while
 results occupy the scrollable visualization panel.
 
 The embedded standard library appears as the `std` folder. Expand it (Tab, or
-`/sigils std/`) to see its twenty-two modules, then Enter (or
+`/sigils std/`) to see its twenty-six modules, then Enter (or
 `/sigil open std/spread`) loads one into the editor as a copy — its inline
 comments are the documentation, and they carry a contract for every parameter,
 a cost note, and an example per macro. The `std/` name itself stays read-only:
@@ -222,7 +272,7 @@ top-level `~` definitions without executing the module:
 
 Kaos resolves `(# repair-tools)` from
 `~/.kaos/sigils/repair-tools.rebis`. Qualified paths such as `std/loops` are
-supported by the same mechanism. `(# std)` imports all twenty-two embedded
+supported by the same mechanism. `(# std)` imports all twenty-six embedded
 standard-library modules; `(# std/flow)` still imports only that exact module.
 Modules may contain only top-level macro definitions and nested `#` imports;
 missing modules, cycles, parse failures, and executable module bodies are
@@ -299,6 +349,21 @@ Kaos keeps functions inside the whiteboard `o-[]-o` visual alphabet:
 (f …)            expanded macro call — a circle marked with the callee's name
 (& port …)       input port — a circle marked `& port`
 (^ …)            syntax inverter — a circle marked `^`
+{ }              an imaginary space — a box whose four sides are each drawn as
+                 a brace curve, so a boundary at a glance and a DIFFERENT
+                 boundary on a second look
+<>               the program itself — its own glyph, an at-shaped ring
+(>< …)           meta, a prompt whose answer is a program — a circle marked
+                 `><`
+{ … }            an imaginary space — a brace-box whose ends meet, drawn
+                 dash-dotted: its working is real while it runs and leaves no
+                 evidence behind, so it is not part of the finished object
+| … |            the numeric plane — a boundary at the opposite pole, drawn as
+                 the other circle; selected, it is red rather than blue
+(* topic …)      supersede — a circle marked `*`, holding the topic it corrects
+                 and the work that corrects it
+(@ check …)      an invariant over every arrow inside — a circle marked `@`,
+                 holding the rule and the scope it holds over
 (-> A B)         answer flow — a plain untitled circle around the two forms it
                  routes between, with the arrow drawn between them inside it
 ```
@@ -355,18 +420,18 @@ and every branch. Nested boundaries retain their nearer content.
 
 The only link tool is blue `connect flow`. Click one circle/square block and
 then another to create one real `Forward(A, B)` expression node; reversing the
-direction loads and writes one explicit `Backflow` node. A loose triangle or
-hexagon/sigil is not a flow endpoint, so drawn arrows occur only between
-indentation blocks. Coordinates, scale, movement within one boundary, panning,
+direction loads and writes one explicit `Backflow` node. A loose hexagon or sigil
+is not a flow endpoint, so drawn arrows occur only between indentation blocks. Coordinates, scale, movement within one boundary, panning,
 marquee bounds, camera projection, and 3D piece offsets remain presentation.
 
 A mediator square is the one form drawn as a box. It grows around its mediator
 and branches. Circle and square boundaries carry no interior `( )` or `[ ]`
 caption; their outlines already express indentation. Every standalone symbol
 can also be scaled by hand: hovering reveals a green dashed scale outline, and
-dragging that outline changes its stored half-extents. Holding **space** turns the pointer into a hand: drag anywhere, over a form or
-not, and the view moves instead of the drawing. Dragging with the **middle
-button** does the same without touching the keyboard.
+dragging that outline changes its stored half-extents. The **drag** tool in the palette turns the pointer into a hand: with it chosen,
+dragging anywhere — over a form or not — moves the view instead of the drawing,
+and a click does nothing. Dragging with the **middle button** does the same
+without changing tool.
 
 The grab band is a fixed number of pixels wide, so a wall is equally reachable
 at every zoom, and the centre stays put. Only the square sizes its two walls
@@ -408,10 +473,10 @@ editable. Nothing is lost by that: it is a smaller view of text that is still
 there, one click away. Sizing a form's complete payload to its own outline is
 what made its text grow with the form until it covered what was nested inside.
 Labels and outlines are therefore sized by the view, not by how much a boundary
-encloses. The implicit
-`program` form is a quiet triangle whose `program` label appears only while it
-is selected. `$`, `~`, `#`, `'`, `,`, `^`, and `%` appear as their own marks
-rather than circles.
+encloses. The implicit `program` form is drawn as the compose it is — the language
+draws no distinction between them, and nothing tells them apart but position: a
+program is the boundary nothing else holds. `$`, `?`, `~`, `#`, `'`, `,`, `^`, and
+`%` appear as their own marks rather than circles.
 
 Drawing parsed source lays the syntax tree out as a left-to-right circuit:
 nesting depth is the column, so a form sits one column left of its operands,
@@ -481,8 +546,8 @@ the complete 2D mandala to one A4 page. Export uses vector paths and embedded
 text rather than a screenshot, fits the whole drawing independently of the
 current pan/zoom, and preserves the active theme, resized geometry, nesting
 paint order, full fitted captions, model bindings, and each operator's straight
-or right-angle route. The static program triangle remains anonymous, matching
-its unselected canvas state.
+or right-angle route. The program's own circle remains unnamed, matching its canvas
+state.
 
 ### Structural 3D projection
 
