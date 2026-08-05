@@ -990,3 +990,77 @@ regime the theory predicted — a weak model in its mid-band, strong gate — an
 substantially (2.5x). One model, one bench (9 bugs); a real, reproducible,
 pre-registered datapoint, not a broad claim. The kept nulls stand; this is a
 kept positive, bounded to its regime.
+
+## Abstention: a feature that will make every accuracy number look worse
+
+**Registered before it was built, because it is a trade rather than an
+improvement, and a trade registered afterwards is a rationalisation.**
+
+Until now the harness had two outcomes: it shipped an answer, or it failed.
+`grep -rn "abstain"` returned nothing. A run that could not verify its work
+shipped it anyway, and a run whose gate refused every candidate reported the
+same thing as a run whose model never answered.
+
+That is the wrong shape, and the reason is measured rather than aesthetic. From
+the agi-testing work: **the Lean gate's win was soundness — 0 false ships, and
+abstentions — not accuracy.** The gate did not make the model better at maths.
+It made the harness unable to claim something it had not checked. That is the
+result, and the harness did not implement it.
+
+### The third outcome
+
+```rust
+pub enum Outcome {
+    Shipped   { answer: String, gate: Verified },
+    Failed    { error: String },
+    Abstained { work: String, why: String },
+}
+```
+
+An abstention is **not a failure**. The work was done, it is retained, and the
+gate did not pass it. Folding it into either neighbour destroys the only
+distinction that matters:
+
+- folded into **failure**, a verified-negative looks like a crash, and a run
+  that correctly refused to ship a wrong answer is indistinguishable from one
+  that fell over;
+- folded into **success**, it is a **false ship** — an answer presented as
+  though something had agreed with it. This is the outcome the whole feature
+  exists to make impossible.
+
+### The criterion, and what it costs
+
+**Zero false ships on a corpus of seeded defects where the gate cannot pass.**
+That is the acceptance criterion. **Accuracy is explicitly not**, and every
+accuracy metric will get worse: runs that previously reported an answer will now
+report an abstention, and any scoreboard that counts abstentions as misses will
+show a drop.
+
+That drop is the feature working. A harness that abstains scores lower and lies
+less, and the measured lesson from the Lean gate is that the second is what the
+gate was buying all along. Anyone comparing a post-abstention number against a
+pre-abstention one is comparing two different questions.
+
+**What is NOT claimed:** that abstention improves accuracy, that it improves
+pass@k, or that it makes a model better at anything. It does not. It changes
+what the harness is willing to say it knows.
+
+## A5: the Rebis/Rust conclave boundary
+
+The conclave now exists on both sides of the language boundary, deliberately.
+`/conclave` runs `kaos::solve::RebisConclave`: the written Rebis program owns
+the fan-out and host mediators, while `KAOS_AGENTIC` chooses whether each leaf
+is a sampled answer or a full isolated tool-using session. `/code xK` retains
+the Rust `conductor::run_conclave` path, whose unit is a verified coding diff.
+
+These are adjacent capabilities, not interchangeable benchmarks. A Rebis leaf
+returns an answer or patch through an `Oracle`; a coding adept runs a
+multi-step conductor over an isolated workspace and is weighed against a test
+command. Replacing the latter with the former without a shared live AIME/code
+benchmark would erase the measured verification boundary rather than prove an
+equivalent result.
+
+So the safe A5 decision is **beside, not instead**: the Rebis path is shipped
+and selectable, the Rust coding path is untouched, and no parity claim is made.
+The local Ollama endpoint is unavailable for the live comparison requested by
+the plan; a future parity run must happen before either path is removed.

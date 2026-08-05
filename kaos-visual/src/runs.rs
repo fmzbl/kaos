@@ -542,6 +542,16 @@ impl Desk {
                 if code == 0 {
                     run.state = State::Complete;
                     run.output.push("complete    ✓ run finished".to_string());
+                } else if code == kaos_core::outcome::ABSTAINED_EXIT {
+                    // A run that abstained FINISHED. Falling into the branch
+                    // below would pause it as though the process had fallen
+                    // over, and offer to retry work that was already done and
+                    // already judged — reporting a sound refusal as a crash,
+                    // which is the confusion the separate exit code exists to
+                    // prevent.
+                    run.state = State::Abstained;
+                    run.output
+                        .push("abstained   ⊘ the work is done and the gate refused it".to_string());
                 } else {
                     // Match terminal recovery semantics: a non-success exit is
                     // inspectable and resumable rather than silently becoming

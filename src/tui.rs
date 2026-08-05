@@ -1383,9 +1383,15 @@ impl App {
         let now = Instant::now();
         let already_started = matches!(
             state,
-            RebisRunState::Running | RebisRunState::Complete | RebisRunState::Cancelled
+            RebisRunState::Running
+                | RebisRunState::Complete
+                | RebisRunState::Abstained
+                | RebisRunState::Cancelled
         );
-        let already_finished = matches!(state, RebisRunState::Complete | RebisRunState::Cancelled);
+        let already_finished = matches!(
+            state,
+            RebisRunState::Complete | RebisRunState::Abstained | RebisRunState::Cancelled
+        );
         let workspace = if self.config_editor {
             self.config_return_rebis
                 .as_ref()
@@ -1593,6 +1599,9 @@ impl App {
                 }
                 RebisRunState::Complete => {
                     "complete · Tab stream · ↑/↓ scroll · ⇧↑ top · ⇧↓ tail · Pg scroll · u/Delete removes"
+                }
+                RebisRunState::Abstained => {
+                    "abstained · the work is done and the gate refused it · Tab stream · u/Delete removes"
                 }
                 RebisRunState::Cancelled => {
                     "cancelled · Tab stream · ↑/↓ scroll · ⇧↑ top · ⇧↓ tail · Pg scroll · u/Delete removes"
@@ -2719,10 +2728,19 @@ impl App {
                     run.saved_checkpoint_path.clone()?,
                 ))
             });
+        let terminal = matches!(code, 0 | kaos_core::outcome::ABSTAINED_EXIT);
         if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == run_id) {
-            if code == 0 {
+            // An abstention is a run that FINISHED. Treating a non-zero exit as
+            // "the child stopped unexpectedly" would report the one outcome this
+            // exists to distinguish as a crash — which is the exact confusion
+            // `kaos_core::outcome` gives it a separate exit code to prevent.
+            if terminal {
                 finish_rebis_run_clock(run);
-                run.state = RebisRunState::Complete;
+                run.state = if code == 0 {
+                    RebisRunState::Complete
+                } else {
+                    RebisRunState::Abstained
+                };
                 let _ = std::fs::remove_file(&run.checkpoint_path);
                 let _ = std::fs::remove_file(&run.directive_path);
             } else {
@@ -2733,7 +2751,7 @@ impl App {
                 ));
             }
         }
-        if code == 0 {
+        if terminal {
             if let Some((run_path, checkpoint_path)) = saved_paths {
                 let _ = std::fs::remove_file(run_path);
                 let _ = std::fs::remove_file(checkpoint_path);
@@ -2743,8 +2761,8 @@ impl App {
         }
         if !parallel {
             if let Some(workspace) = self.background_rebis_workspace() {
-                if code == 0 {
-                    workspace.finish_run(0);
+                if terminal {
+                    workspace.finish_run(code);
                 } else {
                     workspace.pause_run(&format!(
                         "child stopped unexpectedly ({code}) · p retries the unfinished prompt"
@@ -6328,7 +6346,7 @@ fn rebis_run_timer(run: &RebisRunEntry) -> String {
             "TIME {}",
             format_run_duration(active_rebis_run_elapsed(run))
         ),
-        RebisRunState::Complete | RebisRunState::Cancelled => {
+        RebisRunState::Complete | RebisRunState::Abstained | RebisRunState::Cancelled => {
             let duration = run
                 .elapsed
                 .unwrap_or_else(|| run.started_at.unwrap_or(run.queued_at).elapsed());
@@ -6756,6 +6774,9 @@ fn draw_rebis_workspace(
                             RebisRunState::Running if run.entry.paused => "Ⅱ PAUSED".to_string(),
                             RebisRunState::Running => "● RUNNING".to_string(),
                             RebisRunState::Complete => "✓ DONE".to_string(),
+                            // Its own mark. A tick would say it shipped and a
+                            // cross would say it broke; it did neither.
+                            RebisRunState::Abstained => "⊘ ABSTAINED".to_string(),
                             RebisRunState::Cancelled => "× CANCELLED".to_string(),
                         };
                         let state_tone = match run.entry.state {
@@ -6763,6 +6784,9 @@ fn draw_rebis_workspace(
                             RebisRunState::Queued => C_OX(),
                             RebisRunState::Running if run.entry.paused => C_SECONDARY(),
                             RebisRunState::Running | RebisRunState::Complete => C_ACCENT(),
+                            // Neither the accent of a shipped run nor the danger
+                            // of a broken one, because it is neither.
+                            RebisRunState::Abstained => C_SECONDARY(),
                             RebisRunState::Cancelled => C_DANGER(),
                         };
                         let timer = rebis_run_timer(run.entry);

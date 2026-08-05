@@ -26,12 +26,23 @@ pub enum State {
     Queued,
     Running,
     Complete,
+    /// The run did the work and its gate would not pass it.
+    ///
+    /// Its own state rather than a flavour of `Complete` or of `Cancelled`,
+    /// because those are the two things it must not be mistaken for: shipped, or
+    /// crashed. See [`crate::outcome`] for why the distinction is the feature.
+    Abstained,
     Cancelled,
 }
 
 impl State {
     pub const fn terminal(self) -> bool {
-        matches!(self, Self::Complete | Self::Cancelled)
+        matches!(self, Self::Complete | Self::Abstained | Self::Cancelled)
+    }
+
+    /// Whether this run declined to stand behind its work.
+    pub const fn abstained(self) -> bool {
+        matches!(self, Self::Abstained)
     }
 
     pub const fn label(self, paused: bool) -> &'static str {
@@ -41,6 +52,7 @@ impl State {
             (Self::Running, true) => "PAUSED",
             (Self::Running, false) => "RUNNING",
             (Self::Complete, _) => "DONE",
+            (Self::Abstained, _) => "ABSTAINED",
             (Self::Cancelled, _) => "CANCELLED",
         }
     }
@@ -202,9 +214,18 @@ mod tests {
     #[test]
     fn only_finished_states_are_terminal() {
         assert!(State::Complete.terminal());
+        assert!(State::Abstained.terminal());
         assert!(State::Cancelled.terminal());
         assert!(!State::Queued.terminal());
         assert!(!State::Running.terminal());
+    }
+
+    #[test]
+    fn abstention_has_its_own_label_and_is_not_a_cancellation() {
+        assert_eq!(State::Abstained.label(false), "ABSTAINED");
+        assert!(State::Abstained.abstained());
+        assert!(!State::Complete.abstained());
+        assert!(!State::Cancelled.abstained());
     }
 
     #[test]

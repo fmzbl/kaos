@@ -4844,10 +4844,12 @@ impl Workspace {
         if code == 0 {
             self.saved_output.clone_from(&self.final_output);
         }
-        self.message = if code == 0 {
-            "Rebis run complete · output retained with this sigil".to_string()
-        } else {
-            format!("Rebis run exited ({code})")
+        self.message = match code {
+            0 => "Rebis run complete · output retained with this sigil".to_string(),
+            kaos_core::outcome::ABSTAINED_EXIT => {
+                "Rebis run abstained · work retained, gate refused it".to_string()
+            }
+            _ => format!("Rebis run exited ({code})"),
         };
     }
 

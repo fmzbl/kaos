@@ -21,6 +21,7 @@ use kaos::rite::{perform, Levers, Rite};
 use kaos::rng::{hash_str, Rng};
 use kaos::sigil::{statement_of_intent, Sigil};
 use kaos::theme::*;
+use kaos_core::outcome::Outcome;
 
 /// Session state carried across turns: the Pact (whose grades and egregore evolve),
 /// the summoned mind, and the running seed.
@@ -260,7 +261,11 @@ fn run() {
         "auth" | "login" => auth_cmd(&rest),
         "scry" => scry(&rest),
         "roster" => print_roster(&session.pact),
-        "conclave" => conclave(&session, &rest),
+        "conclave" => {
+            if let Some(outcome) = conclave(&session, &rest) {
+                exit_for_outcome(&outcome);
+            }
+        }
         "rebis" => rebis_cmd(&session, &rest),
         "visual" => visual_cmd(&rest),
         "edit" => rebis_screen(&rest),
@@ -323,7 +328,9 @@ fn dispatch(session: &mut Session, line: &str) -> bool {
             "auth" | "login" => auth_cmd(arg),
             "scry" => scry(arg),
             "roster" | "pact" => print_roster(&session.pact),
-            "conclave" => conclave(session, arg),
+            "conclave" => {
+                let _ = conclave(session, arg);
+            }
             "rebis" => rebis_screen(arg),
             // Legacy evaluator compatibility; Rebis is the user-facing language.
             "myth" => myth_screen(session),
@@ -665,13 +672,13 @@ fn auth_cmd(arg: &str) {
 
 /// /conclave <task> — run the default myth (a voted best-of-k) on the bound
 /// mind. Override the myth with `KAOS_MYTH="(gather vote (spread 8 fire))"`.
-fn conclave(session: &Session, task: &str) {
+fn conclave(session: &Session, task: &str) -> Option<Outcome> {
     if task.is_empty() {
         println!(
             "{}",
             ash("conclave for what? /conclave what is 12! mod 1000")
         );
-        return;
+        return None;
     }
     let ray = Ray::classify(task);
     println!();
@@ -683,7 +690,7 @@ fn conclave(session: &Session, task: &str) {
     );
     if session.model.kind == Kind::Simulated {
         println!("  {}", ash("bind a live mind with /model to run."));
-        return;
+        return None;
     }
     let k = std::env::var("KAOS_K")
         .ok()
@@ -697,7 +704,7 @@ fn conclave(session: &Session, task: &str) {
         let branches = vec!["($ task)"; k].join(" ");
         format!("(= task (&) ([vote] {branches}))")
     });
-    run_myth(session, &sexpr, task);
+    run_myth(session, &sexpr, task)
 }
 
 /// Run a composition on the bound mind, printing it and the collapsed verdict.
@@ -707,7 +714,7 @@ fn conclave(session: &Session, task: &str) {
 /// one release: it is recognised by its own grammar — five closed forms, none of
 /// which is a Rebis operator — translated on read, and the replacement is
 /// printed so the value in a user's config can be updated once and forgotten.
-fn run_myth(session: &Session, sexpr: &str, task: &str) {
+fn run_myth(session: &Session, sexpr: &str, task: &str) -> Option<Outcome> {
     // Myth first, because its grammar is the closed one: `fire`, `ask`,
     // `spread`, `gather`, `pipe` and nothing else. Anything it refuses is
     // Rebis's, which is the right way round — Rebis would happily PARSE
@@ -731,16 +738,16 @@ fn run_myth(session: &Session, sexpr: &str, task: &str) {
             }
             Err(why) => {
                 println!("  {} {}", fg(GREEN(), "\u{2734} myth:"), ash(&why));
-                return;
+                return None;
             }
         }
     }
-    run_rebis_composition(session, sexpr, task);
+    run_rebis_composition(session, sexpr, task)
 }
 
 /// Run a Rebis composition as a conclave: `(&)` obtains the task, the leaves
 /// fire it, and the mediators Kaos claims decide.
-fn run_rebis_composition(session: &Session, source: &str, task: &str) {
+fn run_rebis_composition(session: &Session, source: &str, task: &str) -> Option<Outcome> {
     let expr = match rebis_lang::parse(source) {
         Ok(expr) => expr,
         Err(error) => {
@@ -749,7 +756,7 @@ fn run_rebis_composition(session: &Session, source: &str, task: &str) {
                 fg(GREEN(), "\u{2734} rebis:"),
                 ash(&error.to_string())
             );
-            return;
+            return None;
         }
     };
     if let Err(error) = session.model.readiness() {
@@ -758,7 +765,7 @@ fn run_rebis_composition(session: &Session, source: &str, task: &str) {
             fg(RED(), "\u{2734} the mind is unreachable \u{2014}"),
             ash(&error)
         );
-        return;
+        return None;
     }
     println!("{}", rule(64));
     println!("  {}  {}", bold(GREEN(), "conclave"), dim(ASH(), source));
@@ -817,7 +824,7 @@ fn run_rebis_composition(session: &Session, source: &str, task: &str) {
             authorised: allow_tools,
         }));
         let conclave = kaos::solve::RebisConclave::new(&cast, mediators);
-        return finish_conclave(&expr, &conclave, task);
+        return Some(finish_conclave(&expr, &conclave, task));
     }
 
     let cast = kaos::solve::ChatCast {
@@ -828,7 +835,7 @@ fn run_rebis_composition(session: &Session, source: &str, task: &str) {
         &cast,
         kaos_agent::gate::Mediators::standard(gate, gate_timeout, allow_tools),
     );
-    finish_conclave(&expr, &conclave, task);
+    Some(finish_conclave(&expr, &conclave, task))
 }
 
 /// Run a prepared conclave and report its one outcome of three.
@@ -836,7 +843,7 @@ fn finish_conclave<C: kaos::myth::Cast>(
     expr: &rebis_lang::Expr,
     conclave: &kaos::solve::RebisConclave<'_, C>,
     task: String,
-) {
+) -> Outcome {
     let mut record = rebis_lang::Record::from_texts::<&str>(&[]);
     let result = rebis_lang::orchestrate_with_inlet(
         expr,
@@ -858,25 +865,53 @@ fn finish_conclave<C: kaos::myth::Cast>(
             ash(&diagnostic.to_string())
         );
     }
-    match result.output {
-        Some(answer) => println!(
-            "  {} {}",
-            bold(GREEN(), "\u{25c9} verdict"),
-            bone(&kaos::solve::render_verdict(&answer))
-        ),
-        // Three outcomes, not two, and the trace already says which. A gate that
-        // refused is not the same event as every branch fizzling, and reporting
-        // them alike is what D1 exists to stop.
-        None => println!(
+    // Three outcomes, not two. A gate that refused is not the same event as a
+    // model that never answered, and reporting them alike is exactly what this
+    // exists to stop — see `kaos_core::outcome` and `docs/EDGE.md`.
+    let gate = setting("KAOS_GATE").unwrap_or_default();
+    let outcome = kaos_core::outcome::of_run(&result, &gate);
+    match &outcome {
+        Outcome::Shipped { answer, gate } => {
+            println!(
+                "  {} {}",
+                bold(GREEN(), "\u{25c9} verdict"),
+                bone(&kaos::solve::render_verdict(&answer))
+            );
+            println!("  {}", ash(&gate.summary()));
+        }
+        // The work is shown, because a person deciding what to do next needs to
+        // see it. It is shown UNDER the abstention rather than as the answer,
+        // which is the difference between reporting an attempt and shipping one.
+        Outcome::Abstained { work, why } => {
+            println!(
+                "  {}  {}",
+                fg(RED(), "\u{2734} abstained"),
+                ash(&format!("{why} \u{00b7} {} firings", conclave.firings()))
+            );
+            if !work.trim().is_empty() {
+                println!("  {}", dim(ASH(), "what it produced, unverified:"));
+                for line in kaos::solve::render_verdict(&work).lines() {
+                    println!("  {}", dim(ASH(), line));
+                }
+            }
+        }
+        Outcome::Failed { error } => println!(
             "  {}  {}",
             fg(RED(), "\u{2734} no verdict"),
-            ash(&format!(
-                "{} firings, and nothing survived the mediator",
-                conclave.firings()
-            ))
+            ash(&format!("{error} \u{00b7} {} firings", conclave.firings()))
         ),
     }
     println!("{}", rule(64));
+    outcome
+}
+
+/// Apply a one-shot conclave outcome without terminating the interactive REPL,
+/// whose caller deliberately ignores this return value.
+fn exit_for_outcome(outcome: &Outcome) {
+    let code = outcome.exit_code();
+    if code != 0 {
+        std::process::exit(code);
+    }
 }
 
 /// Open KAOS's Rebis model-interface workspace. In a terminal this is the native
@@ -991,7 +1026,9 @@ fn myth_screen(session: &Session) {
         }
     };
     match input.read(&format!("  {} ", fg(GREEN(), "task \u{25b8}"))) {
-        kaos::input::Line::Text(t) if !t.trim().is_empty() => run_myth(session, &sexpr, t.trim()),
+        kaos::input::Line::Text(t) if !t.trim().is_empty() => {
+            let _ = run_myth(session, &sexpr, t.trim());
+        }
         _ => {}
     }
 }
@@ -2332,13 +2369,38 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             .join(" ")
     );
     println!("evidence {} line(s)", result.concept.evidence.len());
+
+    // The outcome, named. A gate that refused is not the same event as a model
+    // that never answered, and a script has the same right to tell them apart
+    // that a person does — see `kaos_core::outcome` and `docs/EDGE.md`.
+    let outcome = kaos_core::outcome::of_run(&result, &setting("KAOS_GATE").unwrap_or_default());
+    println!("OUTCOME");
+    println!("outcome  {} · {}", outcome.label(), outcome.summary());
+    if outcome.is_abstention() {
+        // The work is reported, and it is reported as work rather than as the
+        // result — `RESULT` above says `nothing`, which is the point.
+        if let Some(work) = outcome.work().filter(|work| !work.trim().is_empty()) {
+            for line in work.lines() {
+                println!("unverified {line}");
+            }
+        }
+    }
     if !result.diagnostics.is_empty() {
         println!("DIAGNOSTICS");
         for diagnostic in &result.diagnostics {
             println!("diagnostic {diagnostic}");
         }
-        let _ = std::io::stdout().flush();
-        std::process::exit(3);
+    }
+    let _ = std::io::stdout().flush();
+    let exit_code = if !result.diagnostics.is_empty() {
+        // Unchanged: a run that reported diagnostics has always exited 3, and a
+        // caller depending on that keeps working.
+        3
+    } else {
+        outcome.exit_code()
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 }
 

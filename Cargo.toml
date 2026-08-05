@@ -32,15 +32,6 @@ members = [
 [workspace.dependencies]
 rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
 
-# TEMPORARY — remove once the `!` dream commit is pushed to the rebis remote.
-# Kaos takes the language from git so a clone of Kaos alone builds; while a
-# language change is still local, this points the same dependency at the
-# working copy so both halves can be built and tested together. `cargo build`
-# fails loudly if the path is missing, so this cannot silently become the
-# permanent arrangement — but it MUST come out before pushing Kaos.
-[patch."https://github.com/fmzbl/rebis.git"]
-rebis-lang = { path = "../rebis" }
-
 [dependencies]
 # The fullscreen TUI. ratatui draws it, crossterm is the terminal backend, and
 # ansi-to-tui renders the themed ANSI that command subprocesses emit into styled

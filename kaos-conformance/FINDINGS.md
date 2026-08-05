@@ -139,20 +139,18 @@ that can tell a cost model it is wrong.
 Being exact, because the difference matters and it would be easy to imply
 otherwise.
 
-**Nothing here has been confirmed against a live model.** The machine's ollama
-server was saturated for the whole session (#2), so no program completed a run.
-Every `.rebis` program parses, and the runner and its expectation vocabulary
-work — but the column that says `ok (2 calls)` has not been seen for a single
-program yet.
+The 75/75 result above **is** a live-model run, but it is bounded evidence:
+`llama3.2:3b`, commit `1d35433`, and the default non-generation corpus. It does
+not prove the originally requested qwen3-32b result, the current HEAD, or the
+optional generation program. Those are separate measurements, not reasons to
+rewrite the green result.
 
-What *is* proved, by 273 rebis tests and 712 Kaos tests, is the runtime under a
-scripted oracle: every operator's call count, transport, laziness, and
-diagnostics. That is not nothing, and it is also not what this suite is for.
-The gap between those two is exactly where finding #1 lived — visible only when
-a real request is assembled — which is the argument for running this the moment
-the machine is free.
+What is also proved, by the in-process Rebis and Kaos tests, is the runtime
+under a scripted oracle: every operator's call count, transport, laziness, and
+diagnostics. That is not nothing, and it is also not a substitute for a live
+model run.
 
-**To finish it:**
+**To complete the original qwen3 acceptance:**
 
 ```bash
 sudo systemctl restart ollama

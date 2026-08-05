@@ -2542,6 +2542,10 @@ fn run_state_tone(state: runs::State, paused: bool, k: Ink) -> Color32 {
         (runs::State::Complete, _) | (runs::State::Running, false) => k.accent,
         (runs::State::AwaitingPermission, _) | (runs::State::Running, true) => k.secondary,
         (runs::State::Cancelled, _) => k.danger,
+        // Its own colour, and deliberately neither of its neighbours': not the
+        // accent a completed run gets, because nothing was shipped, and not the
+        // danger a cancelled one gets, because nothing went wrong.
+        (runs::State::Abstained, _) => k.secondary,
         (runs::State::Queued, _) => k.faint,
     }
 }

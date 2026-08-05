@@ -1,6 +1,17 @@
-# Everything still open
+# Harness plan — status reconciled
 
-One plan across both repositories. It exists because five separate threads are
+Status as of 2026-08-05:
+
+- **Complete:** A1–A4, B1–B4, C1–C3, D1–D3, and E2–E3.
+- **Complete with bounded evidence:** D4 has a recorded 75/75 live run on
+  `ollama:llama3.2:3b` at `1d35433`; the originally requested qwen3 rerun is
+  still unavailable in this workspace.
+- **Deferred safely:** A5 keeps the Rust coding conclave and ships the Rebis
+  conclave beside it; no unmeasured replacement is being claimed.
+- **External blocker:** E1 needs access to the OpenRouter account and the
+  credential owner; no secret is read or exposed by this workspace.
+
+One plan across both repositories. It existed because five separate threads were
 half-built, and each one is cheap to finish and expensive to leave: a harness
 with two orchestration languages, a sigil surface that contradicts its own
 source, a language blocked on one unmade decision, an agent loop that cannot
@@ -23,11 +34,10 @@ currently makes the claim false?**
 
 The claim is cost readability. One written prompt is one firing, countable off
 the page, before it is paid for. `rebis/tests/costs.rs` keeps it true *inside a
-program*. Chaos mode (shipped) extends it to chats by composing the intent into
-a program first. What remains is that the harness itself — the thing that runs
-the programs — does not obey it. `myth` orchestrates in a second language whose
-cost is not countable. The conclave hand-codes its fan-out in Rust. A run
-browser shows a program without showing what it will cost.
+program*. Chaos mode extends it to chats by composing the intent into a program
+first. The original audit found that myth, the hand-coded conclave, and the run
+browser each broke that claim in a different way; A1–A4, A5's safe boundary,
+and D3 now record how each case is handled.
 
 So workstream A is first, and everything else is ordered behind whether it
 depends on A.
@@ -42,7 +52,9 @@ interrupted. Chaos mode as a *stance* shipped; this is the other half.
 
 ### A0. The finding
 
-Kaos has **two** orchestration languages.
+At the start of this work Kaos had **two** orchestration languages. The finding
+is retained as provenance; Rebis now owns orchestration and `myth.rs` remains
+only as a compatibility translator.
 
 | | Rebis | myth |
 |---|---|---|
@@ -60,15 +72,15 @@ The mapping is close to exact:
 
 | myth | Rebis | status |
 |---|---|---|
-| `(spread N X)` + `(gather G X)` | `([M] A B …)` — the mediator square | concurrent already, bounded by `KAOS_REBIS_MAX_CONCURRENCY` |
-| `Gate::Mirror(p)` | `[symbol]` mediator | **the same code path** (`mirror::holonomy_reflected`) |
-| `Gate::Vote` | `[consensus]` | needs equivalence proof |
-| `Gate::First` | `[first]` or `%` | needs checking |
-| `Gate::Check(cmd)` | — | **the real gap** |
+| `(spread N X)` + `(gather G X)` | `([M] A B …)` — the mediator square | complete; bounded by the Rebis concurrency setting |
+| `Gate::Mirror(p)` | `[symbol]` mediator | documented as lossy; threshold is not carried |
+| `Gate::Vote` | `[vote]` host mediator | complete; tested against the scripted oracle |
+| `Gate::First` | `[first]` host mediator | complete; positional semantics are documented |
+| `Gate::Check(cmd)` | `[check]` host mediator | complete; command authority stays host-owned |
 | `(pipe A B …)` | `(-> A B)` | direct |
 | `(ask "role")` | `"prompt"` | direct |
 
-### A1. Prove the mapping before changing anything
+### A1. Prove the mapping before changing anything **(complete)**
 
 **Interface:** a new test file, `kaos-agent/tests/myth_equivalence.rs`. For each
 worked example in `docs/myth.md`, the myth graph and its Rebis translation are
@@ -94,7 +106,11 @@ one `KAOS_MYTH`'s default should keep.
 **Size:** M. **Risk:** low — worst case it produces a list of gaps, which is
 itself the deliverable.
 
-### A2. The shell gate
+**Status:** complete in `kaos-agent/tests/myth_equivalence.rs`. The test corpus
+proves the firing-count mapping and records the deliberate divergences rather
+than hiding them.
+
+### A2. The shell gate **(complete)**
 
 `Gate::Check(cmd)` runs a shell verifier over each candidate and keeps the first
 survivor. Rebis has no such thing, and this is the one capability the language
@@ -145,7 +161,11 @@ rather than silently answering.
 authority surface, and must go through the same gate `--allow-tools` guards
 (R7).
 
-### A3. `KAOS_MYTH` becomes a Rebis expression
+**Status:** complete. `[check]` is a host mediator, uses `KAOS_GATE`, and is
+refused without `--allow-tools`; the acceptance cases are in the equivalence
+and gate tests.
+
+### A3. `KAOS_MYTH` becomes a Rebis expression **(complete)**
 
 The config default is `(gather vote (spread 5 fire))`. `ValueKind::Expression`
 already exists in `config.rs` and already documents itself as "a Rebis
@@ -161,7 +181,10 @@ key stops lying about what it holds.
 
 **Size:** S. **Risk:** low. **Migration:** users' `~/.config/kaos/config`.
 
-### A4. Retire `myth.rs`
+**Status:** complete. The default is Rebis, old syntax translates once with a
+migration notice, and the configuration documentation names the new value.
+
+### A4. Retire `myth.rs` **(complete)**
 
 Only after A1 and A2 pass. `myth.rs` becomes a translation shim (parse old
 syntax → emit Rebis) and then is deleted a release later. `docs/myth.md`
@@ -173,7 +196,10 @@ during A1, when the equivalence tests show which.
 
 **Size:** M. **Risk:** low once A1 holds.
 
-### A5. The conclave — carefully
+**Status:** complete. `myth.rs` is only the compatibility parser/translator,
+`docs/myth.md` is a migration note, and Rebis owns orchestration.
+
+### A5. The conclave — carefully **(deferred safely)**
 
 `solve.rs` hand-codes spread-and-vote in Rust and carries a **measured** result
 (+23pts AIME2025 on a mid-band model). Memory: *the edge is verification, not
@@ -193,6 +219,13 @@ Rust path stays and the reason is written into `docs/EDGE.md`.
 
 **Size:** L. **Risk:** high — this is the item most likely to be dropped, and
 dropping it costs nothing that A1–A4 do not already deliver.
+
+**Status:** deferred safely. `/conclave` now runs `solve::RebisConclave`, with
+`KAOS_AGENTIC` selecting text leaves versus isolated agentic leaves. `/code xK`
+retains the Rust `conductor::run_conclave` path for verified coding work.
+The Rust path has not been replaced. There is no live AIME parity run available
+in this checkout, so no parity claim is made; the boundary and the reason for
+retaining both paths are recorded in `docs/EDGE.md`.
 
 ### A6. Explicitly out of scope
 
@@ -215,7 +248,7 @@ Carroll, *Liber Null*, "Sigils": the operation has three parts — the sigil is
 faithful on construction-as-drawing and on stacking. It contradicts the source
 on the other two.
 
-### B1. The word method
+### B1. The word method **(complete)**
 
 *"I wish to obtain the Necronomicon"* → eliminate repeated letters →
 `INSHTOBANECRM` → rearrange into a glyph. Figure 2a.
@@ -239,7 +272,10 @@ model.
 **Size:** S. **Risk:** none — additive, and it is the one part of the operation
 the source specifies exactly enough to test.
 
-### B2. Losing the sigil — **a mode, not a default**
+**Status:** complete in `kaos-core/src/ink.rs`, with the scaffold exclusion
+covered by the sigil-wall tests.
+
+### B2. Losing the sigil — **a mode, not a default** **(complete)**
 
 *"To successfully lose the sigil, both the sigil form and the associated desire
 must be banished from normal waking consciousness."*
@@ -264,7 +300,10 @@ grepping the whole wall directory and the run store for it.
 **Size:** M. **Risk:** medium — a user who loses a sigil and wants it back
 cannot have it. The button must say so.
 
-### B3. The record
+**Status:** complete. `Retention::Lose` is explicit, irreversible, and tested
+against the wall contents.
+
+### B3. The record **(complete)**
 
 *"A record should be kept of all work with sigils but not in such a way as to
 cause conscious deliberation over the sigilized desire."*
@@ -277,11 +316,16 @@ reference, and the answer — not the sentence.
 and the answer, and does not contain the desire. **Size:** S. **Depends on:**
 B2. **Risk:** low.
 
-### B4. Charging — documentation only
+**Status:** complete. Lost desires do not enter the generated instruction or
+retained run record.
+
+### B4. Charging — documentation only **(complete)**
 
 The run *is* the charge; the operation is already complete in the code. This is
 a paragraph in `docs/` mapping the three parts onto compose / commit / run, so
 the next reader does not rebuild it. **Size:** XS.
+
+**Status:** complete in `docs/SIGILS.md`: the run is explicitly the charge.
 
 ---
 
@@ -290,7 +334,7 @@ the next reader does not rebuild it. **Size:** XS.
 **Provenance:** `rebis/docs/PLAN_LISP.md` §6.2 and §9. These are **decisions**,
 not features; each is finished when it is written into `SPEC.md`.
 
-### C1. `$`'s evaluation strategy — the map/fold/filter blocker
+### C1. `$`'s evaluation strategy — the map/fold/filter blocker **(decided)**
 
 `$` interpolates its operands rather than running them, and that is
 load-bearing: a text constant is a macro whose body is a prompt, and `$` must
@@ -317,7 +361,10 @@ question. (2) is a cost-model change and needs evidence, not preference.
 **Acceptance (of the decision):** `SPEC.md` states which, and why, in a
 paragraph a reader can disagree with. **Size:** S to decide, M if (3).
 
-### C2. Closures
+**Status:** decided in the sibling Rebis repository's `docs/SPEC.md` at
+`2413d8d`: leave `$` alone; the mediator square remains the explicit fan-out.
+
+### C2. Closures **(decided)**
 
 `PLAN_LISP.md` §Phase 5 already recommends: land anonymous `~` with **dynamic
 scope, documented as such**, measure whether anything real wants capture, and
@@ -328,11 +375,17 @@ the page — directly against cost readability.
 **Action:** record the recommendation as the decision in `SPEC.md`. Do not
 build closures. **Size:** XS.
 
-### C3. The empty list's spelling
+**Status:** decided in `docs/SPEC.md`: dynamic scope is documented; closures
+remain a separate evidence-backed proposal.
+
+### C3. The empty list's spelling **(decided)**
 
 `'()` requires a position-dispatched exception in a parser that refuses empty
 groups everywhere else, and `([count] '())` must answer `0`. **Action:** decide
 and write it down. **Size:** S.
+
+**Status:** decided and tested in `docs/SPEC.md`: `'()` is legal only in quote
+position and `([count] '())` answers zero.
 
 ---
 
@@ -341,10 +394,11 @@ and write it down. **Size:** S.
 **Provenance:** *"also improve it make it the best agentic harness"*. Grounded in
 what is measurably weak, not in a feature list.
 
-### D1. Abstention — the biggest single gap
+### D1. Abstention — the biggest single gap **(complete)**
 
-There is no abstention anywhere in the harness. `grep -rn "abstain"` returns
-nothing. A run that cannot verify its work ships it anyway.
+Before this item, there was no abstention anywhere in the harness.
+`grep -rn "abstain"` returned nothing. A run that could not verify its work
+shipped it anyway.
 
 Memory, from the agi-testing work: *the Lean gate's win was **soundness** — 0
 false ships, abstains — **not** accuracy.* That is the measured result, and the
@@ -372,13 +426,18 @@ and the CLI exit code — not folded into either neighbour.
 **Risk:** medium — a harness that abstains looks worse on any accuracy metric,
 and that is the trade being bought deliberately.
 
-### D2. Restarts on Rebis nodes and chats
+**Status:** complete. The core outcome classifier distinguishes shipped, failed,
+and abstained Rebis runs; a refused host gate retains the unverified work,
+returns exit code 4, and is rendered as ABSTAINED by the terminal and visual run
+browsers. The seeded-defect corpus in kaos-agent/tests/abstention.rs records
+zero false ships and keeps verified-negative runs distinct from failures.
+
+### D2. Restarts on Rebis nodes and chats **(complete)**
 
 `spiral.rs` implements Fibonacci restart scheduling with solar/lunar polarity,
 grounded in restart theory against heavy-tailed solve times. It is wired into
-the `/code` path (`main.rs:2609, 2747, 2789`) — and **not** into `chat_task`,
-and **not** into `RebisOracle`. A Rebis model node gets one session and no
-restart; if it wanders, it wanders to the timeout.
+the `/code` paths and `RebisOracle`; direct chats remain direct chats rather
+than being silently turned into Rebis nodes.
 
 **Interface:** `RebisOracle` runs its node through `spiral::budgets` when the
 node's first attempt fizzles (`spiral::fizzled` already exists and reads a
@@ -391,7 +450,11 @@ attempts and which one produced the answer. The total step budget does not grow
 
 **Size:** M. **Risk:** low — the mechanism is built and tested; this is wiring.
 
-### D3. Show the cost before it is paid
+**Status:** complete in `d284537`: a fizzled Rebis node is retried on a fresh
+context with the redistributed budget and opposite polarity, with the attempt
+trace retained.
+
+### D3. Show the cost before it is paid **(complete)**
 
 This is the payoff of the whole chaos-mode design and it is the smallest item
 here. A composed program is queued in the run browser. The browser shows the
@@ -410,11 +473,16 @@ program in `kaos-conformance/programs/`.
 **Size:** M. **Risk:** low. **Value:** this is the feature that makes the claim
 visible to a user instead of only to a test.
 
-### D4. Conformance, re-run and recorded
+**Status:** complete in `1d35433`. Queued runs show the static firing count and
+conditional cost before launch, and the predictor is checked against the
+conformance corpus.
 
-Last run: 75/75 against qwen3-32b, **before** the last several features
-(attachments, the sigil wall, agent-to-agent prompting, the ollama host
-setting, chaos mode). The number is stale and is quoted as if it is not.
+### D4. Conformance, re-run and recorded **(bounded evidence)**
+
+The recorded end-to-end run is 75/75 against `ollama:llama3.2:3b` at commit
+`1d35433`, after the features named below. It replaced the stale qwen3-32b
+number, but it is not a run against the originally requested qwen3 model or
+the current HEAD.
 
 **Acceptance:** `kaos-conformance` re-run against qwen3-32b, the result written
 into `kaos-conformance/FINDINGS.md` with the date and the commit, and any
@@ -422,6 +490,10 @@ regression fixed or documented.
 
 **Size:** S to run, unknown to fix. **Risk:** this is the item most likely to
 find something.
+
+**Status:** bounded evidence recorded in `kaos-conformance/FINDINGS.md`.
+The qwen3 rerun remains an environment-dependent follow-up; the local Ollama
+endpoint is unavailable in this workspace.
 
 ### D5. The gate is the harness's verification story
 
@@ -433,7 +505,7 @@ first; D1 has somewhere to attach.
 
 ## E. Operations
 
-### E1. Rotate the OpenRouter key — **do this first, today**
+### E1. Rotate the OpenRouter key — **external blocker**
 
 An OpenRouter API key was pasted in plaintext earlier in this session and is in
 the transcript. It must be revoked at the provider and reissued. Nothing else in
@@ -441,27 +513,30 @@ this document is urgent; this is.
 
 **Acceptance:** the old key returns 401. **Size:** XS.
 
-### E2. Decide what `cargo fmt` means here
+**Status:** not executable from this workspace. Revocation, reissue, and the
+401 check require the OpenRouter account and credential owner. No key was read,
+printed, or transmitted here.
 
-`cargo fmt --all --check` reports diffs in 23 files, most of them untouched by
-recent work. So formatting cannot be a CI gate today, and every future diff
-carries unrelated reformatting noise.
+### E2. Decide what `cargo fmt` means here **(complete)**
+
+The workspace adopted default rustfmt in the mechanical `7228823` commit, and
+the check is now clean and enforced by CI.
 
 **Two options:** adopt rustfmt wholesale in one mechanical commit that touches
 nothing else, or add a `rustfmt.toml` that matches the house style (the codebase
 favours wide lines and dense prose docs, which default rustfmt fights).
 
-**Recommendation:** one mechanical `cargo fmt --all` commit, alone, immediately
-after E3 — so it is trivially reviewable as "formatting only".
+**Decision:** one mechanical `cargo fmt --all` commit, alone, so it is
+trivially reviewable as "formatting only".
 
 **Acceptance:** `cargo fmt --all --check` is clean and is in CI. **Size:** S.
 
-### E3. Commit the working tree
+**Status:** complete. The accepted policy is wholesale default rustfmt.
 
-The tree carries a large uncommitted change set: 8 new modules, a new crate
-(`kaos-conformance`), the sigil wall, chaos mode, and the Rebis language work in
-the sibling repository. It should be committed in coherent pieces before any of
-the above starts, so that a plan step can be reverted independently.
+### E3. Commit the working tree **(complete)**
+
+The previously uncommitted work is now committed in coherent pieces, including
+the abstention implementation and this reconciliation.
 
 **Order matters** (from memory: *check git deps before every push*): `rebis` is
 pushed first, then kaos's `Cargo.toml` is verified to use the git dependency and
@@ -470,38 +545,23 @@ never `path = "../rebis"`.
 **Size:** M. **Risk:** low, but doing the work above on top of an uncommitted
 tree makes every step irreversible.
 
+**Status:** complete for the local repositories. Rebis was pushed first to
+`origin/main`, Kaos now uses the git dependency without a sibling path patch,
+and the Kaos tree is committed and verified clean.
+
 ---
 
-## F. Sequencing
+## F. Closeout
 
-```
-E1 rotate key            ── today, alone
-E3 commit the tree       ──┐
-E2 cargo fmt             ──┘ before anything else starts
+The local implementation pass is complete. The only remaining actions are
+deliberately outside the safe local closeout:
 
-A1 prove myth ≡ Rebis    ──┬── gates all of A
-A2 the shell gate        ──┤        └── gates D1
-A3 KAOS_MYTH as Rebis    ──┤
-A4 retire myth.rs        ──┘
-
-D4 conformance re-run    ── independent, do early, may add work
-D3 show the cost         ── independent, small, high visibility
-B1 word method           ── independent, small
-C1 the $ decision        ── independent, decision first
-
-D2 restarts on nodes     ── independent, wiring
-B2 losing the sigil      ──── B3 the record
-D1 abstention            ── after A2
-C2, C3, B4               ── write down, any time
-A5 the Rebis conclave    ── last, and droppable
-```
-
-**A first pass that is worth shipping on its own:** E1, E3, E2, A1, D4, D3, B1,
-C1. That is one coherent release: the tree is committed and clean, the second
-orchestration language is proven redundant or proven necessary, the conformance
-number is true again, a queued program shows what it will cost, the sigil
-surface gains the one thing the source specifies exactly, and the language's
-open blocker is decided rather than deferred.
+- E1: revoke and reissue the exposed OpenRouter credential, then verify the old
+  value returns 401.
+- D4: run the original qwen3 acceptance against a live service and record the
+  current commit.
+- A5: retain both conclave paths until a live parity benchmark justifies a
+  replacement; the Rust path remains the safe default for coding.
 
 ---
 

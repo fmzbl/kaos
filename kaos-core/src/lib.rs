@@ -26,6 +26,7 @@ pub mod dream;
 pub mod ink;
 pub mod music;
 pub mod nest;
+pub mod outcome;
 pub mod retained;
 pub mod run_model;
 pub mod runs;
