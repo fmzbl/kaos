@@ -1570,7 +1570,11 @@ impl App {
                 RebisRunState::AwaitingPermission => {
                     "awaiting authority · y once · a sigil · n deny"
                 }
-                RebisRunState::Queued => "queued · u/Delete removes · Tab expands",
+                // A queued run has not been paid for yet, which makes it the
+                // one moment the price is worth showing. `kaos_core::cost`
+                // counts it off the source; a program whose cost the run decides
+                // says so rather than reporting a number it cannot stand behind.
+                RebisRunState::Queued => &queued_price(&run.request.source),
                 RebisRunState::Running
                     if run.paused
                         && run
@@ -6287,6 +6291,28 @@ fn format_run_duration(duration: Duration) -> String {
         format!("{seconds}.{}s", duration.subsec_millis() / 100)
     } else {
         format!("{}m {:02}s", seconds / 60, seconds % 60)
+    }
+}
+
+/// What a queued run will cost, beside how to act on it.
+///
+/// The payoff of the whole cost-readability design, and the smallest place it
+/// shows: a queued program has not been paid for, so this is the one moment the
+/// number is still useful. Exact when the source says so; a program whose price
+/// the run decides reports the floor and says it is a floor, because a confident
+/// wrong number would be worse than an admitted unknown.
+fn queued_price(source: &str) -> String {
+    let price = rebis_lang::parse(source)
+        .ok()
+        .map(|expression| crate::cost::of(&expression));
+    match price {
+        Some(price) => format!(
+            "queued · {} · u/Delete removes · Tab expands",
+            price.summary()
+        ),
+        // A source that does not parse has no price, and the run will say so
+        // itself the moment it starts. Nothing is gained by saying it twice.
+        None => "queued · u/Delete removes · Tab expands".to_string(),
     }
 }
 

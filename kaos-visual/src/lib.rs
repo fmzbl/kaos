@@ -5681,7 +5681,40 @@ impl Editor {
                             })
                             .count()
                             + 1;
-                        ui.colored_label(k.faint, format!("      queue position {queue}"));
+                        // The price, before it is paid. This is the payoff of
+                        // the whole cost-readability design and it was the one
+                        // number a person could not see: the browser showed a
+                        // queued program's source and not what running it would
+                        // cost. The count is exact; anything the run decides is
+                        // named on hover rather than folded into the number.
+                        let price = rebis_lang::parse(&run.source)
+                            .ok()
+                            .map(|expression| kaos_core::cost::of(&expression));
+                        ui.horizontal(|ui| {
+                            ui.colored_label(k.faint, format!("      queue position {queue}"));
+                            if let Some(price) = price {
+                                let label = ui.colored_label(
+                                    if price.is_exact() {
+                                        k.faint
+                                    } else {
+                                        k.secondary
+                                    },
+                                    format!("· {}", price.summary()),
+                                );
+                                label.on_hover_text(if price.is_exact() {
+                                    format!(
+                                        "{} model calls, counted off the page before launch",
+                                        price.firings
+                                    )
+                                } else {
+                                    format!(
+                                        "at least {} model calls.\n{}",
+                                        price.firings,
+                                        price.conditional.join("\n")
+                                    )
+                                });
+                            }
+                        });
                     }
 
                     if !run.expanded {
