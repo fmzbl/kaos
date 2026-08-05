@@ -2704,6 +2704,42 @@ pub struct RunRequest {
     pub source: String,
     pub input: String,
     pub scope: RunScope,
+    /// Per-run thinking override. `None` uses the persistent `KAOS_THINK`
+    /// setting; `Some(false)` is useful for a fast run when the default is on.
+    pub think: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RunCommandOptions {
+    block: bool,
+    parallel: bool,
+    think: Option<bool>,
+}
+
+fn parse_run_command(command: &str) -> Option<Result<RunCommandOptions, String>> {
+    let mut words = command.split_whitespace();
+    if words.next() != Some("run") {
+        return None;
+    }
+    let mut options = RunCommandOptions {
+        block: false,
+        parallel: false,
+        think: None,
+    };
+    for word in words {
+        match word {
+            "block" => options.block = true,
+            "parallel" => options.parallel = true,
+            "--think" => options.think = Some(true),
+            "--no-think" => options.think = Some(false),
+            unknown => {
+                return Some(Err(format!(
+                "unknown run option `{unknown}` · use /run [block] [parallel] [--think|--no-think]"
+            )))
+            }
+        }
+    }
+    Some(Ok(options))
 }
 
 /// What the user asked the host to evaluate. Shared with every frontend so a
@@ -3345,6 +3381,46 @@ impl Workspace {
         WorkspaceAction::None
     }
 
+    fn execute_run_command(
+        &mut self,
+        options: RunCommandOptions,
+        run_selection: Option<(usize, usize)>,
+    ) -> WorkspaceAction {
+        if options.block {
+            let slice = run_selection
+                .map(|(start, end)| slice_chars(self.editor.source(), start, end))
+                .or_else(|| {
+                    self.editor
+                        .matching_parentheses()
+                        .map(|(left, right)| slice_chars(self.editor.source(), left, right))
+                });
+            let Some(slice) = slice else {
+                self.message = "run block: put the cursor on the block's ( ) or [ ]".to_string();
+                return WorkspaceAction::None;
+            };
+            return self.run_block(&slice, options.parallel, None, options.think);
+        }
+        if let Some((start, end)) = run_selection {
+            let slice = slice_chars(self.editor.source(), start, end);
+            return self.run_block(&slice, options.parallel, None, options.think);
+        }
+        if self.compiled.is_none() {
+            self.message = "run refused: fix the diagnostic".to_string();
+            return WorkspaceAction::None;
+        }
+        let request = RunRequest {
+            source: self.editor.source().to_string(),
+            input: self.record_text.clone().unwrap_or_default(),
+            scope: RunScope::Program,
+            think: options.think,
+        };
+        if options.parallel {
+            WorkspaceAction::RunParallel(request)
+        } else {
+            WorkspaceAction::Run(request)
+        }
+    }
+
     /// Execute a Kaos workspace command entered after `/`.
     pub fn execute_kaos_command(&mut self) -> WorkspaceAction {
         let command = self.command.trim().to_string();
@@ -3353,6 +3429,15 @@ impl Workspace {
         // A visual selection only survives for the command typed right after
         // it; any other command clears it.
         let run_selection = self.run_selection.take();
+        if let Some(options) = parse_run_command(&command) {
+            return match options {
+                Ok(options) => self.execute_run_command(options, run_selection),
+                Err(error) => {
+                    self.message = error;
+                    WorkspaceAction::None
+                }
+            };
+        }
         match command.as_str() {
             "chat" => return WorkspaceAction::Suspend,
             _ if command.starts_with("chat run ") => {
@@ -3380,7 +3465,10 @@ impl Workspace {
             "runs" => return WorkspaceAction::BrowseRuns,
             "model" | "new" | "clear" | "quit" | "mouse" | "chaos" | "chaos on"
             | "chaos off" | "config" | "config restore" | "theme" | "theme dark"
-            | "theme light" => return WorkspaceAction::Kaos(command),
+            | "theme light" | "think" | "think on" | "think off" | "think toggle" => {
+                return WorkspaceAction::Kaos(command)
+            }
+            _ if command.starts_with("think ") => return WorkspaceAction::Kaos(command),
             "format" | "fmt" => {
                 if self.compiled.is_none() {
                     self.message = "cannot format until the program compiles".to_string();
@@ -3538,42 +3626,6 @@ impl Workspace {
             "search" => self.search_source(None),
             _ if command.starts_with("search ") => {
                 self.search_source(Some(command.trim_start_matches("search ").trim()))
-            }
-            "run" | "run parallel" => {
-                let parallel = command == "run parallel";
-                // A selection captured on entering command mode runs as a
-                // block; otherwise the whole buffer runs.
-                if let Some((start, end)) = run_selection {
-                    let slice = slice_chars(self.editor.source(), start, end);
-                    return self.run_block(&slice, parallel, None);
-                }
-                if self.compiled.is_none() {
-                    self.message = "run refused: fix the diagnostic".to_string();
-                    return WorkspaceAction::None;
-                }
-                let request = RunRequest {
-                    source: self.editor.source().to_string(),
-                    input: self.record_text.clone().unwrap_or_default(),
-                    scope: RunScope::Program,
-                };
-                return if parallel {
-                    WorkspaceAction::RunParallel(request)
-                } else {
-                    WorkspaceAction::Run(request)
-                };
-            }
-            "run block" | "run block parallel" => {
-                let parallel = command == "run block parallel";
-                // The complete form the cursor sits on (or just after) — like
-                // Lisp's eval-sexp-at-point. Place the cursor at the block's
-                // end and run this.
-                let Some((left, right)) = self.editor.matching_parentheses() else {
-                    self.message =
-                        "run block: put the cursor on the block's ( ) or [ ]".to_string();
-                    return WorkspaceAction::None;
-                };
-                let slice = slice_chars(self.editor.source(), left, right);
-                return self.run_block(&slice, parallel, None);
             }
             "output" => {
                 self.sigil_chat_visible = false;
@@ -3961,6 +4013,7 @@ impl Workspace {
         block_src: &str,
         parallel: bool,
         input: Option<String>,
+        think: Option<bool>,
     ) -> WorkspaceAction {
         let program = match scoped_block_source(self.editor.source(), block_src) {
             Ok(program) => program,
@@ -3973,6 +4026,7 @@ impl Workspace {
             source: program,
             input: input.unwrap_or_else(|| self.record_text.clone().unwrap_or_default()),
             scope: RunScope::Block,
+            think,
         };
         if parallel {
             WorkspaceAction::RunParallel(request)
@@ -6153,6 +6207,53 @@ mod tests {
                 ..
             }) if input.is_empty()
         ));
+    }
+
+    #[test]
+    fn run_command_carries_a_thinking_override() {
+        let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+        workspace.editor = Editor::new("\"reason this\"");
+        workspace.refresh();
+        workspace.command = "run --think".to_string();
+        assert!(matches!(
+            workspace.execute_kaos_command(),
+            WorkspaceAction::Run(RunRequest {
+                think: Some(true),
+                scope: RunScope::Program,
+                ..
+            })
+        ));
+
+        workspace.command = "run --no-think".to_string();
+        assert!(matches!(
+            workspace.execute_kaos_command(),
+            WorkspaceAction::Run(RunRequest {
+                think: Some(false),
+                scope: RunScope::Program,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn run_command_parser_accepts_all_thinking_lane_combinations() {
+        assert_eq!(
+            parse_run_command("run block parallel --think"),
+            Some(Ok(RunCommandOptions {
+                block: true,
+                parallel: true,
+                think: Some(true),
+            }))
+        );
+        assert_eq!(
+            parse_run_command("run --no-think block"),
+            Some(Ok(RunCommandOptions {
+                block: true,
+                parallel: false,
+                think: Some(false),
+            }))
+        );
+        assert!(parse_run_command("run --deliberate").unwrap().is_err());
     }
 
     #[test]

@@ -1274,6 +1274,7 @@ struct PendingRun {
     ring: std::collections::HashSet<NodeId>,
     mode: runs::Mode,
     lane: runs::Lane,
+    think: bool,
 }
 
 /// The world-space thickness of a wall's grab band under this view.
@@ -1779,6 +1780,7 @@ impl Editor {
             ring,
             mode: self.runs.mode,
             lane: self.runs.lane,
+            think: self.runs.think,
         });
     }
 
@@ -1905,6 +1907,11 @@ impl Editor {
                     ui.radio_value(&mut pending.lane, runs::Lane::Serial, "serial");
                     ui.radio_value(&mut pending.lane, runs::Lane::Parallel, "parallel");
                 });
+                ui.add_space(6.0);
+                ui.checkbox(&mut pending.think, "thinking / reasoning (may take longer)")
+                    .on_hover_text(
+                        "allow reasoning-capable models to spend tokens thinking before answering",
+                    );
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui.button("run").clicked() {
@@ -1927,6 +1934,7 @@ impl Editor {
                 // The chosen mode/lane become the desk's default for next time.
                 self.runs.mode = pending.mode;
                 self.runs.lane = pending.lane;
+                self.runs.think = pending.think;
                 self.runs.scope = pending.scope;
                 let ring = pending.ring;
                 let source = match pending.scope {
@@ -4025,6 +4033,8 @@ impl Editor {
         // the toggle sits in the same row as the input and `chat` holds
         // `self.tabs` for the whole of it.
         let mut chaos = self.chaos;
+        let initial_think = kaos_core::config::enabled("KAOS_THINK");
+        let mut think = initial_think;
         let Some(Pane::Chat(chat)) = self.tabs.active_mut() else {
             return;
         };
@@ -4238,6 +4248,8 @@ impl Editor {
         ui.horizontal(|ui| {
             ui.checkbox(&mut chaos, "chaos")
                 .on_hover_text(kaos_core::chaos::CHAOS_HINT);
+            ui.checkbox(&mut think, "think")
+                .on_hover_text("allow reasoning-capable models to think before answering");
             let send = ui
                 .add(
                     egui::TextEdit::singleline(&mut chat.input)
@@ -4285,6 +4297,16 @@ impl Editor {
         });
         let _ = chat;
         self.chaos = chaos;
+        if think != initial_think {
+            std::env::set_var("KAOS_THINK", if think { "1" } else { "0" });
+            if let Err(error) =
+                kaos_core::config::set_value("KAOS_THINK", if think { "true" } else { "false" })
+            {
+                if let Some(Pane::Chat(chat)) = self.tabs.active_mut() {
+                    chat.notice = Some(format!("thinking changed for this session only: {error}"));
+                }
+            }
+        }
         if stop_chat {
             if let Some(session) = session_id.as_deref() {
                 let cancelled = self.actions.cancel_session(session, &self.cwd);

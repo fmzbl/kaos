@@ -23,6 +23,7 @@ pub(crate) struct Run {
     pub(crate) scope: Scope,
     pub(crate) lane: Lane,
     pub(crate) mode: Mode,
+    pub(crate) think: bool,
     pub(crate) state: State,
     pub(crate) output: RetainedLog,
     pub(crate) expanded: bool,
@@ -118,6 +119,7 @@ impl Run {
             scope: Scope::Program,
             lane: Lane::Serial,
             mode: Mode::Dry,
+            think: false,
             state: State::Complete,
             lineage: Lineage::root(),
             nest_path: None,
@@ -147,6 +149,7 @@ pub(crate) struct Desk {
     pub(crate) draft_source: String,
     pub(crate) scope: Scope,
     pub(crate) mode: Mode,
+    pub(crate) think: bool,
     pub(crate) lane: Lane,
     pub(crate) authority: Authority,
     pub(crate) authority_remembered: bool,
@@ -167,6 +170,7 @@ impl Default for Desk {
             // A visual gesture must not unexpectedly spend provider tokens or
             // edit files. Live mode is one explicit toggle away.
             mode: Mode::Dry,
+            think: kaos_core::config::enabled("KAOS_THINK"),
             lane: Lane::Serial,
             authority: Authority::Ask,
             authority_remembered: false,
@@ -222,6 +226,7 @@ impl Desk {
             draft_source: self.draft_source.clone(),
             scope: self.scope,
             mode: self.mode,
+            think: self.think,
             lane: self.lane,
             authority: self.authority,
             authority_remembered: self.authority_remembered,
@@ -253,16 +258,17 @@ impl Desk {
             .filter_map(|run| {
                 let path = run.nest_path.as_ref()?;
                 let requests = kaos_core::nest::drain(path);
-                (!requests.is_empty()).then_some((run.id, run.lineage, requests))
+                (!requests.is_empty()).then_some((run.id, run.lineage, run.think, requests))
             })
             .collect::<Vec<_>>();
         let mut opened = false;
-        for (parent, lineage, requests) in asked {
+        for (parent, lineage, think, requests) in asked {
             for request in requests {
-                let child = self.queue_under(
+                let child = self.queue_under_with_think(
                     request.source.clone(),
                     None,
                     kaos_core::run_model::Lineage::under(parent, lineage),
+                    think,
                     cwd,
                 );
                 if let Some(run) = self.runs.iter_mut().find(|run| run.id == parent) {
@@ -288,6 +294,18 @@ impl Desk {
         lineage: Lineage,
         cwd: &Path,
     ) -> u64 {
+        let think = self.think;
+        self.queue_under_with_think(source, lane_override, lineage, think, cwd)
+    }
+
+    fn queue_under_with_think(
+        &mut self,
+        source: String,
+        lane_override: Option<Lane>,
+        lineage: Lineage,
+        think: bool,
+        cwd: &Path,
+    ) -> u64 {
         self.prune_history();
         self.draft_source.clone_from(&source);
         let id = self.next_id;
@@ -307,6 +325,7 @@ impl Desk {
             scope: self.scope,
             lane,
             mode: self.mode,
+            think,
             state,
             output: RetainedLog::default(),
             expanded: true,
@@ -429,6 +448,11 @@ impl Desk {
                 args.push("--chaos".to_string());
             }
         }
+        args.push(if self.runs[index].think {
+            "--think".to_string()
+        } else {
+            "--no-think".to_string()
+        });
         args.push(path.display().to_string());
         // The child stops at an `&` port and waits to be handed a value. That
         // needs three things in its environment: permission to stop at all, the

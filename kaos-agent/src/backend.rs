@@ -705,15 +705,21 @@ fn ollama_generate_text(
 ) -> Result<String, String> {
     #[cfg(feature = "api")]
     {
-        match ollama_http(model, prompt, timeout, sampling) {
-            Ok(text) => return Ok(text),
+        return match ollama_http(model, prompt, timeout, sampling) {
+            Ok(text) => Ok(text),
             // The server may be down or the endpoint absent on an old ollama; the CLI
             // path below still works via `ollama run`, so degrade rather than fail.
-            Err(_e) => {}
-        }
+            // Preserve the HTTP error if the fallback fails too: otherwise a
+            // remote model problem becomes an opaque `exit 1`.
+            Err(http_error) => ollama_complete(model, prompt, timeout)
+                .map_err(|cli_error| format!("{cli_error}; HTTP attempt: {http_error}")),
+        };
     }
-    let _ = sampling; // honoured only on the HTTP path
-    ollama_complete(model, prompt, timeout)
+    #[cfg(not(feature = "api"))]
+    {
+        let _ = sampling; // honoured only on the HTTP path
+        ollama_complete(model, prompt, timeout)
+    }
 }
 
 /// The HTTP path to ollama (`/api/generate`), used directly by callers that must
@@ -743,7 +749,13 @@ pub fn ollama_http_attached(
     timeout: Duration,
     sampling: Sampling,
 ) -> Result<String, String> {
-    let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let (model, selector_host) = match model.rsplit_once('\\') {
+        Some((name, host)) if !host.is_empty() => (name, Some(host.to_string())),
+        _ => (model, None),
+    };
+    let host = selector_host
+        .or_else(crate::provider::configured_ollama_host)
+        .unwrap_or_else(|| "http://127.0.0.1:11434".into());
     // Accept a bare host:port (as `OLLAMA_HOST` is often set) by adding a scheme.
     let base = if host.starts_with("http") {
         host
@@ -834,10 +846,11 @@ pub fn ollama_complete(model: &str, prompt: &str, timeout: Duration) -> Result<S
     // The host is handed to the child through its environment rather than a
     // flag, because that is what the `ollama` CLI reads. The model name it is
     // asked for never carries the host.
-    let (model, host) = match model.rsplit_once('\\') {
+    let (model, selector_host) = match model.rsplit_once('\\') {
         Some((name, host)) if !host.is_empty() => (name, Some(host.to_string())),
         _ => (model, None),
     };
+    let host = selector_host.or_else(crate::provider::configured_ollama_host);
     let mut command = Command::new("ollama");
     command.arg("run").arg(model).arg(prompt);
     if let Some(host) = &host {
@@ -846,7 +859,7 @@ pub fn ollama_complete(model: &str, prompt: &str, timeout: Duration) -> Result<S
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null()) // ollama writes load/progress noise here; ignore it
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("could not summon `ollama`: {e}"))?;
 
@@ -854,6 +867,12 @@ pub fn ollama_complete(model: &str, prompt: &str, timeout: Duration) -> Result<S
     let reader = std::thread::spawn(move || {
         let mut s = String::new();
         let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    let mut stderr = child.stderr.take().ok_or("no stderr handle from ollama")?;
+    let error_reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut s);
         s
     });
 
@@ -873,28 +892,49 @@ pub fn ollama_complete(model: &str, prompt: &str, timeout: Duration) -> Result<S
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = reader.join();
+                    let _ = error_reader.join();
                     return Err(format!("charge timed out after {}s", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(e) => return Err(format!("charge error: {e}")),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                let _ = error_reader.join();
+                return Err(format!("charge error: {e}"));
+            }
         }
     };
 
     let raw = reader
         .join()
         .map_err(|_| "reader thread panicked".to_string())?;
+    let stderr = error_reader
+        .join()
+        .map_err(|_| "stderr reader thread panicked".to_string())?;
     if status.success() {
         Ok(strip_think(&raw).trim().to_string())
     } else {
-        Err(match &host {
-            Some(host) => format!(
-                "charge fizzled (exit {}) — `{model}` on {host}; is ollama reachable there \
-                 and does it have that model?",
+        let detail = stderr.trim().trim_start_matches("Error:").trim();
+        let detail = if detail.is_empty() {
+            raw.trim()
+        } else {
+            detail
+        };
+        let detail = detail.chars().take(500).collect::<String>();
+        let host = host.as_deref().unwrap_or("http://127.0.0.1:11434");
+        if detail.is_empty() {
+            Err(format!(
+                "charge fizzled (exit {}) — `{model}` on {host}; is ollama reachable there and does it have that model?",
                 status.code().unwrap_or(-1)
-            ),
-            None => format!("charge fizzled (exit {})", status.code().unwrap_or(-1)),
-        })
+            ))
+        } else {
+            Err(format!(
+                "charge fizzled (exit {}) — `{model}` on {host}: {detail}",
+                status.code().unwrap_or(-1)
+            ))
+        }
     }
 }
 

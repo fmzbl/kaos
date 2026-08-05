@@ -63,6 +63,27 @@ fn ollama_model_cache() -> &'static Mutex<Option<Vec<String>>> {
     OLLAMA_MODEL_CACHE.get_or_init(|| Mutex::new(None))
 }
 
+/// Resolve the Ollama endpoint for every frontend and backend path. The main
+/// binary normally seeds the environment from the config file, but the visual
+/// standalone binary and library callers do not necessarily run that loader.
+pub(crate) fn configured_ollama_host() -> Option<String> {
+    std::env::var("OLLAMA_HOST")
+        .ok()
+        .filter(|host| !host.trim().is_empty())
+        .or_else(|| kaos_core::config::value("OLLAMA_HOST").filter(|host| !host.trim().is_empty()))
+}
+
+fn configured_sampling(
+    sampling: Option<crate::backend::Sampling>,
+) -> Option<crate::backend::Sampling> {
+    sampling.map(|mut sampling| {
+        // An explicit `--think` run sets the environment before the child
+        // starts. The config is the default for every other model call.
+        sampling.think |= kaos_core::config::enabled("KAOS_THINK");
+        sampling
+    })
+}
+
 /// Parse the table printed by `ollama ls`. Keeping this separate from process
 /// discovery makes the model picker deterministic to test and tolerant of the
 /// CLI adding more columns later.
@@ -88,11 +109,8 @@ fn parse_ollama_ls(text: &str) -> Vec<String> {
 /// binary), it is passed explicitly to the child command.
 pub fn ollama_models() -> Result<Vec<String>, String> {
     let mut command = Command::new("ollama");
-    if std::env::var_os("OLLAMA_HOST").is_none() {
-        if let Some(host) = kaos_core::config::value("OLLAMA_HOST").filter(|v| !v.trim().is_empty())
-        {
-            command.env("OLLAMA_HOST", host);
-        }
+    if let Some(host) = configured_ollama_host() {
+        command.env("OLLAMA_HOST", host);
     }
     let output = command
         .arg("ls")
@@ -207,7 +225,7 @@ pub struct Spec {
 fn ollama_base(model: &str) -> String {
     let written = model.rsplit_once('\\').map(|(_, host)| host.to_string());
     let host = written
-        .or_else(|| std::env::var("OLLAMA_HOST").ok())
+        .or_else(configured_ollama_host)
         .unwrap_or_else(|| "http://127.0.0.1:11434".into());
     if host.starts_with("http") {
         host
@@ -387,6 +405,7 @@ impl Spec {
         timeout: Duration,
         sampling: Option<crate::backend::Sampling>,
     ) -> (Result<String, String>, Vec<String>) {
+        let sampling = configured_sampling(sampling);
         let refusals = crate::attach::Wire::of(self.kind).refusals(files);
         if files.is_empty() {
             return (
@@ -422,6 +441,7 @@ impl Spec {
         timeout: Duration,
         sampling: Option<crate::backend::Sampling>,
     ) -> Result<String, String> {
+        let sampling = configured_sampling(sampling);
         match (self.kind, sampling) {
             (Kind::Ollama, Some(s)) => {
                 let prompt = format!("{system}\n\n{user}");
@@ -450,6 +470,7 @@ impl Spec {
         timeout: Duration,
         sampling: Option<crate::backend::Sampling>,
     ) -> Result<String, String> {
+        let sampling = configured_sampling(sampling);
         match (self.kind, sampling) {
             (Kind::Ollama, Some(s)) => {
                 let prompt = format!("{system}\n\n{user}");
@@ -469,11 +490,18 @@ impl Spec {
             Kind::ClaudeCli => crate::backend::fire_claude_as(self.claude_tag(), user, system),
             Kind::Ollama => {
                 let prompt = format!("{system}\n\n{user}");
-                crate::backend::ollama_complete(&self.model, &prompt, timeout)
+                let sampling = configured_sampling(Some(crate::backend::Sampling::default()))
+                    .expect("configured default sampling is present");
+                crate::backend::ollama_generate(&self.model, &prompt, timeout, sampling)
             }
             Kind::ClaudeApi => self.claude_api(system, user, timeout),
             Kind::OpenAi => self.openai_api(system, user, timeout),
-            Kind::OpenRouter => self.openrouter_api(system, user, timeout),
+            Kind::OpenRouter => self.openrouter_api_sampled(
+                system,
+                user,
+                timeout,
+                configured_sampling(Some(crate::backend::Sampling::default())),
+            ),
         }
     }
 
@@ -489,6 +517,7 @@ impl Spec {
         timeout: Duration,
         sampling: Option<crate::backend::Sampling>,
     ) -> Result<serde_json::Value, String> {
+        let sampling = configured_sampling(sampling);
         match self.kind {
             Kind::OpenRouter | Kind::OpenAi => {
                 let (who, base, key) = if self.kind == Kind::OpenRouter {
@@ -651,16 +680,6 @@ impl Spec {
         let base =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
         self.chat_completions("openai", &base, &key, system, user, timeout, sampling)
-    }
-
-    #[cfg(feature = "api")]
-    fn openrouter_api(
-        &self,
-        system: &str,
-        user: &str,
-        timeout: Duration,
-    ) -> Result<String, String> {
-        self.openrouter_api_sampled(system, user, timeout, None)
     }
 
     #[cfg(feature = "api")]
@@ -917,16 +936,6 @@ impl Spec {
     #[cfg(not(feature = "api"))]
     fn claude_api(&self, _system: &str, _user: &str, _timeout: Duration) -> Result<String, String> {
         Err("built without the `api` feature — Anthropic API unavailable".into())
-    }
-
-    #[cfg(not(feature = "api"))]
-    fn openrouter_api(
-        &self,
-        _system: &str,
-        _user: &str,
-        _timeout: Duration,
-    ) -> Result<String, String> {
-        Err("built without the `api` feature — OpenRouter unavailable".into())
     }
 
     #[cfg(not(feature = "api"))]

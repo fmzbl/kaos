@@ -57,7 +57,8 @@ action. The source underneath starts empty.
 
 The default configured model is `sim`, which is useful for inspecting the UI
 but does not make live model calls. Select and persist a live model with
-`/model MODEL`.
+`/model MODEL`. Reasoning-capable models can be enabled with `/think on` (or
+the visual Settings/chat controls); `/think off` keeps the faster direct mode.
 
 ## A first Rebis program
 
@@ -245,6 +246,7 @@ Kaos can run a complete program, a visual selection, or the form at the cursor:
 | `/run block` | Run the parenthesized or bracketed form at the cursor. |
 | `/run parallel` | Start the program or visual selection immediately in an independent job. |
 | `/run block parallel` | Start the form at the cursor in an independent job. |
+| Add `--think` or `--no-think` | Override reasoning for this run, for example `/run block --think`. |
 | `/runs` | Open the retained run browser from any view or from chat. |
 
 Block runs include the buffer's top-level `~` definitions and `#` imports, so a
@@ -502,6 +504,8 @@ kaos rebis edit program.rebis
 
 # Execute with the selected model.
 kaos rebis run program.rebis
+kaos rebis run --think program.rebis       # enable reasoning for this run
+kaos rebis run --no-think program.rebis    # force a faster direct answer
 
 # One chat request; progress is flushed as it arrives, then the final answer
 # is printed. Bare `kaos chat` still opens the interactive REPL.
@@ -573,9 +577,11 @@ The singleton **Runs** tab owns the same canonical `kaos rebis run` lifecycle
 as the terminal: immutable source/record snapshots, dry/direct/chaos modes,
 authority gates, serial FIFO or isolated parallel lanes, retained streaming
 output, timers, pause/resume/retry, cancellation, rerun, copy, and file output.
-Dry mode is the safe visual default; live modes are explicit. Changing the
-session working directory also changes where later jobs resolve files, imports,
-tools, and output paths.
+The run modal includes a thinking/reasoning checkbox, so the setting is captured
+in the immutable run snapshot along with mode, scope, and lane. Dry mode is the
+safe visual default; live modes are explicit. Changing the session working
+directory also changes where later jobs resolve files, imports, tools, and output
+paths.
 
 Every visual run also opens a **Generation** tab. It is a spacetime automaton,
 not a second graph: the selected Rebis block supplies the lattice's cells and
@@ -621,6 +627,9 @@ as typed UI: code, cast, conclave, scry, roster, egregore, models, credential
 status/store/forget, help, attachments, tool authority, and serial/parallel task
 history. These use one streamed process supervisor, so cancellation and output
 retention do not vary from button to button.
+
+The visual chat input has a `think` checkbox for the current session, and the
+Settings tab exposes the persistent `KAOS_THINK` default.
 
 The editor is tabbed: `Ctrl-T` opens a drawing, `Ctrl-Tab` and `Ctrl-←` cycle,
 `Ctrl-W` closes. Each tab keeps its own canvas, viewport and selection, so

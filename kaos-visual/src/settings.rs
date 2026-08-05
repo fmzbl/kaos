@@ -58,6 +58,7 @@ pub(crate) fn group(key: &str) -> Group {
     match key {
         "theme" | "vim_mode" => Group::Appearance,
         "KAOS_MODEL"
+        | "KAOS_THINK"
         | "KAOS_TIMEOUT_S"
         | "KAOS_CHAT_TIMEOUT_S"
         | "KAOS_MAX_TOKENS"
@@ -119,6 +120,12 @@ pub(crate) struct SettingsPane {
 }
 
 impl SettingsPane {
+    fn apply_runtime_value(key: &str, value: &str) {
+        if key == "KAOS_THINK" {
+            std::env::set_var("KAOS_THINK", value);
+        }
+    }
+
     pub(crate) fn load() -> Self {
         let model_choices = kaos_agent::provider::model_choices();
         match kaos_core::config::values() {
@@ -177,6 +184,7 @@ impl SettingsPane {
             .collect::<Vec<_>>();
         for (key, value) in &changed {
             kaos_core::config::set_value(key, value)?;
+            Self::apply_runtime_value(key, value);
         }
         self.saved = self.values.clone();
         Ok(changed.len())
@@ -185,6 +193,7 @@ impl SettingsPane {
     pub(crate) fn save_key(&mut self, key: &str) -> Result<(), String> {
         let value = self.values.get(key).cloned().unwrap_or_default();
         kaos_core::config::set_value(key, &value)?;
+        Self::apply_runtime_value(key, &value);
         self.saved.insert(key.to_string(), value);
         Ok(())
     }
@@ -192,6 +201,9 @@ impl SettingsPane {
     pub(crate) fn restore(&mut self) -> Result<(), String> {
         kaos_core::config::restore_defaults()?;
         *self = Self::load();
+        if let Some(value) = self.values.get("KAOS_THINK") {
+            Self::apply_runtime_value("KAOS_THINK", value);
+        }
         self.notice = Some("restored documented defaults".to_string());
         Ok(())
     }

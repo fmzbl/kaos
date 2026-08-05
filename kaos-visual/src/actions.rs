@@ -387,6 +387,14 @@ impl Desk {
             "KAOS_MODEL".to_string(),
             kaos_core::config::value("KAOS_MODEL").unwrap_or_else(|| "sim".to_string()),
         ));
+        env.push((
+            "KAOS_THINK".to_string(),
+            if kaos_core::config::enabled("KAOS_THINK") {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+        ));
         env.push(("KAOS_CLAUDE_YOLO".to_string(), self.tools.env().to_string()));
         env.push(("KAOS_FOLD".to_string(), "1".to_string()));
         let state = if needs_permission {

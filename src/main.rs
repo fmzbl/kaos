@@ -348,6 +348,7 @@ fn dispatch(session: &mut Session, line: &str) -> bool {
             "code" | "conduct" => code_cmd(session, arg),
             "models" | "minds" => models_cmd(session, arg),
             "model" | "backend" | "bind" => model_cmd(session, arg),
+            "think" => think_cmd(arg),
             "banish" => banish_session(session),
             "rays" | "magics" => print_rays(),
             "quit" | "exit" | "q" => return false,
@@ -2028,6 +2029,7 @@ fn rebis_cmd(session: &Session, arg: &str) {
 fn rebis_run_cmd(session: &Session, arg: &str) {
     let mut dry = false;
     let mut allow_tools = false;
+    let mut think = None;
     // `--chaos` is now one spelling of a stance that also has an environment
     // variable and a config key, so a run launched from a chaos-mode host is in
     // chaos mode without the host restating the flag. The flag can still turn it
@@ -2043,6 +2045,8 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             "--dry" => dry = true,
             "--allow-tools" => allow_tools = true,
             "--chaos" => chaos = true,
+            "--think" => think = Some(true),
+            "--no-think" => think = Some(false),
             // An unknown flag is a mistake, not a program. Falling through
             // silently made `--model x prog.rebis` parse as Rebis SOURCE and
             // report success having run nothing — the failure looked exactly
@@ -2050,7 +2054,7 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             unknown if unknown.starts_with("--") => {
                 eprintln!(
                     "rebis: unknown flag `{unknown}`\n\
-                     usage: kaos rebis run [--dry] [--allow-tools] [--chaos] <program-or-file>\n\
+                     usage: kaos rebis run [--dry] [--allow-tools] [--chaos] [--think|--no-think] <program-or-file>\n\
                      the model is chosen with KAOS_MODEL, e.g. KAOS_MODEL=claude:opus5"
                 );
                 std::process::exit(2);
@@ -2060,7 +2064,7 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
         source_arg = rest;
     }
     if source_arg.is_empty() {
-        eprintln!("usage: kaos rebis run [--dry] [--allow-tools] [--chaos] <program-or-file>");
+        eprintln!("usage: kaos rebis run [--dry] [--allow-tools] [--chaos] [--think|--no-think] <program-or-file>");
         std::process::exit(2);
     }
     if !dry && chaos && !allow_tools {
@@ -2081,6 +2085,9 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
         kaos_core::chaos::ENABLE_ENV,
         kaos_core::chaos::export(chaos),
     );
+    if let Some(think) = think {
+        std::env::set_var("KAOS_THINK", if think { "1" } else { "0" });
+    }
     let source = if std::path::Path::new(source_arg).is_file() {
         match std::fs::read_to_string(source_arg) {
             Ok(source) => source,
@@ -2451,10 +2458,10 @@ fn request_cmd(session: &Session, arg: &str) {
         }
         "rebis" if !rest.is_empty() => rebis_cmd(session, rest),
         "rebis" => eprintln!(
-            "usage: kaos request rebis run [--dry] [--allow-tools] [--chaos] <program-or-file>"
+            "usage: kaos request rebis run [--dry] [--allow-tools] [--chaos] [--think|--no-think] <program-or-file>"
         ),
         _ => eprintln!(
-            "usage: kaos request chat <task> | rebis run [--dry] [--allow-tools] [--chaos] <program-or-file>"
+            "usage: kaos request chat <task> | rebis run [--dry] [--allow-tools] [--chaos] [--think|--no-think] <program-or-file>"
         ),
     }
 }
@@ -4136,6 +4143,49 @@ fn model_cmd(session: &mut Session, arg: &str) {
     }
 }
 
+/// `/think` toggles the persistent reasoning default in the line REPL. The
+/// fullscreen terminal and visual editor use the same setting, so a change
+/// made here is visible to their child processes too.
+fn think_cmd(arg: &str) {
+    let current = kaos::config::enabled("KAOS_THINK");
+    let requested = match arg.trim() {
+        "on" | "yes" | "1" | "true" => Some(true),
+        "off" | "no" | "0" | "false" => Some(false),
+        "toggle" | "" => Some(!current),
+        _ => None,
+    };
+    let Some(enabled) = requested else {
+        println!(
+            "  {}",
+            ash("usage: /think [on|off] · reasoning models use the configured default")
+        );
+        return;
+    };
+    std::env::set_var("KAOS_THINK", if enabled { "1" } else { "0" });
+    let persistence = if cfg!(not(test)) {
+        kaos::config::set_value("KAOS_THINK", if enabled { "true" } else { "false" }).map(|_| ())
+    } else {
+        Ok(())
+    };
+    match persistence {
+        Ok(()) => println!(
+            "  {}",
+            ash(if enabled {
+                "thinking enabled · reasoning-capable models may spend tokens before answering"
+            } else {
+                "thinking disabled · reasoning-capable models answer directly"
+            })
+        ),
+        Err(error) => println!(
+            "  {}",
+            ash(&format!(
+                "thinking {} for this session, but could not save it: {error}",
+                if enabled { "enabled" } else { "disabled" }
+            ))
+        ),
+    }
+}
+
 /// /banish — laughter scatters the work. The Pact reconvenes from nothing.
 fn banish_session(session: &mut Session) {
     session.pact = Pact::convene();
@@ -4328,6 +4378,10 @@ fn print_help() {
         (
             "/model [provider[:model]]",
             "bind the mind — claude[:sonnet|opus|opus5] · openai · anthropic · ollama · sim",
+        ),
+        (
+            "/think [on|off]",
+            "toggle reasoning for compatible models; omit the argument to toggle",
         ),
         (
             "/models",

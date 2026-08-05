@@ -80,6 +80,7 @@ editor opens it as a `composed` source tab.
 | Key | Default | Type | Meaning |
 | --- | --- | --- | --- |
 | `KAOS_MODEL` | `sim` | text | Provider/model binding shared by chat, agents, conclaves, and Rebis prompts. |
+| `KAOS_THINK` | `false` | boolean | Let reasoning-capable Ollama/OpenRouter models spend tokens thinking before answering. |
 | `KAOS_TIMEOUT_S` | `120` | seconds | Wall timeout for one-shot completions such as `/cast`. |
 | `KAOS_CHAT_TIMEOUT_S` | `600` | seconds | Wall timeout for one model turn in a tool-using chat or coding agent. |
 | `KAOS_MAX_TOKENS` | `8192` | integer | `max_tokens` sent to OpenAI-compatible providers. |
@@ -96,6 +97,7 @@ Examples:
 
 ```ini
 KAOS_MODEL = ollama:qwen3:4b
+KAOS_THINK = false
 KAOS_TIMEOUT_S = 300
 KAOS_NUM_PREDICT = 4096
 OPENAI_BASE_URL = https://my-openai-compatible-host.example
@@ -112,6 +114,14 @@ and Rebis `model` command autocomplete the same names as `ollama:model`. Kaos
 gets the live list by running `ollama ls` against `OLLAMA_HOST`; use the visual
 editor's **refresh Ollama** button, or `/models` in the terminal, after pulling
 a model. Custom provider/model values can still be typed directly.
+
+Thinking is off by default. The terminal `/think on`, `/think off`, and `/think`
+toggle persist the setting; the visual Settings tab exposes the same checkbox,
+the chat pane has a per-session `think` checkbox, and the visual run modal has
+its own per-run checkbox. Terminal Rebis runs accept `/run --think` or
+`/run --no-think`; the non-interactive command accepts
+`kaos rebis run --think FILE` and `kaos rebis run --no-think FILE`. An omitted
+run flag uses `KAOS_THINK`.
 
 ### Agent working
 

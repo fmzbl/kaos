@@ -118,6 +118,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "vim_mode",
     "KAOS_CHAOS",
     "KAOS_MODEL",
+    "KAOS_THINK",
     "KAOS_TIMEOUT_S",
     "KAOS_CHAT_TIMEOUT_S",
     "KAOS_MAX_TOKENS",
@@ -239,6 +240,13 @@ pub const CONFIG_DOCS: &[ConfigDoc] = &[
         summary: "Provider and model binding for model calls.",
         details: "Use `sim` for offline behavior or a provider:model form such as `ollama:qwen3:4b`, `openai:gpt-4o`, `openrouter:provider/model`, or `claude:sonnet`. The binding is shared by chat, agents, conclaves, and Rebis prompts.",
         example: "KAOS_MODEL = ollama:qwen3:4b",
+    },
+    ConfigDoc {
+        key: "KAOS_THINK",
+        kind: ValueKind::Boolean,
+        summary: "Allow reasoning models to spend tokens thinking before answering.",
+        details: "When enabled, Ollama and OpenRouter reasoning-capable models receive their thinking option. It applies to chats, agents, conclaves, and Rebis runs; a run may override it with `--think` or `--no-think`.",
+        example: "KAOS_THINK = true",
     },
     ConfigDoc {
         key: "KAOS_TIMEOUT_S",
@@ -536,6 +544,8 @@ KAOS_CHAOS = false
 # Mind and provider selection. `sim` is offline; use provider:model for a live
 # backend, for example `ollama:qwen3:4b` or `openrouter:provider/model`.
 KAOS_MODEL = sim
+# Let reasoning-capable models spend tokens thinking before answering.
+KAOS_THINK = false
 # Seconds for one-shot completions such as `/cast`, not a whole agent run.
 KAOS_TIMEOUT_S = 120
 # Seconds for one model turn inside a tool-using chat or coding agent.

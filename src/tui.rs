@@ -153,6 +153,7 @@ const MAIN_SLASH_COMMANDS: &[CommandSpec] = &[
     command("attach [FILE]", "attach "),
     command("cd [DIR]", "cd "),
     command("model [MODEL]", "model "),
+    command("think [on|off]", "think "),
     command("chaos [on|off]", "chaos"),
     command("mouse [on|off]", "mouse"),
     command("panel", "panel"),
@@ -169,6 +170,7 @@ const REBIS_SLASH_COMMANDS: &[CommandSpec] = &[
     command("config", "config"),
     command("config restore", "config restore"),
     command("model [MODEL]", "model "),
+    command("think [on|off]", "think "),
     command("chaos", "chaos"),
     command("chaos on", "chaos on"),
     command("chaos off", "chaos off"),
@@ -178,8 +180,19 @@ const REBIS_SLASH_COMMANDS: &[CommandSpec] = &[
     command("quit", "quit"),
     command("run", "run"),
     command("run parallel", "run parallel"),
+    command("run --think", "run --think"),
+    command("run --no-think", "run --no-think"),
+    command("run parallel --think", "run parallel --think"),
+    command("run parallel --no-think", "run parallel --no-think"),
     command("run block", "run block"),
     command("run block parallel", "run block parallel"),
+    command("run block --think", "run block --think"),
+    command("run block --no-think", "run block --no-think"),
+    command("run block parallel --think", "run block parallel --think"),
+    command(
+        "run block parallel --no-think",
+        "run block parallel --no-think",
+    ),
     command("runs", "runs"),
     command("save [FILE]", "save "),
     command("vim on", "vim on"),
@@ -554,7 +567,8 @@ fn bounded_context_copy(text: &str, max_bytes: usize) -> String {
     format!("{MARKER}{}", &text[start..])
 }
 
-const SAVED_REBIS_RUN_HEADER: &str = "KAOS_REBIS_SAVED_RUN_V1\n";
+const SAVED_REBIS_RUN_HEADER: &str = "KAOS_REBIS_SAVED_RUN_V2\n";
+const SAVED_REBIS_RUN_HEADER_V1: &str = "KAOS_REBIS_SAVED_RUN_V1\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SavedRebisRun {
@@ -563,6 +577,7 @@ struct SavedRebisRun {
     scope: RunScope,
     parallel: bool,
     chaos: bool,
+    think: Option<bool>,
     output: Vec<String>,
     elapsed: Duration,
     pause_reason: String,
@@ -650,6 +665,14 @@ fn encode_saved_rebis_run(saved: &SavedRebisRun) -> Vec<u8> {
     );
     push_saved_run_field(&mut encoded, if saved.parallel { "1" } else { "0" });
     push_saved_run_field(&mut encoded, if saved.chaos { "1" } else { "0" });
+    push_saved_run_field(
+        &mut encoded,
+        match saved.think {
+            Some(true) => "1",
+            Some(false) => "0",
+            None => "",
+        },
+    );
     push_saved_run_field(&mut encoded, &saved.elapsed.as_millis().to_string());
     push_saved_run_field(&mut encoded, &saved.pause_reason);
     push_saved_run_field(&mut encoded, &saved.output.len().to_string());
@@ -660,9 +683,14 @@ fn encode_saved_rebis_run(saved: &SavedRebisRun) -> Vec<u8> {
 }
 
 fn decode_saved_rebis_run(encoded: &[u8]) -> Result<SavedRebisRun, String> {
-    let Some(mut fields) = encoded.strip_prefix(SAVED_REBIS_RUN_HEADER.as_bytes()) else {
-        return Err("unrecognized saved Rebis run format".to_string());
-    };
+    let (mut fields, has_think) =
+        if let Some(fields) = encoded.strip_prefix(SAVED_REBIS_RUN_HEADER.as_bytes()) {
+            (fields, true)
+        } else if let Some(fields) = encoded.strip_prefix(SAVED_REBIS_RUN_HEADER_V1.as_bytes()) {
+            (fields, false)
+        } else {
+            return Err("unrecognized saved Rebis run format".to_string());
+        };
     let source = take_saved_run_field(&mut fields)?;
     let input = take_saved_run_field(&mut fields)?;
     let scope = match take_saved_run_field(&mut fields)?.as_str() {
@@ -679,6 +707,16 @@ fn decode_saved_rebis_run(encoded: &[u8]) -> Result<SavedRebisRun, String> {
         "0" => false,
         "1" => true,
         _ => return Err("saved Rebis run has an invalid chaos flag".to_string()),
+    };
+    let think = if has_think {
+        match take_saved_run_field(&mut fields)?.as_str() {
+            "" => None,
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => return Err("saved Rebis run has an invalid think flag".to_string()),
+        }
+    } else {
+        None
     };
     let elapsed_ms = take_saved_run_field(&mut fields)?
         .parse::<u64>()
@@ -700,6 +738,7 @@ fn decode_saved_rebis_run(encoded: &[u8]) -> Result<SavedRebisRun, String> {
         scope,
         parallel,
         chaos,
+        think,
         output,
         elapsed: Duration::from_millis(elapsed_ms),
         pause_reason,
@@ -3956,6 +3995,7 @@ impl App {
             scope: run.scope,
             parallel: run.parallel,
             chaos: run.chaos,
+            think: run.request.think,
             output: run.output.to_vec(),
             elapsed: active_rebis_run_elapsed(run),
             pause_reason: run
@@ -4049,6 +4089,7 @@ impl App {
             source,
             input: saved.input,
             scope: saved.scope,
+            think: saved.think,
         };
         let id =
             self.register_rebis_run_with_mode(&request, RebisRunState::Running, saved.parallel);
@@ -4934,6 +4975,7 @@ impl App {
             source,
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = self.register_rebis_run(&request, RebisRunState::Queued);
         self.queue.push(QueuedWork::Rebis { id, request });
@@ -5116,6 +5158,7 @@ impl App {
             }
             "cd" => self.change_dir(args.get(1).map(|s| s.as_str()).unwrap_or("")),
             "model" | "bind" => self.set_model(&args[1..].join(" ")),
+            "think" => self.set_thinking(&args[1..].join(" ")),
             // Provider credentials, the same store `kaos auth` writes. This
             // existed as a CLI subcommand and a visual action but not here,
             // which left the TUI the one surface where a key could be needed
@@ -5474,6 +5517,11 @@ impl App {
         args.push("--allow-tools".to_string());
         if chaos {
             args.push("--chaos".to_string());
+        }
+        match request.think {
+            Some(true) => args.push("--think".to_string()),
+            Some(false) => args.push("--no-think".to_string()),
+            None => {}
         }
         args.push(request.source);
         let launched = self.spawn_job_with_input(
@@ -6173,6 +6221,40 @@ impl App {
             self.note(&format!(
                 "✴ but {w} — the mind will not answer until it is set"
             ));
+        }
+    }
+
+    fn set_thinking(&mut self, arg: &str) {
+        let current = crate::config::enabled("KAOS_THINK");
+        let requested = match arg.trim() {
+            "on" | "yes" | "1" | "true" => Some(true),
+            "off" | "no" | "0" | "false" => Some(false),
+            "toggle" | "" => Some(!current),
+            _ => None,
+        };
+        let Some(enabled) = requested else {
+            self.note(
+                "usage: /think [on|off] · reasoning models currently use the configured default",
+            );
+            return;
+        };
+        std::env::set_var("KAOS_THINK", if enabled { "1" } else { "0" });
+        let persistence = if cfg!(not(test)) {
+            crate::config::set_value("KAOS_THINK", if enabled { "true" } else { "false" })
+                .map(|_| ())
+        } else {
+            Ok(())
+        };
+        match persistence {
+            Ok(()) => self.note(if enabled {
+                "thinking enabled · reasoning-capable models may spend tokens before answering"
+            } else {
+                "thinking disabled · reasoning-capable models answer directly"
+            }),
+            Err(error) => self.note(&format!(
+                "thinking {} for this session, but could not save it: {error}",
+                if enabled { "enabled" } else { "disabled" }
+            )),
         }
     }
 
@@ -7692,6 +7774,7 @@ fn is_local_command(line: &str) -> bool {
             | "cd"
             | "model"
             | "bind"
+            | "think"
             | "new"
             | "forget"
             | "rebis"
@@ -7937,13 +8020,12 @@ mod tests {
             vec![command("config restore", "config restore")]
         );
         assert_eq!(
-            rebis_completions("run p"),
-            vec![command("run parallel", "run parallel")]
+            rebis_completions("run --t"),
+            vec![command("run --think", "run --think")]
         );
-        assert_eq!(
-            rebis_completions("run block p"),
-            vec![command("run block parallel", "run block parallel")]
-        );
+        assert!(rebis_completions("run p").contains(&command("run parallel", "run parallel")));
+        assert!(rebis_completions("run block p")
+            .contains(&command("run block parallel", "run block parallel",)));
         assert_eq!(
             rebis_completions("sigil c"),
             vec![command("sigil chat", "sigil chat")]
@@ -7970,6 +8052,7 @@ mod tests {
             scope: RunScope::Block,
             parallel: true,
             chaos: true,
+            think: Some(true),
             output: vec!["first\nwrapped".to_string(), "final ✓".to_string()],
             elapsed: Duration::from_millis(12_345),
             pause_reason: "model allowance reached".to_string(),
@@ -7988,6 +8071,7 @@ mod tests {
             source: "(-> \"question\" \"answer\")".to_string(),
             input: "captured record".to_string(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Complete);
         app.rebis_runs[0].output = vec![
@@ -8029,16 +8113,19 @@ mod tests {
             source: "(-> \"first source\" \"first result\")".to_string(),
             input: "first record".to_string(),
             scope: RunScope::Program,
+            think: None,
         };
         let second = RunRequest {
             source: "\"second source\"".to_string(),
             input: "second record".to_string(),
             scope: RunScope::Block,
+            think: None,
         };
         let finished = RunRequest {
             source: "\"finished source\"".to_string(),
             input: "finished record".to_string(),
             scope: RunScope::Program,
+            think: None,
         };
         let first_id = app.register_rebis_run(&first, RebisRunState::Running);
         let second_id = app.register_rebis_run(&second, RebisRunState::Queued);
@@ -8085,6 +8172,7 @@ mod tests {
             source: "\"work\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
         let bridge = std::env::temp_dir().join(format!("kaos-god-control-{}", gen_uuid()));
@@ -8157,6 +8245,7 @@ mod tests {
             source: source.to_string(),
             input: "durable record".to_string(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = first.register_rebis_run(&request, RebisRunState::Running);
         first.rebis_runs[0]
@@ -8661,6 +8750,7 @@ mod tests {
             source: "\"background agent\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
         app.rebis.as_mut().unwrap().begin_run(RunScope::Program);
@@ -8755,6 +8845,7 @@ mod tests {
             source: "\"long agent\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
         let child = Command::new("sleep").arg("30").spawn().unwrap();
@@ -8805,6 +8896,7 @@ mod tests {
             source: "(-> \"old\" \"report\")".to_string(),
             input: "retained record".to_string(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
         let checkpoint = app.rebis_runs[0].checkpoint_path.clone();
@@ -8856,6 +8948,7 @@ mod tests {
             source: base.to_string(),
             input: "evidence stays".to_string(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
         let bridge_dir =
@@ -8897,6 +8990,7 @@ mod tests {
             source: "\"slow model\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
         let child = Command::new("sleep").arg("30").spawn().unwrap();
@@ -8949,6 +9043,7 @@ mod tests {
             source: "\"first\" \"failed prompt\"".to_string(),
             input: "original record".to_string(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
 
@@ -8987,11 +9082,13 @@ mod tests {
             source: "\"inspect parser\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let right = RunRequest {
             source: "\"inspect runtime\"".to_string(),
             input: String::new(),
             scope: RunScope::Block,
+            think: None,
         };
         let left_id = app.register_rebis_run_with_mode(&left, RebisRunState::Running, true);
         let right_id = app.register_rebis_run_with_mode(&right, RebisRunState::Running, true);
@@ -9074,6 +9171,7 @@ mod tests {
             source: "\"active parallel\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let active_id = app.register_rebis_run_with_mode(&active, RebisRunState::Running, true);
         let (job, _tx) = test_job("sleep 30", Some(active_id));
@@ -9083,6 +9181,7 @@ mod tests {
             source: "\"serial follower\"".to_string(),
             input: String::new(),
             scope: RunScope::Block,
+            think: None,
         }));
 
         assert_eq!(app.parallel_jobs.len(), 1);
@@ -9106,6 +9205,7 @@ mod tests {
                 source: format!("\"{prompt}\""),
                 input: String::new(),
                 scope: RunScope::Program,
+                think: None,
             }));
         }
 
@@ -9280,6 +9380,7 @@ mod tests {
             source: "\"captured program\"".to_string(),
             input: "program record".to_string(),
             scope: rebis_workspace::RunScope::Program,
+            think: None,
         }));
         app.queue
             .push(QueuedWork::Line("queued chat remains".to_string()));
@@ -9287,6 +9388,7 @@ mod tests {
             source: "\"captured block\"".to_string(),
             input: "block record".to_string(),
             scope: rebis_workspace::RunScope::Block,
+            think: None,
         }));
 
         assert_eq!(app.queue.len(), 3);
@@ -9354,6 +9456,7 @@ mod tests {
             source: "\"inspect the workspace\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         }));
 
         assert!(app.job.is_none());
@@ -9404,11 +9507,13 @@ mod tests {
             source: "\"design the experiment\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         }));
         app.handle_rebis_action(WorkspaceAction::Run(RunRequest {
             source: "\"critique the controls\"".to_string(),
             input: String::new(),
             scope: RunScope::Block,
+            think: None,
         }));
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -9455,6 +9560,7 @@ mod tests {
             source: "\"timed run\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Queued);
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
@@ -9487,6 +9593,7 @@ mod tests {
             source: "(std/reflexion reflect \"kept\")".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
@@ -9516,6 +9623,7 @@ mod tests {
             source: "(\"inspect\" \"repair\")".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let mut app = App::new();
         app.open_rebis(None);
@@ -9608,11 +9716,13 @@ mod tests {
             source: "\"finished\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let active = RunRequest {
             source: "\"active agent\"".to_string(),
             input: String::new(),
             scope: RunScope::Block,
+            think: None,
         };
         app.register_rebis_run(&completed, RebisRunState::Complete);
         app.register_rebis_run(&active, RebisRunState::Running);
@@ -9645,6 +9755,7 @@ mod tests {
             source: "\"wide output\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Complete);
         let output = format!("BEGIN-{}-END-UNTRUNCATED", "x".repeat(160));
@@ -9686,6 +9797,7 @@ mod tests {
             source: "\"long agent prompt\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Complete);
         let title = "Rebis agent 1 · Design a falsifiable ritual whose complete instruction must remain visible";
@@ -9714,6 +9826,7 @@ mod tests {
             source: "\"model reply\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Complete);
         let title = "model turn 123 · complete response that wraps across several narrow rows";
@@ -9751,6 +9864,7 @@ mod tests {
             source: "\"long output\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Complete);
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
@@ -9809,6 +9923,7 @@ mod tests {
             source: "\"still working\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         app.register_rebis_run(&request, RebisRunState::Running);
 
@@ -9839,6 +9954,7 @@ mod tests {
             source: "\"working\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
@@ -10170,6 +10286,7 @@ mod tests {
             source: "\"stranded\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Running);
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
@@ -10332,6 +10449,7 @@ mod tests {
             source: "\"wheel output\"".to_string(),
             input: String::new(),
             scope: RunScope::Program,
+            think: None,
         };
         let id = app.register_rebis_run(&request, RebisRunState::Complete);
         let run = app.rebis_runs.iter_mut().find(|run| run.id == id).unwrap();
