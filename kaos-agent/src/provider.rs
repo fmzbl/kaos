@@ -26,6 +26,9 @@
 //! `claude`, `sim`) so the TUI can hand the choice to a one-shot subprocess via the
 //! `KAOS_MODEL` env var.
 
+use std::collections::BTreeSet;
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// Anthropic's public API model ID. This remains available through the explicit
@@ -37,6 +40,113 @@ pub const FABLE_5_MODEL: &str = "claude-fable-5";
 /// is the recommended `KAOS_FABLE_FALLBACK_MODEL`. The CLI's own moving
 /// `--model opus` alias is not reachable by design.
 pub const OPUS_5_MODEL: &str = "claude-opus-5";
+
+/// The model selectors shared by the terminal palette and the visual Settings
+/// picker. Live Ollama names are appended by [`model_choices`].
+pub const KNOWN_MODEL_CHOICES: &[&str] = &[
+    "claude",
+    "claude:sonnet",
+    "claude:opus",
+    "claude:opus5",
+    "claude:haiku",
+    "claude:fable",
+    "anthropic",
+    "openai",
+    "openrouter",
+    "ollama",
+    "sim",
+];
+
+static OLLAMA_MODEL_CACHE: OnceLock<Mutex<Option<Vec<String>>>> = OnceLock::new();
+
+fn ollama_model_cache() -> &'static Mutex<Option<Vec<String>>> {
+    OLLAMA_MODEL_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Parse the table printed by `ollama ls`. Keeping this separate from process
+/// discovery makes the model picker deterministic to test and tolerant of the
+/// CLI adding more columns later.
+fn parse_ollama_ls(text: &str) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    for line in text.lines() {
+        let Some(name) = line.split_whitespace().next() else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("name") {
+            continue;
+        }
+        names.insert(name.to_string());
+    }
+    names.into_iter().collect()
+}
+
+/// Ask the active Ollama installation for its current local model list.
+///
+/// `ollama ls` inherits `OLLAMA_HOST`, so the same configured endpoint used by
+/// model calls is also the endpoint shown in both frontends. When the setting
+/// exists only in Kaos's config file (for example in the standalone visual
+/// binary), it is passed explicitly to the child command.
+pub fn ollama_models() -> Result<Vec<String>, String> {
+    let mut command = Command::new("ollama");
+    if std::env::var_os("OLLAMA_HOST").is_none() {
+        if let Some(host) = kaos_core::config::value("OLLAMA_HOST").filter(|v| !v.trim().is_empty())
+        {
+            command.env("OLLAMA_HOST", host);
+        }
+    }
+    let output = command
+        .arg("ls")
+        .output()
+        .map_err(|error| format!("could not run `ollama ls`: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("`ollama ls` exited with {}", output.status)
+        } else {
+            format!("`ollama ls`: {detail}")
+        });
+    }
+    Ok(parse_ollama_ls(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Return the cached Ollama list, filling it once on first use. Autocomplete
+/// runs during every frame/key event, so it must not launch a child repeatedly.
+pub fn cached_ollama_models() -> Vec<String> {
+    let cache = ollama_model_cache();
+    let mut cached = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(models) = cached.as_ref() {
+        return models.clone();
+    }
+    let models = ollama_models().unwrap_or_default();
+    *cached = Some(models.clone());
+    models
+}
+
+/// Refresh the cached Ollama catalog after a pull or endpoint change.
+pub fn refresh_ollama_models() -> Result<Vec<String>, String> {
+    let models = ollama_models()?;
+    *ollama_model_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(models.clone());
+    Ok(models)
+}
+
+/// All model selectors shown by the shared visual picker. The current Ollama
+/// names are prefixed exactly as `/model` expects.
+pub fn model_choices() -> Vec<String> {
+    let mut choices = KNOWN_MODEL_CHOICES
+        .iter()
+        .map(|choice| (*choice).to_string())
+        .collect::<Vec<_>>();
+    choices.extend(
+        cached_ollama_models()
+            .into_iter()
+            .map(|model| format!("ollama:{model}")),
+    );
+    choices
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -980,6 +1090,29 @@ mod tests {
         ] {
             let spec = Spec::parse(s);
             assert_eq!(spec.canonical(), s, "round-trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn parses_ollama_ls_names_without_header_or_duplicates() {
+        assert_eq!(
+            parse_ollama_ls(
+                "NAME               ID            SIZE      MODIFIED\n\
+                 qwen3:4b           abc           2 GB      now\n\
+                 llama3.2:3b        def           2 GB      now\n\
+                 qwen3:4b           abc           2 GB      now\n"
+            ),
+            vec!["llama3.2:3b".to_string(), "qwen3:4b".to_string()]
+        );
+    }
+
+    #[test]
+    fn model_choices_include_the_shared_selectors() {
+        for choice in KNOWN_MODEL_CHOICES {
+            assert!(
+                model_choices().contains(&choice.to_string()),
+                "missing {choice}"
+            );
         }
     }
 

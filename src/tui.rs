@@ -7,6 +7,7 @@
 //! ratatui owns the screen (the subprocess writes to a pipe, never the terminal), and
 //! long/agent commands stream live. The model is passed down via `KAOS_MODEL`.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::{self, BufReader, Read, Write};
 #[cfg(unix)]
@@ -111,14 +112,24 @@ fn C_DONE() -> Color {
 const RAW_CHAT_TASK_ARG: &str = "__kaos_raw_chat_task__";
 const RAW_CHAT_TASK_ENV: &str = "KAOS_RAW_CHAT_TASK_STDIN";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct CommandSpec {
-    display: &'static str,
-    insert: &'static str,
+    display: Cow<'static, str>,
+    insert: Cow<'static, str>,
 }
 
 const fn command(display: &'static str, insert: &'static str) -> CommandSpec {
-    CommandSpec { display, insert }
+    CommandSpec {
+        display: Cow::Borrowed(display),
+        insert: Cow::Borrowed(insert),
+    }
+}
+
+fn owned_command(display: String, insert: String) -> CommandSpec {
+    CommandSpec {
+        display: Cow::Owned(display),
+        insert: Cow::Owned(insert),
+    }
 }
 
 const MAIN_SLASH_COMMANDS: &[CommandSpec] = &[
@@ -151,19 +162,6 @@ const MAIN_SLASH_COMMANDS: &[CommandSpec] = &[
     command("new", "new"),
     command("clear", "clear"),
     command("quit", "quit"),
-];
-const MODEL_SELECTIONS: &[CommandSpec] = &[
-    command("model claude", "model claude"),
-    command("model claude:sonnet", "model claude:sonnet"),
-    command("model claude:opus", "model claude:opus"),
-    command("model claude:opus5", "model claude:opus5"),
-    command("model claude:haiku", "model claude:haiku"),
-    command("model claude:fable", "model claude:fable"),
-    command("model anthropic", "model anthropic"),
-    command("model openai", "model openai"),
-    command("model openrouter", "model openrouter"),
-    command("model ollama", "model ollama"),
-    command("model sim", "model sim"),
 ];
 const REBIS_SLASH_COMMANDS: &[CommandSpec] = &[
     command("chat", "chat"),
@@ -233,22 +231,45 @@ fn completions(query: &str, catalog: &'static [CommandSpec]) -> Vec<CommandSpec>
     let query = query.trim_start_matches('/').to_ascii_lowercase();
     catalog
         .iter()
-        .copied()
+        .cloned()
         .filter(|command| {
             command.insert.starts_with(&query)
-                || (command.insert.ends_with(' ') && query.starts_with(command.insert))
+                || (command.insert.ends_with(' ') && query.starts_with(command.insert.as_ref()))
         })
         .collect()
+}
+
+fn model_completions_from(query: &str, ollama_models: &[String]) -> Vec<CommandSpec> {
+    let normalized = query.trim_start_matches('/').to_ascii_lowercase();
+    let mut choices = crate::provider::KNOWN_MODEL_CHOICES
+        .iter()
+        .map(|model| {
+            let insert = format!("model {model}");
+            owned_command(insert.clone(), insert)
+        })
+        .filter(|model| model.insert.to_ascii_lowercase().starts_with(&normalized))
+        .collect::<Vec<_>>();
+    choices.extend(
+        ollama_models
+            .iter()
+            .map(|model| {
+                let insert = format!("model ollama:{model}");
+                owned_command(insert.clone(), insert)
+            })
+            .filter(|model| model.insert.to_ascii_lowercase().starts_with(&normalized)),
+    );
+    choices
+}
+
+fn model_completions(query: &str) -> Vec<CommandSpec> {
+    let ollama_models = crate::provider::cached_ollama_models();
+    model_completions_from(query, &ollama_models)
 }
 
 fn main_completions(query: &str) -> Vec<CommandSpec> {
     let normalized = query.trim_start_matches('/').to_ascii_lowercase();
     if normalized.starts_with("model ") {
-        MODEL_SELECTIONS
-            .iter()
-            .copied()
-            .filter(|model| model.insert.starts_with(&normalized))
-            .collect()
+        model_completions(query)
     } else {
         completions(query, MAIN_SLASH_COMMANDS)
     }
@@ -257,17 +278,13 @@ fn main_completions(query: &str) -> Vec<CommandSpec> {
 fn rebis_completions(query: &str) -> Vec<CommandSpec> {
     let normalized = query.trim_start_matches('/').to_ascii_lowercase();
     if normalized.starts_with("model ") {
-        MODEL_SELECTIONS
-            .iter()
-            .copied()
-            .filter(|model| model.insert.starts_with(&normalized))
-            .collect()
+        model_completions(query)
     } else {
         completions(query, REBIS_SLASH_COMMANDS)
     }
 }
 
-fn missing_command_argument(query: &str, command: CommandSpec) -> bool {
+fn missing_command_argument(query: &str, command: &CommandSpec) -> bool {
     let query = query.trim_start_matches('/');
     command.display.contains('<')
         && command.insert.ends_with(' ')
@@ -3191,14 +3208,16 @@ impl App {
                         return;
                     }
                     KeyCode::Tab | KeyCode::BackTab => {
-                        let command = suggestions[self.command_choice.min(suggestions.len() - 1)];
+                        let command =
+                            suggestions[self.command_choice.min(suggestions.len() - 1)].clone();
                         self.input = format!("/{}", command.insert);
                         self.cursor = self.input.chars().count();
                         return;
                     }
                     KeyCode::Enter => {
-                        let command = suggestions[self.command_choice.min(suggestions.len() - 1)];
-                        if missing_command_argument(&self.input, command) {
+                        let command =
+                            suggestions[self.command_choice.min(suggestions.len() - 1)].clone();
+                        if missing_command_argument(&self.input, &command) {
                             self.input = format!("/{}", command.insert);
                             self.cursor = self.input.chars().count();
                             return;
@@ -3206,7 +3225,7 @@ impl App {
                         if !self
                             .input
                             .trim_start_matches('/')
-                            .starts_with(command.insert)
+                            .starts_with(command.insert.as_ref())
                         {
                             self.input = format!("/{}", command.insert);
                             self.cursor = self.input.chars().count();
@@ -3724,12 +3743,13 @@ impl App {
                 KeyCode::Enter => {
                     let choices = rebis_completions(&workspace.command);
                     if !choices.is_empty() {
-                        let command = choices[workspace.command_choice.min(choices.len() - 1)];
-                        if missing_command_argument(&workspace.command, command) {
+                        let command =
+                            choices[workspace.command_choice.min(choices.len() - 1)].clone();
+                        if missing_command_argument(&workspace.command, &command) {
                             workspace.command = command.insert.to_string();
                             return;
                         }
-                        if !workspace.command.starts_with(command.insert) {
+                        if !workspace.command.starts_with(command.insert.as_ref()) {
                             workspace.command = command.insert.to_string();
                         }
                     }
@@ -7905,7 +7925,7 @@ mod tests {
         );
         let displays = REBIS_SLASH_COMMANDS
             .iter()
-            .map(|command| command.display)
+            .map(|command| command.display.as_ref())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(displays.len(), REBIS_SLASH_COMMANDS.len());
         assert_eq!(
@@ -8313,6 +8333,19 @@ mod tests {
         assert_eq!(
             rebis_completions("model claude:h"),
             vec![command("model claude:haiku", "model claude:haiku")]
+        );
+    }
+
+    #[test]
+    fn model_command_suggests_live_ollama_names() {
+        let models = ["qwen3:4b".to_string(), "llama3.2:3b".to_string()];
+        assert_eq!(
+            model_completions_from("/model ollama:qwen", &models),
+            vec![command("model ollama:qwen3:4b", "model ollama:qwen3:4b")]
+        );
+        assert_eq!(
+            rebis_completions("model ollama:llama"),
+            model_completions("model ollama:llama")
         );
     }
 

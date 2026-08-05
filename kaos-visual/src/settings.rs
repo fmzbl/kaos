@@ -107,6 +107,9 @@ pub(crate) use kaos_core::config::ENVIRONMENT_DOCS;
 pub(crate) struct SettingsPane {
     pub(crate) filter: String,
     pub(crate) values: BTreeMap<String, String>,
+    /// Provider/model selectors shared with the terminal palette. Ollama
+    /// entries are discovered from the active `ollama ls` catalog.
+    pub(crate) model_choices: Vec<String>,
     saved: BTreeMap<String, String>,
     pub(crate) notice: Option<String>,
     /// In-flight credential entry, keyed by provider name. Cleared the moment
@@ -117,6 +120,7 @@ pub(crate) struct SettingsPane {
 
 impl SettingsPane {
     pub(crate) fn load() -> Self {
+        let model_choices = kaos_agent::provider::model_choices();
         match kaos_core::config::values() {
             Ok(mut values) => {
                 for key in kaos_core::config::CONFIG_KEYS {
@@ -127,11 +131,13 @@ impl SettingsPane {
                 Self {
                     saved: values.clone(),
                     values,
+                    model_choices,
                     ..Self::default()
                 }
             }
             Err(error) => Self {
                 notice: Some(format!("could not read configuration: {error}")),
+                model_choices,
                 ..Self::default()
             },
         }
@@ -147,6 +153,19 @@ impl SettingsPane {
     pub(crate) fn reload(&mut self) {
         *self = Self::load();
         self.notice = Some("reloaded persistent configuration".to_string());
+    }
+
+    /// Re-read the active Ollama catalog without disturbing typed settings.
+    pub(crate) fn refresh_models(&mut self) {
+        match kaos_agent::provider::refresh_ollama_models() {
+            Ok(models) => {
+                self.model_choices = kaos_agent::provider::model_choices();
+                self.notice = Some(format!("found {} Ollama model(s)", models.len()));
+            }
+            Err(error) => {
+                self.notice = Some(format!("Ollama models unavailable: {error}"));
+            }
+        }
     }
 
     pub(crate) fn save(&mut self) -> Result<usize, String> {

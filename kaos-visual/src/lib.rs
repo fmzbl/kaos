@@ -3578,6 +3578,7 @@ impl Editor {
         let mut save = false;
         let mut reload = false;
         let mut restore = false;
+        let mut refresh_models = false;
         let mut theme_change = None;
         let mut apply_cwd = false;
         // Deferred out of the closure for the same reason every other mutation
@@ -3589,6 +3590,7 @@ impl Editor {
         let Some(Pane::Settings(pane)) = self.tabs.active_mut() else {
             return;
         };
+        let model_choices = pane.model_choices.clone();
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -3806,6 +3808,41 @@ impl Editor {
                                         if ui.checkbox(&mut enabled, "").changed() {
                                             *value = enabled.to_string();
                                         }
+                                    } else if key == "KAOS_MODEL" {
+                                        let value = pane.values.entry(key.to_string()).or_default();
+                                        ui.add(
+                                            egui::TextEdit::singleline(value)
+                                                .desired_width(300.0)
+                                                .hint_text("ollama:qwen3:4b or openrouter:vendor/model"),
+                                        );
+                                        if ui
+                                            .small_button("refresh Ollama")
+                                            .on_hover_text("re-run `ollama ls` and update the suggestions")
+                                            .clicked()
+                                        {
+                                            refresh_models = true;
+                                        }
+                                        let query = value.trim().to_ascii_lowercase();
+                                        egui::ComboBox::from_id_salt(("setting-model-picker", key))
+                                            .selected_text("suggest model")
+                                            .width(220.0)
+                                            .show_ui(ui, |ui| {
+                                                let mut shown = 0;
+                                                for choice in model_choices.iter().filter(|choice| {
+                                                    query.is_empty()
+                                                        || choice.to_ascii_lowercase().contains(&query)
+                                                }) {
+                                                    shown += 1;
+                                                    ui.selectable_value(
+                                                        value,
+                                                        choice.clone(),
+                                                        choice,
+                                                    );
+                                                }
+                                                if shown == 0 {
+                                                    ui.colored_label(k.faint, "no matching model");
+                                                }
+                                            });
                                     } else {
                                         let value = pane.values.entry(key.to_string()).or_default();
                                         ui.add(
@@ -3891,6 +3928,9 @@ impl Editor {
                 Err(error) => error,
             });
             theme_change = Some(kaos_core::theme::mode());
+        }
+        if refresh_models {
+            pane.refresh_models();
         }
 
         // End the pane borrow before changing editor-wide state.

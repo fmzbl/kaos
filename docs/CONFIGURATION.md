@@ -106,6 +106,13 @@ OPENAI_BASE_URL = https://my-openai-compatible-host.example
 `claude:sonnet` or another Claude CLI tag. `KAOS_MAX_TOKENS` is for hosted
 chat-completions; Ollama's explicit generation cap is `KAOS_NUM_PREDICT`.
 
+The visual Settings editor provides a filtered model dropdown for `KAOS_MODEL`,
+including the currently installed Ollama names. The terminal `/model` palette
+and Rebis `model` command autocomplete the same names as `ollama:model`. Kaos
+gets the live list by running `ollama ls` against `OLLAMA_HOST`; use the visual
+editor's **refresh Ollama** button, or `/models` in the terminal, after pulling
+a model. Custom provider/model values can still be typed directly.
+
 ### Agent working
 
 | Key | Default | Type | Meaning |

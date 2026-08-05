@@ -3974,27 +3974,18 @@ fn models_cmd(session: &Session, arg: &str) {
         "  {}",
         ash("ollama \u{2014} local, free, seeded sampling + thinking control")
     );
-    match std::process::Command::new("ollama").arg("list").output() {
-        Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let mut any = false;
-            for name in text
-                .lines()
-                .skip(1)
-                .filter_map(|l| l.split_whitespace().next())
-            {
+    match kaos::provider::refresh_ollama_models() {
+        Ok(models) if models.is_empty() => println!(
+            "  {}",
+            dim(ASH(), "  (none pulled \u{2014} `ollama pull qwen3:14b`)")
+        ),
+        Ok(models) => {
+            for name in models {
                 let tok = format!("ollama:{name}");
                 println!("  {}{}", mark(&tok), dim(ASH(), &tok));
-                any = true;
-            }
-            if !any {
-                println!(
-                    "  {}",
-                    dim(ASH(), "  (none pulled \u{2014} `ollama pull qwen3:14b`)")
-                );
             }
         }
-        Err(_) => println!("  {}", dim(ASH(), "  (ollama not installed)")),
+        Err(error) => println!("  {}", dim(ASH(), &format!("  (unavailable: {error})"))),
     }
 
     println!();
@@ -4103,13 +4094,7 @@ fn model_cmd(session: &mut Session, arg: &str) {
         }
         ready.push("claude(cli)");
         println!("  {} {}", ash("keyed"), dim(ASH(), &ready.join("  ")));
-        if let Ok(out) = std::process::Command::new("ollama").arg("list").output() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let models: Vec<&str> = text
-                .lines()
-                .skip(1)
-                .filter_map(|l| l.split_whitespace().next())
-                .collect();
+        if let Ok(models) = kaos::provider::refresh_ollama_models() {
             if !models.is_empty() {
                 println!("  {} {}", ash("local"), dim(ASH(), &models.join("  ")));
             }
