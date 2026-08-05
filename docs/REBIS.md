@@ -166,7 +166,9 @@ before continuing.
 The visual Chat tab shows the model's work as it arrives rather than only its
 finished answer: a turn is a child process streaming into a retained log, so the
 reply is on screen while it is still being written, with a running timer beside
-it. You can keep typing while that is happening. A message written mid-answer does
+it. After delivery, the model/tool trace remains below the answer as collapsed,
+independently expandable sections; reopening the durable session restores those
+folds. You can keep typing while that is happening. A message written mid-answer does
 not stop the turn in flight and does not open a second one beside it: it waits,
 shown under the stream as queued, and goes out as the next turn the moment the
 current one lands. Several of them go out together as one turn, in the order

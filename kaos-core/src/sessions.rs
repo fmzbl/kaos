@@ -58,6 +58,10 @@ impl Role {
 pub struct Turn {
     pub role: Role,
     pub text: String,
+    /// Foldable model/tool work captured while producing this answer. It is
+    /// kept beside the answer so a completed message can still reveal the
+    /// reasoning and tool trace after the live child process is gone.
+    pub trace: String,
 }
 
 /// A conversation, with enough context to resume it where it happened.
@@ -94,11 +98,31 @@ impl Session {
     }
 
     pub fn push(&mut self, role: Role, text: impl Into<String>) {
+        self.push_with_trace(role, text, "");
+    }
+
+    /// Add a turn and retain the optional streamed work that produced it.
+    /// User turns intentionally ignore `trace`; only model turns have a work
+    /// stream to reveal.
+    pub fn push_with_trace(
+        &mut self,
+        role: Role,
+        text: impl Into<String>,
+        trace: impl Into<String>,
+    ) {
         let text = text.into();
         if text.trim().is_empty() {
             return;
         }
-        self.turns.push(Turn { role, text });
+        self.turns.push(Turn {
+            role,
+            text,
+            trace: if role == Role::Model {
+                trace.into()
+            } else {
+                String::new()
+            },
+        });
         self.updated = now();
     }
 
@@ -147,6 +171,11 @@ impl Session {
             s.push('\t');
             s.push_str(&escape(&t.text));
             s.push('\n');
+            if t.role == Role::Model && !t.trace.is_empty() {
+                s.push_str("trace\t");
+                s.push_str(&escape(&t.trace));
+                s.push('\n');
+            }
         }
         s
     }
@@ -163,7 +192,7 @@ impl Session {
                 .ok_or_else(|| format!("bad header line: {line}"))?;
             head.insert(k.trim(), v.trim());
         }
-        let mut turns = Vec::new();
+        let mut turns: Vec<Turn> = Vec::new();
         for line in lines {
             if line.trim().is_empty() {
                 continue;
@@ -171,10 +200,17 @@ impl Session {
             let (role, body) = line
                 .split_once('\t')
                 .ok_or_else(|| format!("bad turn line: {line}"))?;
+            if role == "trace" {
+                if let Some(turn) = turns.last_mut().filter(|turn| turn.role == Role::Model) {
+                    turn.trace = unescape(body);
+                }
+                continue;
+            }
             let role = Role::parse(role).ok_or_else(|| format!("unknown role: {role}"))?;
             turns.push(Turn {
                 role,
                 text: unescape(body),
+                trace: String::new(),
             });
         }
         Ok(Session {
@@ -371,6 +407,20 @@ mod tests {
         let s = sample();
         let back = Session::decode(&s.encode()).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn completed_model_work_round_trips_beside_its_answer() {
+        let mut s = Session::new("ollama:qwen3.6:35b", "/tmp/project");
+        s.push(Role::User, "write the program");
+        s.push_with_trace(
+            Role::Model,
+            "Here is the summary.",
+            "\u{1e}FOLD_OPEN\u{1f}model turn 1\nmodel    generated code\n\u{1e}FOLD_CLOSE",
+        );
+        let back = Session::decode(&s.encode()).unwrap();
+        assert_eq!(back.turns[1].text, "Here is the summary.");
+        assert_eq!(back.turns[1].trace, s.turns[1].trace);
     }
 
     #[test]

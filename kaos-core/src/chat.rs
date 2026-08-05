@@ -319,6 +319,35 @@ pub fn extract_chat_reply(text: &str) -> String {
     clean_chat_reply(&output)
 }
 
+/// Keep the foldable work sections from a streamed chat response.
+///
+/// The final answer is deliberately excluded: it is stored as the model turn
+/// itself. The returned text retains the shared fold markers and all lines
+/// inside them, allowing both frontends to render the work after the child has
+/// exited and the answer has been delivered.
+#[must_use]
+pub fn extract_chat_trace(text: &str) -> String {
+    let mut depth = 0usize;
+    let mut trace = Vec::new();
+    for raw in text.lines() {
+        match crate::fold::classify(raw) {
+            crate::fold::Marker::Open(_) => {
+                depth += 1;
+                trace.push(raw.to_string());
+            }
+            crate::fold::Marker::Close => {
+                if depth > 0 {
+                    trace.push(raw.to_string());
+                    depth -= 1;
+                }
+            }
+            crate::fold::Marker::Line(_) if depth > 0 => trace.push(raw.to_string()),
+            crate::fold::Marker::Line(_) => {}
+        }
+    }
+    trace.join("\n")
+}
+
 /// Strip terminal escapes — CSI colours, OSC hyperlinks, carriage returns —
 /// leaving the text itself exactly as it was, indentation included.
 ///
@@ -547,6 +576,27 @@ mod tests {
         assert_eq!(
             extract_chat_reply(stream),
             "Here is the answer.\n\nSecond paragraph."
+        );
+    }
+
+    #[test]
+    fn streamed_chat_trace_keeps_work_after_the_answer_is_delivered() {
+        let stream = concat!(
+            "started     chat\n",
+            "\u{1e}FOLD_OPEN\u{1f}model turn 1 · complete response\n",
+            "model    generated a Rebis program\n",
+            "\u{1e}FOLD_CLOSE\n",
+            "chat    final answer\n",
+            "Here is the summary.\n",
+            "complete     process exited 0\n",
+        );
+        assert_eq!(
+            extract_chat_trace(stream),
+            concat!(
+                "\u{1e}FOLD_OPEN\u{1f}model turn 1 · complete response\n",
+                "model    generated a Rebis program\n",
+                "\u{1e}FOLD_CLOSE"
+            )
         );
     }
 

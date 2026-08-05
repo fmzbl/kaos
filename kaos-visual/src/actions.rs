@@ -814,7 +814,7 @@ impl Desk {
     }
 
     /// Completed chat replies not yet transferred into their durable sessions.
-    pub(crate) fn take_chat_replies(&mut self) -> Vec<(String, String)> {
+    pub(crate) fn take_chat_replies(&mut self) -> Vec<(String, String, String)> {
         let mut replies = Vec::new();
         for task in &mut self.tasks {
             let Some(session) = task.session.clone() else {
@@ -837,6 +837,7 @@ impl Desk {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n");
+            let trace = kaos_core::chat::extract_chat_trace(&text);
             let text = kaos_core::chat::extract_chat_reply(&text);
             task.output.clear();
             task.output
@@ -848,6 +849,7 @@ impl Desk {
                 } else {
                     text
                 },
+                trace,
             ));
         }
         replies

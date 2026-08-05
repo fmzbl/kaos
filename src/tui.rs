@@ -4933,13 +4933,27 @@ impl App {
 
     /// Fold whatever the running job streamed into one model turn.
     fn flush_reply(&mut self) {
-        let reply = kaos_core::chat::extract_chat_reply(&std::mem::take(&mut self.session_reply));
+        let streamed = std::mem::take(&mut self.session_reply);
+        let trace = kaos_core::chat::extract_chat_trace(&streamed);
+        let reply = kaos_core::chat::extract_chat_reply(&streamed);
         if reply.trim().is_empty() {
             return;
         }
         self.session
-            .push(crate::sessions::Role::Model, reply.clone());
+            .push_with_trace(crate::sessions::Role::Model, reply.clone(), trace);
         self.adopt_composed_program(&reply);
+    }
+
+    /// Rebuild completed model work as collapsed terminal folds when a saved
+    /// conversation is reopened. The live transcript already has these
+    /// entries; persisted traces need the same presentation after the process
+    /// that produced them is gone.
+    fn push_saved_trace(&mut self, trace: &str) {
+        for line in trace.lines() {
+            self.push_stream_line(line);
+        }
+        self.open_fold = None;
+        self.fold_depth = 0;
     }
 
     /// In chaos mode a chat answers with a program, so put the program where
@@ -5058,6 +5072,9 @@ impl App {
                             Span::styled(format!("{prefix:<7}"), Style::default().fg(colour)),
                             Span::raw(line.to_string()),
                         ]));
+                    }
+                    if turn.role == crate::sessions::Role::Model && !turn.trace.is_empty() {
+                        self.push_saved_trace(&turn.trace);
                     }
                 }
                 self.session = session;

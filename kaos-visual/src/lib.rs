@@ -2155,14 +2155,17 @@ impl Editor {
         if self.actions.active_count() > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
-        for (session_id, reply) in self.actions.take_chat_replies() {
+        for (session_id, reply, trace) in self.actions.take_chat_replies() {
             let reply = kaos_core::chat::clean_chat_reply(&reply);
             let mut delivered = false;
             for tab in self.tabs.iter_mut() {
                 if let Pane::Chat(chat) = &mut tab.content {
                     if chat.session.id == session_id {
-                        chat.session
-                            .push(kaos_core::sessions::Role::Model, reply.clone());
+                        chat.session.push_with_trace(
+                            kaos_core::sessions::Role::Model,
+                            reply.clone(),
+                            trace.clone(),
+                        );
                         let _ = kaos_core::sessions::Store::default_store().save(&chat.session);
                         delivered = true;
                         break;
@@ -2172,7 +2175,11 @@ impl Editor {
             if !delivered {
                 let store = kaos_core::sessions::Store::default_store();
                 if let Ok(mut session) = store.load(&session_id) {
-                    session.push(kaos_core::sessions::Role::Model, reply.clone());
+                    session.push_with_trace(
+                        kaos_core::sessions::Role::Model,
+                        reply.clone(),
+                        trace.clone(),
+                    );
                     let _ = store.save(&session);
                 }
             }
@@ -2743,7 +2750,14 @@ fn paint_chat_text(ui: &mut egui::Ui, text: &str, k: Ink) {
     }
 }
 
-fn paint_chat_turn(ui: &mut egui::Ui, role: kaos_core::sessions::Role, text: &str, k: Ink) {
+fn paint_chat_turn(
+    ui: &mut egui::Ui,
+    role: kaos_core::sessions::Role,
+    text: &str,
+    trace: &str,
+    k: Ink,
+    salt: &str,
+) {
     let (label, marker, tone) = match role {
         kaos_core::sessions::Role::User => ("YOU", "●", k.accent),
         kaos_core::sessions::Role::Model => ("MODEL", "◇", k.secondary),
@@ -2768,8 +2782,27 @@ fn paint_chat_turn(ui: &mut egui::Ui, role: kaos_core::sessions::Role, text: &st
             });
             ui.add_space(2.0);
             paint_chat_text(ui, text, k);
+            if role == kaos_core::sessions::Role::Model && !trace.trim().is_empty() {
+                paint_chat_trace(ui, trace, k, salt);
+            }
         });
     ui.add_space(4.0);
+}
+
+/// Keep completed model work available without letting it dominate the answer.
+/// Each captured model/tool section remains independently collapsible, just as
+/// it was while the child process was streaming.
+fn paint_chat_trace(ui: &mut egui::Ui, trace: &str, k: Ink, salt: &str) {
+    let lines = trace.lines().map(str::to_string).collect::<Vec<_>>();
+    if lines.is_empty() {
+        return;
+    }
+    ui.add_space(5.0);
+    ui.horizontal(|ui| {
+        ui.colored_label(k.faint, "◇ thinking / tool use");
+        ui.colored_label(k.faint, "· expand a section");
+    });
+    paint_stream_sections(ui, &lines, k, salt);
 }
 
 fn run_state_tone(state: runs::State, paused: bool, k: Ink) -> Color32 {
@@ -4215,8 +4248,9 @@ impl Editor {
                             });
                         ui.add_space(7.0);
                     }
-                    for turn in &chat.session.turns {
-                        paint_chat_turn(ui, turn.role, &turn.text, k);
+                    for (index, turn) in chat.session.turns.iter().enumerate() {
+                        let salt = format!("chat-turn-{}-{index}", chat.session.id);
+                        paint_chat_turn(ui, turn.role, &turn.text, &turn.trace, k, &salt);
                     }
                     // The turn in flight, as it arrives. A chat is a child
                     // process streaming into a retained log, so the answer

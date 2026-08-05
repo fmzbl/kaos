@@ -619,9 +619,12 @@ limited to personal sigils.
 
 Chat browses and resumes the same durable sessions `/resume` reads in the
 terminal app. User and model turns have separate accent/flow cards; headings,
-lists, quotes, and fenced code receive readable typography. Retained run output
-uses colored semantic tags (`EVENT`, `PROMPT`, `RESULT`, `PAUSED`, and so on)
-without changing the raw stream copied or written to disk. The **Actions** tab
+lists, quotes, and fenced code receive readable typography. Completed model turns
+keep their thinking/tool-use trace in a collapsed section below the answer, so
+generated code and intermediate steps can be expanded after the message lands;
+the terminal session view restores the same folds. Retained run output uses
+colored semantic tags (`EVENT`, `PROMPT`, `RESULT`, `PAUSED`, and so on) without
+changing the raw stream copied or written to disk. The **Actions** tab
 exposes the remaining terminal capabilities
 as typed UI: code, cast, conclave, scry, roster, egregore, models, credential
 status/store/forget, help, attachments, tool authority, and serial/parallel task
