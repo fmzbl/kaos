@@ -67,7 +67,6 @@ model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    retry queue | retry
 answer   retry queue | retry
-dream    kept 1 answer · 5 remembered
 o-[]-o
 RESULT
 result   retry queue | retry

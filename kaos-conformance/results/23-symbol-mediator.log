@@ -3,9 +3,9 @@ model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 Rebis agent 2 · Answer with exactly: the failure appears at random
 model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    the failure appears at random
-model turn 1 · complete response
 model    true
+model turn 1 · complete response
+model    the failure appears at random
 event    prompt started · abstraction 1 · Answer with exactly: the failure is reproducible on every run
 answer   true
 event    prompt started · abstraction 1 · Answer with exactly: the failure appears at random

@@ -1169,6 +1169,12 @@ struct RebisOracle<'a> {
     directive_path: Option<std::path::PathBuf>,
     /// Present only for opted-in, tool-using parallel runs.
     worktrees: Option<kaos::rebis_worktree::GitWorktrees>,
+    /// The mediator names this host claims — `[vote]`, `[first]`, `[check]`.
+    ///
+    /// Built once per run because `[check]`'s authority is the run's, not the
+    /// square's: a program cannot acquire a verifier partway through by writing
+    /// one, and it cannot say what the verifier is at all.
+    mediators: kaos_agent::gate::Mediators,
 }
 
 impl RebisOracle<'_> {
@@ -1343,6 +1349,20 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             .map(str::trim)
             .filter(|prefix| !prefix.is_empty())
             .any(|prefix| model.starts_with(prefix))
+    }
+
+    /// The three judgements Kaos supplies that the calculus cannot make.
+    ///
+    /// `[vote]` counts ballots, `[first]` is positional, `[check]` runs the
+    /// configured verifier — see [`kaos_agent::gate`] for why each exists and
+    /// what `tests/myth_equivalence.rs` found. Every other mediator name is
+    /// declined and keeps the meaning it has in every other host.
+    ///
+    /// The gate's authority is this run's: without `--allow-tools` a program
+    /// naming `[check]` is refused at resolution rather than silently answering
+    /// as though it had been verified.
+    fn mediate(&self, mediator: &str, branches: &[String]) -> rebis_lang::Mediation {
+        self.mediators.judge(mediator, branches)
     }
 
     fn try_fire(&self, prompt: &str) -> Result<Option<String>, String> {
@@ -1934,6 +1954,16 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             ExecutionEvent::MediatorResolved { result, holonomy } => println!(
                 "event    mediator resolved deterministically · result {result} · holonomy {holonomy}%"
             ),
+            // A gate that refused is the outcome most worth reading, so it says
+            // WHY on the same line: "nothing passed" and "there was no gate" are
+            // different facts and a trace that blurred them would be useless
+            // exactly when it mattered.
+            ExecutionEvent::MediatorHosted { name, result, why } => match result {
+                Some(result) => {
+                    println!("event    mediator {name} chose result {result} · host judgement");
+                }
+                None => println!("event    mediator {name} refused every branch · {why}"),
+            },
             ExecutionEvent::MacroExpanded { name, remaining } => {
                 println!("event    macro {name} expanded · {remaining} remaining");
             }
@@ -2059,6 +2089,17 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             journal: kaos::rebis_checkpoint::PromptJournal::from_env(),
             directive_path: kaos::rebis_supervisor::path_from_env(),
             worktrees,
+            // `[check]`'s authority is the run's. A program cannot name the
+            // verifier and cannot acquire one partway through by writing it.
+            mediators: kaos_agent::gate::Mediators::standard(
+                kaos::config::value("KAOS_GATE").unwrap_or_default(),
+                std::time::Duration::from_secs(
+                    kaos::config::value("KAOS_GATE_TIMEOUT_S")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(300),
+                ),
+                allow_tools,
+            ),
         };
         let inlet = RebisInlet {
             path: kaos::rebis_inlet::path_from_env(),

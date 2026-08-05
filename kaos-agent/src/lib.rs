@@ -13,6 +13,7 @@ pub mod auth;
 pub mod backend;
 pub mod conductor;
 pub mod familiar;
+pub mod gate;
 #[cfg(feature = "api")]
 pub mod hand;
 pub mod myth;

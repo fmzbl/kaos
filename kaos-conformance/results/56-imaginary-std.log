@@ -5,9 +5,9 @@ model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 Rebis agent 2 · Answer with exactly the word: cobalt
 model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    cobalt
-model turn 1 · complete response
 model    phlogiston
+model turn 1 · complete response
+model    cobalt
 event    prompt started · abstraction 3 · Answer with exactly the word: phlogiston
 answer   phlogiston
 event    prompt started · abstraction 3 · Answer with exactly the word: cobalt

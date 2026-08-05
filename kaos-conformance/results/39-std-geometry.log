@@ -14,11 +14,11 @@ model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 Rebis agent 4 · Assess the rollback of this in five words.
 model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    Payment processing is delayed significantly.
+model    Failed
 model turn 1 · complete response
 model    Failed to process payment
 model turn 1 · complete response
-model    Failed
+model    Payment processing is delayed significantly.
 event    forward value routed
 event    prompt started · abstraction 2 · Assess the blast radius of this in five words.
 prompt   

@@ -138,6 +138,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "KAOS_ARENA",
     "KAOS_MAX_CONCURRENCY",
     "KAOS_BASH_TIMEOUT_S",
+    "KAOS_GATE",
     "KAOS_GATE_TIMEOUT_S",
     "KAOS_QUIET",
     "KAOS_SEARCH",
@@ -404,6 +405,13 @@ pub const CONFIG_DOCS: &[ConfigDoc] = &[
         example: "KAOS_BASH_TIMEOUT_S = 900",
     },
     ConfigDoc {
+        key: "KAOS_GATE",
+        kind: ValueKind::Text,
+        summary: "Verifier run by a Rebis `[check]` mediator.",
+        details: "The shell command a `([check] A B \u{2026})` square runs over each branch answer, keeping the first it exits zero for. The candidate arrives on `$CANDIDATE` and on stdin, so a `grep` and a `python3 verify.py` both work. The PROGRAM cannot name a command \u{2014} a mediator head is one atom \u{2014} so this is the only place a gate is chosen, and a run without `--allow-tools` refuses `[check]` rather than answering unverified. Empty means no gate is configured.",
+        example: "KAOS_GATE = cargo test --quiet",
+    },
+    ConfigDoc {
         key: "KAOS_GATE_TIMEOUT_S",
         kind: ValueKind::DurationSeconds,
         summary: "Validation-gate wall timeout.",
@@ -573,6 +581,7 @@ KAOS_ARENA = .
 KAOS_MAX_CONCURRENCY = 3
 # Per-shell-action and validation-gate wall limits, in seconds.
 KAOS_BASH_TIMEOUT_S = 600
+KAOS_GATE =
 KAOS_GATE_TIMEOUT_S = 300
 # Suppress live agentic progress, not the final verdict.
 KAOS_QUIET = 0

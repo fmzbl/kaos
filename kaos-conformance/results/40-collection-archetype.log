@@ -5,17 +5,17 @@ model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 Rebis agent 2 · Answer with exactly: three retries then give up
 model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
-model    three
-Rebis agent 3 · List the observable evidence that supports the label and one consequence.
-model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
-model turn 1 · complete response
 model    3
-Rebis agent 4 · Give one concise label for the active pattern.
+Rebis agent 3 · Give one concise label for the active pattern.
 model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    three
+Rebis agent 4 · List the observable evidence that supports the label and one consequence.
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
 model turn 1 · complete response
 model    3
+model turn 1 · complete response
+model    three
 event    prompt started · abstraction 2 · Answer with exactly: three retries then give up
 answer   3
 event    forward value routed

@@ -28,36 +28,53 @@
 //!
 //! # The finding
 //!
-//! **The mapping does not hold.** Three of the four gates have no Rebis
-//! spelling, not one — see [`the_gate_gap_list`], which is the deliverable of a
-//! failed proof and is asserted so it cannot drift silently.
+//! **The mapping did not hold.** Three of the four gates had no Rebis spelling,
+//! not one, and two of those three were expected to be fine: the plan's own
+//! table wrote `Gate::Vote → [consensus]` and `Gate::First → [first] or %`.
 //!
-//! Two of those three were expected to be fine. The plan's own table wrote
-//! `Gate::Vote → [consensus]` and `Gate::First → [first] or %`. Both readings
-//! are wrong for the same reason, and it is worth stating once: **Rebis has no
+//! Both readings are wrong for one reason, worth stating once: **Rebis has no
 //! table of mediator names.** `([anything] A B …)` whose head is pure symbols is
 //! a *symbol mediator*, and every one of them runs the same code —
 //! `resolve_mediation`, which scores each branch's round-trip holonomy against
 //! the mediator's own words and keeps the lowest. `[consensus]` does not count
 //! ballots; it prefers whichever branch reads most like the word "consensus".
-//! `[first]` is not positional. They are one gate wearing different words.
+//! `[first]` is not positional. They were one gate wearing different words.
 //!
-//! # What that changes
+//! # What that changed
 //!
 //! Not the direction — the size of A2. The plan proposed a host-supplied
-//! mediator so that `[check "cargo test"]` could exist without a 23rd operator.
-//! The same seam is the answer to all three gaps: `[vote]`, `[first]` and
-//! `[check …]` are host mediators resolved by name, and the operator set stays
-//! frozen because to Rebis they are symbol mediators like any other. A2 is
-//! therefore not one gate but three, and A4 cannot retire `myth.rs` until it is
-//! built — retiring it today would silently lose self-consistency voting, which
-//! is the one gate with a measured number behind it.
+//! mediator so `check` could exist without a 23rd operator; the same seam
+//! answered all three. `[vote]`, `[first]` and `[check]` are now host mediators
+//! resolved by name ([`kaos_agent::gate`]), and the operator set stayed frozen
+//! because to Rebis they are symbol mediators like any other. That is asserted,
+//! not assumed: see the end of [`the_gate_gap_list`].
+//!
+//! # What is still not equivalent, after all of it
+//!
+//! Three things, each its own test, and A4 must not claim otherwise:
+//!
+//! - **The bowtie does not translate**, for a reason nothing anticipated. A
+//!   square's mediator is handed every accepted *firing* since the square
+//!   started, not the values its branches returned — so a gate nested inside a
+//!   vote has its verdict discarded. See
+//!   [`the_bowtie_does_not_translate_and_here_is_why`].
+//! - **`first` was never deterministic in `myth`.** Its `spread` races for call
+//!   indices, so `first` means "an arbitrary one of the N". Rebis's is
+//!   positional, which is better and therefore not the same.
+//! - **A vote with no majority.** `myth` answers with the first candidate; Kaos
+//!   refuses. Deliberate — see
+//!   [`kaos_refuses_a_vote_that_myth_would_have_answered`] — and the shape D1's
+//!   abstention attaches to.
+//!
+//! And one the scripted oracle cannot see at all: the two languages do not send
+//! the same prompt text. [`the_prompt_text_is_not_identical`].
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+use kaos_agent::gate::Mediators;
 use kaos_agent::myth::{self, Cast};
-use rebis_lang::{Oracle, Record};
+use rebis_lang::{Mediation, Oracle, Record};
 
 // ── the shared world ────────────────────────────────────────────────────────
 
@@ -75,6 +92,9 @@ struct Scripted {
     rules: Vec<(String, Mutex<Vec<String>>)>,
     fallback: String,
     prompts: Mutex<Vec<String>>,
+    /// The names this host claims. Empty for the cases written before A2, so
+    /// they keep measuring what they measured.
+    mediators: Mediators,
 }
 
 impl Scripted {
@@ -83,7 +103,13 @@ impl Scripted {
     /// whose queue is exhausted repeats its last answer, so a case never fails
     /// because the script ran short rather than because the languages disagreed.
     fn new(rules: &[(&str, &[&str])], fallback: &str) -> Self {
+        Self::gated(rules, fallback, Mediators::none())
+    }
+
+    /// The same, with host mediators claimed.
+    fn gated(rules: &[(&str, &[&str])], fallback: &str, mediators: Mediators) -> Self {
         Self {
+            mediators,
             rules: rules
                 .iter()
                 .map(|(key, answers)| {
@@ -148,6 +174,15 @@ impl Oracle for Scripted {
     fn fire(&self, prompt: &str) -> Option<String> {
         self.answer(prompt)
     }
+
+    /// The three names Kaos claims, so a translation can use them.
+    ///
+    /// The gate is `grep -q pass`, which is a real subprocess reading the
+    /// candidate on stdin — the shell gate exercised as a shell gate rather than
+    /// as a stub, since being a subprocess is the whole of what it adds.
+    fn mediate(&self, mediator: &str, branches: &[String]) -> Mediation {
+        self.mediators.judge(mediator, branches)
+    }
 }
 
 /// Run a myth source on a task. Returns the answer and the firings it cost.
@@ -164,16 +199,52 @@ fn run_myth(source: &str, task: &str, rules: &[(&str, &[&str])]) -> (Option<Stri
 /// the draw order from the script deterministic, and concurrency is not what is
 /// under test here.
 fn run_rebis(source: &str, rules: &[(&str, &[&str])]) -> (Option<String>, usize) {
+    let (answer, firings, diagnostics) = run_rebis_gated(source, rules, Mediators::none());
+    assert!(diagnostics.is_empty(), "{source} reported {diagnostics:?}");
+    (answer, firings)
+}
+
+/// The same, under a host that claims mediator names, and keeping whatever the
+/// run reported — an unauthorised gate is supposed to report.
+fn run_rebis_gated(
+    source: &str,
+    rules: &[(&str, &[&str])],
+    mediators: Mediators,
+) -> (Option<String>, usize, Vec<String>) {
     let expression = rebis_lang::parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
-    let oracle = Scripted::new(rules, "");
+    let oracle = Scripted::gated(rules, "", mediators);
     let mut record = Record::from_texts::<&str>(&[]);
     let result = rebis_lang::orchestrate(&expression, &mut record, &oracle);
-    assert!(
-        result.diagnostics.is_empty(),
-        "{source} reported {:?}",
-        result.diagnostics
+    (
+        result.output,
+        oracle.firings(),
+        result.diagnostics.iter().map(ToString::to_string).collect(),
+    )
+}
+
+/// The gates Kaos claims, with a real subprocess behind `[check]`.
+fn kaos_gates(authorised: bool) -> Mediators {
+    Mediators::standard(
+        "grep -q pass".to_string(),
+        std::time::Duration::from_secs(10),
+        authorised,
+    )
+}
+
+/// Assert a myth and its now-spellable translation agree, under Kaos's gates.
+fn equivalent_gated(myth_source: &str, task: &str, rebis_source: &str, rules: &[(&str, &[&str])]) {
+    let (myth_answer, myth_firings) = run_myth(myth_source, task, rules);
+    let (rebis_answer, rebis_firings, diagnostics) =
+        run_rebis_gated(rebis_source, rules, kaos_gates(true));
+    assert!(diagnostics.is_empty(), "{rebis_source}: {diagnostics:?}");
+    assert_eq!(
+        myth_answer, rebis_answer,
+        "answers differ\n  myth:  {myth_source}\n  rebis: {rebis_source}"
     );
-    (result.output, oracle.firings())
+    assert_eq!(
+        myth_firings, rebis_firings,
+        "firings differ ({myth_firings} vs {rebis_firings})"
+    );
 }
 
 /// Assert one myth and its translation agree on the answer and on the price.
@@ -290,9 +361,12 @@ fn the_mirror_gate_and_a_symbol_mediator_are_not_the_same_gate() {
 
 #[test]
 fn a_symbol_mediator_is_the_same_gate_whatever_word_is_written() {
-    // `[consensus]`, `[first]` and `[vote]` are not three gates. Rebis has no
-    // table of mediator names: any pure-symbol head is scored the same way, so
-    // the word only changes what the branches are compared AGAINST.
+    // `[consensus]`, `[first]` and `[vote]` are not three gates ON A HOST THAT
+    // CLAIMS NOTHING, which is what `run_rebis` uses. Rebis has no table of
+    // mediator names: any pure-symbol head is scored the same way, so the word
+    // only changes what the branches are compared AGAINST. This is the property
+    // that lets Kaos claim three of those words without the language acquiring
+    // an opinion about them — see `the_gate_gap_list`.
     let rules: &[(&str, &[&str])] = &[("q", &["alpha alpha alpha", "beta"])];
 
     let consensus = run_rebis(r#"([consensus] "q" "q")"#, rules);
@@ -311,39 +385,43 @@ fn a_symbol_mediator_is_the_same_gate_whatever_word_is_written() {
     );
 }
 
-// ── what does not translate, and why ────────────────────────────────────────
+// ── the gaps, and what closed them ──────────────────────────────────────────
 
-/// The deliverable of a proof that failed: every myth gate with no Rebis
-/// spelling, and the reason.
+/// Every myth gate Rebis could not spell, and what it is spelled with now.
 ///
-/// Asserted as data rather than written in prose so that it cannot quietly go
-/// stale. When A2 lands a host mediator for one of these, its row comes out of
-/// this list and a passing equivalence case goes in above.
+/// This started as the deliverable of a proof that failed. A2 answered it: the
+/// host-mediator seam the plan proposed for `check` alone turned out to be the
+/// answer to all three, so each row now carries a spelling instead of a reason.
+/// Asserted as data rather than written in prose so it cannot go stale.
 #[test]
 fn the_gate_gap_list() {
-    let gaps: BTreeMap<&str, &str> = [
+    // gate → (what Rebis lacks on its own, how Kaos supplies it)
+    let gaps: BTreeMap<&str, (&str, &str)> = [
         (
             "Gate::Vote",
-            "the modal candidate by exact string equality. Rebis has no mediator \
-             that counts ballots — a symbol mediator scores round-trip holonomy \
-             against its own words, so `[consensus]` prefers whichever branch \
-             reads most like the word `consensus` and never notices that four \
-             branches said the same thing. This is the gate with the measured \
-             number behind it (+23pts AIME2025, solve.rs), so losing it silently \
-             is the worst outcome available.",
+            (
+                "no mediator counts ballots — a symbol mediator scores round-trip \
+                 holonomy against its own words, so `[consensus]` prefers whichever \
+                 branch reads most like the word `consensus` and never notices that \
+                 four branches said the same thing",
+                "[vote], a host mediator — kaos_agent::gate::Vote",
+            ),
         ),
         (
             "Gate::First",
-            "the first non-empty candidate. Positional selection. `[first]` is a \
-             symbol mediator like any other and is not positional; `%` selects \
-             between two written branches by a condition and cannot mean \
-             `whichever of these N came back`.",
+            (
+                "no mediator is positional; `%` selects between two written branches \
+                 by a condition and cannot mean `whichever of these N came back`",
+                "[first], a host mediator — kaos_agent::gate::First",
+            ),
         ),
         (
             "Gate::Check(cmd)",
-            "run a shell verifier over each candidate, keep the first survivor. \
-             The one gap the plan predicted, and the only one that needs \
-             authority as well as a spelling. A2.",
+            (
+                "no mediator reaches outside the run, which is the one gap the plan \
+                 predicted and the only one needing authority as well as a spelling",
+                "[check], a host mediator under --allow-tools — kaos_agent::gate::Check",
+            ),
         ),
     ]
     .into_iter()
@@ -354,65 +432,246 @@ fn the_gate_gap_list() {
         vec!["Gate::Check(cmd)", "Gate::First", "Gate::Vote"],
         "the gap list changed; update the module docs and A2's scope with it"
     );
-
-    // And the one that translates only partly, kept beside them so the shape of
-    // the remaining work is one list rather than two.
-    assert!(
-        !gaps.contains_key("Gate::Mirror"),
-        "Mirror has a near-spelling — see the_mirror_gate_and_a_symbol_mediator_are_not_the_same_gate"
+    for (gate, (_, spelling)) in &gaps {
+        assert!(
+            spelling.starts_with('['),
+            "{gate} still has no spelling, so A4 cannot retire myth.rs"
+        );
+    }
+    // And no operator was added to close any of them, which is checkable
+    // rather than merely asserted: `[check]` is an ordinary mediator square, so
+    // it parses and re-prints identically to `[merger]`'s shape whether or not
+    // any host claims the word. A new operator could not do that.
+    let claimed = rebis_lang::parse(r#"([check] "a" "b")"#).expect("parses");
+    let ordinary = rebis_lang::parse(r#"([merger] "a" "b")"#).expect("parses");
+    assert_eq!(
+        rebis_lang::format(&claimed).replace("check", "merger"),
+        rebis_lang::format(&ordinary),
+        "a claimed name must be the same syntax as any other symbol mediator"
     );
 }
 
-/// The examples in `docs/myth.md` that cannot be translated, named individually.
-///
-/// A1's acceptance criterion asks for exactly this: every documented example
-/// either has an answer-identical, firing-identical translation above, or is
-/// named here with the reason.
-#[test]
-fn the_untranslatable_documented_examples() {
-    let blocked: Vec<(&str, &str)> = vec![
-        (
-            "(gather vote (spread 8 fire))",
-            "the conclave, and the default `KAOS_MYTH`. Blocked on Gate::Vote.",
-        ),
-        (
-            "(gather first (spread 3 fire))",
-            "cheapest good answer. Blocked on Gate::First.",
-        ),
-        (
-            r#"(gather (check "lake env lean Attempt.lean") (spread 8 fire))"#,
-            "verified best-of-k. Blocked on Gate::Check.",
-        ),
-        (
-            r#"(gather (check "pytest -q tests/") (spread 16 fire))"#,
-            "a wide net into a strict gate. Blocked on Gate::Check.",
-        ),
-        (
-            "(gather vote (spread 4 (gather (check \"…\") (spread 4 fire))))",
-            "the bowtie. Blocked on Gate::Vote and Gate::Check together.",
-        ),
-        (
-            "(pipe (gather vote (spread 5 (ask \"Propose\"))) (ask \"Critique\") \
-             (gather (check \"pytest -q\") (spread 3 (ask \"Write\"))))",
-            "the propose/critique/write pipeline. Its SPINE translates — see \
-             pipe_is_the_arrow — and only its gates do not.",
-        ),
-        (
-            "the five-stage bug-fix pipeline",
-            "same shape at greater length: `->` carries the spine, and \
-             Gate::Vote and Gate::Check block stages 1, 3 and 5.",
-        ),
-    ];
+// ── the documented examples, now that the gates exist ───────────────────────
 
-    // Every reason must name the gate that blocks it, so the list stays a work
-    // item rather than a lament.
-    for (example, reason) in &blocked {
-        assert!(
-            reason.contains("Gate::") || reason.contains("gates"),
-            "{example}: a blocked example must name what blocks it"
-        );
-    }
-    assert_eq!(blocked.len(), 7);
+#[test]
+fn the_conclave_translates() {
+    // `(gather vote (spread 8 fire))` — the default `KAOS_MYTH`, and the
+    // headline of `docs/myth.md`. Eight branches, five say 42, and both
+    // languages find the majority for eight firings.
+    let rules: &[(&str, &[&str])] = &[(
+        "the answer",
+        &["42", "7", "42", "13", "42", "42", "7", "42"],
+    )];
+    equivalent_gated(
+        "(gather vote (spread 8 fire))",
+        "the answer",
+        &format!("([vote] {})", [r#""the answer""#; 8].join(" ")),
+        rules,
+    );
+}
+
+#[test]
+fn first_is_positional_in_rebis_and_arbitrary_in_myth() {
+    // `(gather first (spread 3 fire))` — and the one documented example whose
+    // two sides cannot be made answer-identical, for a reason that is a finding
+    // rather than a translation bug.
+    //
+    // `myth`'s `spread` fans out on scoped threads which take their call indices
+    // from an atomic, so which answer lands in which slot of the candidate list
+    // is decided by scheduling. `first` then takes the head of that list. It has
+    // therefore never meant "the first branch on the page" — it means "an
+    // arbitrary one of the N that came back", and reads as deterministic only
+    // because nothing ever looked.
+    //
+    // Rebis's square evaluates in source order, so `[first]` is positional and
+    // says which one it will be before it runs. That is a better gate wearing
+    // the same name, and pretending the two agree would hide the improvement.
+    let rules: &[(&str, &[&str])] = &[("q", &["one", "two", "three"])];
+
+    let (rebis_answer, rebis_firings, diagnostics) =
+        run_rebis_gated(r#"([first] "q" "q" "q")"#, rules, kaos_gates(true));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        rebis_answer.as_deref(),
+        Some("one"),
+        "positional: the first branch in source order"
+    );
+
+    let (myth_answer, myth_firings) = run_myth("(gather first (spread 3 fire))", "q", rules);
+    let myth_answer = myth_answer.expect("myth answers");
+    assert!(
+        ["one", "two", "three"].contains(&myth_answer.as_str()),
+        "myth returns SOME candidate — which one is not a property of the myth: {myth_answer}"
+    );
+
+    // The price is identical, which is the half of the mapping that does hold.
+    assert_eq!(myth_firings, rebis_firings);
+    assert_eq!(rebis_firings, 3);
+}
+
+#[test]
+fn verified_best_of_k_translates_and_runs_a_real_subprocess() {
+    // `(gather (check "…") (spread 8 fire))` — the shape the whole gate exists
+    // for. The Rebis side runs `grep -q pass` per candidate: an actual
+    // subprocess reading the candidate on stdin, since being a subprocess is
+    // the entire content of what this gate adds over the calculus.
+    let rules: &[(&str, &[&str])] = &[("q", &["nope", "nope", "this one is pass", "nope"])];
+    let (answer, firings, diagnostics) =
+        run_rebis_gated(r#"([check] "q" "q" "q" "q")"#, rules, kaos_gates(true));
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(answer.as_deref(), Some("this one is pass"));
+    assert_eq!(firings, 4, "the branches, and nothing for the gate");
+}
+
+#[test]
+fn a_gate_that_passes_nothing_answers_nothing() {
+    // The outcome D1 attaches to: the work was done, the gate refused it, and
+    // the run has an answer neither shipped nor failed.
+    let rules: &[(&str, &[&str])] = &[("q", &["nope", "also nope"])];
+    let (answer, firings, diagnostics) =
+        run_rebis_gated(r#"([check] "q" "q")"#, rules, kaos_gates(true));
+
+    assert_eq!(answer, None);
+    assert_eq!(firings, 2, "refusing does not refund the branches");
+    assert!(
+        diagnostics.is_empty(),
+        "a refusal is not an error: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn the_gate_is_refused_without_command_authority() {
+    // R7, and A2's third acceptance criterion. A program naming `[check]` in a
+    // run that holds no command authority must be refused AT RESOLUTION —
+    // reported, answering nothing — rather than quietly answering as though it
+    // had been verified.
+    let rules: &[(&str, &[&str])] = &[("q", &["this one is pass", "nope"])];
+    let (answer, firings, diagnostics) =
+        run_rebis_gated(r#"([check] "q" "q")"#, rules, kaos_gates(false));
+
+    assert_eq!(
+        answer, None,
+        "the candidate that WOULD have passed must not be returned"
+    );
+    assert_eq!(firings, 2);
+    let reported = diagnostics.join(" · ");
+    assert!(
+        reported.contains("--allow-tools"),
+        "the refusal must say what is missing: {reported}"
+    );
+}
+
+#[test]
+fn the_bowtie_does_not_translate_and_here_is_why() {
+    // `docs/myth.md`'s nested shape — gate small batches, vote across the
+    // verified winners — is the one example that stays blocked after A2, and the
+    // obstacle is not a missing gate. It is what a Rebis mediator is shown.
+    //
+    // **A square's mediator is handed every accepted FIRING since the square
+    // started, not the values its branches returned.** For a flat square those
+    // are the same list and nothing notices. For a nested one they are not: the
+    // outer mediator sees all four leaves, so the inner gates' verdicts are
+    // discarded and gating-then-voting silently becomes voting-over-everything.
+    //
+    // This is a property of the language, found here and recorded rather than
+    // fixed: changing what `accepted_since` collects would change the meaning of
+    // every nested square already written. A4 must not claim the bowtie
+    // translates, and a program wanting one should write the stages as an arrow.
+    let rules: &[(&str, &[&str])] = &[("q", &["nope", "a pass", "nope", "a pass"])];
+    let (answer, firings, diagnostics) = run_rebis_gated(
+        r#"([vote] ([check] "q" "q") ([check] "q" "q"))"#,
+        rules,
+        kaos_gates(true),
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(firings, 4, "the leaves are paid for either way");
+    // Both inner gates pass "a pass", so a bowtie would answer "a pass". The
+    // outer vote instead sees ["nope", "a pass", "nope", "a pass"], finds a tie,
+    // and takes the earliest — which is a candidate NO gate accepted.
+    assert_eq!(
+        answer.as_deref(),
+        Some("nope"),
+        "if this ever answers `a pass`, nested mediation changed and the bowtie \
+         may now translate — re-derive this test rather than deleting it"
+    );
+
+    // Written as an arrow instead, each gate's verdict survives, because a stage
+    // boundary is what keeps one square's firings out of the next one's view.
+    let rules: &[(&str, &[&str])] = &[("q", &["nope", "a pass"]), ("r", &["nope", "a pass"])];
+    let (piped, _, diagnostics) = run_rebis_gated(
+        r#"(-> ([check] "q" "q") ([check] "r" "r"))"#,
+        rules,
+        kaos_gates(true),
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(piped.as_deref(), Some("a pass"));
+}
+
+#[test]
+fn the_pipeline_translates_whole() {
+    // The propose → critique → write pipeline from `docs/myth.md`, gates and
+    // all: a voted first stage, a bare middle, a gated last. It was the last
+    // documented example still blocked, and nothing in it is blocked now.
+    let rules: &[(&str, &[&str])] = &[
+        (
+            "Propose",
+            &["use a pratt parser", "rewrite it", "use a pratt parser"],
+        ),
+        ("Critique", &["it drops the unary case"]),
+        ("Write", &["broken", "fn parse_unary() // pass"]),
+    ];
+    let (answer, firings, diagnostics) = run_rebis_gated(
+        r#"(-> ([vote] (+ "Propose an approach" "fix it")
+                      (+ "Propose an approach" "fix it")
+                      (+ "Propose an approach" "fix it"))
+             (+ "Critique it" "fix it")
+             ([check] (+ "Write the final code" "fix it")
+                      (+ "Write the final code" "fix it")))"#,
+        rules,
+        kaos_gates(true),
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(answer.as_deref(), Some("fn parse_unary() // pass"));
+    assert_eq!(firings, 3 + 1 + 2);
+}
+
+// ── one deliberate divergence ───────────────────────────────────────────────
+
+#[test]
+fn kaos_refuses_a_vote_that_myth_would_have_answered() {
+    // `myth`'s `Gate::Vote` calls `scry::majority`, which returns the FIRST
+    // candidate when every answer is distinct — a "majority" of one. Kaos's
+    // `[vote]` refuses instead, and the difference is deliberate rather than an
+    // oversight in the translation.
+    //
+    // A conclave whose five branches agree about nothing has found no signal.
+    // Returning the first launders a single guess as a consensus, and it is the
+    // exact shape of a false ship: an answer presented as though a gate had
+    // agreed with it. D1's criterion is zero of those.
+    let rules: &[(&str, &[&str])] = &[("q", &["a", "b", "c", "d", "e"])];
+
+    let (myth_answer, myth_firings) = run_myth("(gather vote (spread 5 fire))", "q", rules);
+    let myth_answer = myth_answer.expect("myth answers anyway");
+    // WHICH candidate it returns is not asserted, and the reason is the point:
+    // `spread` races for call indices, so the "winner" of a tie is whichever
+    // answer scheduling happened to put in slot zero. An answer chosen by thread
+    // ordering and reported as a consensus is the failure mode in miniature.
+    assert!(
+        ["a", "b", "c", "d", "e"].contains(&myth_answer.as_str()),
+        "myth returns some arbitrary candidate: {myth_answer}"
+    );
+
+    let (kaos_answer, kaos_firings, diagnostics) =
+        run_rebis_gated(r#"([vote] "q" "q" "q" "q" "q")"#, rules, kaos_gates(true));
+    assert_eq!(kaos_answer, None, "and Kaos declines to");
+    assert!(diagnostics.is_empty(), "declining is not an error");
+    assert_eq!(
+        myth_firings, kaos_firings,
+        "both still pay for five branches"
+    );
 }
 
 // ── the caveat the scripted oracle cannot see ───────────────────────────────
