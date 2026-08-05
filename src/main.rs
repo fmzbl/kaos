@@ -193,6 +193,15 @@ const REBIS_NESTING: usize = 32_768;
 const REBIS_STACK: usize = 256 * 1024 * 1024;
 
 fn main() {
+    // winit requires its event loop to be created on the process's main thread.
+    // Most Kaos commands run on a deliberately oversized worker stack because
+    // Rebis can recurse deeply, but the native visual editor is an exception:
+    // keep its event loop on the thread that entered main.
+    if std::env::args().nth(1).as_deref() == Some("visual") {
+        run();
+        return;
+    }
+
     // Everything runs on a stack sized for an interpreter rather than for a
     // thread. Without this the language's own default nesting limit is the
     // ceiling, and a recursive program stops far short of the expansion budget
