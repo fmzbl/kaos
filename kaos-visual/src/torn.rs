@@ -96,7 +96,9 @@ impl Torn {
     /// Returns `None` only if the paint callback still holds the lock, which it
     /// does not once the viewport is gone.
     pub(crate) fn reclaim(self) -> Option<TornPane> {
-        Arc::try_unwrap(self.pane).ok().and_then(|pane| pane.into_inner().ok())
+        Arc::try_unwrap(self.pane)
+            .ok()
+            .and_then(|pane| pane.into_inner().ok())
     }
 
     /// Draw the window. Called once per editor frame; the window itself

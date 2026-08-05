@@ -176,10 +176,7 @@ fn every_std_import_resolves() {
         return;
     }
     let known: BTreeSet<&str> = std_modules().iter().map(|(name, _)| *name).collect();
-    let available: BTreeSet<String> = collection()
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect();
+    let available: BTreeSet<String> = collection().iter().map(|(name, _)| name.clone()).collect();
 
     fn imports(form: &Expr, into: &mut Vec<String>) {
         match form {
@@ -208,10 +205,7 @@ fn every_std_import_resolves() {
                 // A sibling in the collection, imported by its own name.
                 available.contains(&import)
             };
-            assert!(
-                !import.is_empty(),
-                "{name}: an import with no module name"
-            );
+            assert!(!import.is_empty(), "{name}: an import with no module name");
             if !resolves {
                 broken.push(format!("{name}: imports `{import}`, which does not exist"));
             }

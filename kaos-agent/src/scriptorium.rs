@@ -60,7 +60,9 @@ impl Toolset for Scriptorium {
     fn invoke(&self, tool: &str, args: &BTreeMap<String, String>) -> String {
         let get = |key: &str| args.get(key).cloned().unwrap_or_default();
         let act = match tool {
-            "sigil_list" | "sigils" => Act::List { query: get("query") },
+            "sigil_list" | "sigils" => Act::List {
+                query: get("query"),
+            },
             "sigil_read" | "sigil_open" => Act::Read { name: get("name") },
             "sigil_write" | "sigil_save" => Act::Write {
                 name: get("name"),
@@ -160,7 +162,13 @@ mod tests {
             "<act tool=\"finish\"><arg name=\"message\">Tightened the second stage.</arg></act>",
         ]);
 
-        let talk = converse("You tend the sigil library.", "Improve team/reviews.", &scriptorium, &chat, 6);
+        let talk = converse(
+            "You tend the sigil library.",
+            "Improve team/reviews.",
+            &scriptorium,
+            &chat,
+            6,
+        );
 
         assert!(talk.error.is_none(), "{:?}", talk.error);
         assert_eq!(talk.steps.len(), 3, "read, edit, finish: {:?}", talk.steps);

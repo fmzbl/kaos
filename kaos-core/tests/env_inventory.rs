@@ -200,7 +200,10 @@ fn the_config_file_names_nothing_that_no_longer_exists() {
         .filter(|word| !known.contains(*word))
         .map(std::string::ToString::to_string)
         .collect();
-    assert!(stale.is_empty(), "named in the file but not documented: {stale:#?}");
+    assert!(
+        stale.is_empty(),
+        "named in the file but not documented: {stale:#?}"
+    );
 }
 
 /// `docs/CONFIGURATION.md` must name every environment-only variable too.

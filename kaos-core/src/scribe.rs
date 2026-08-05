@@ -68,13 +68,29 @@ pub enum Act {
 /// What became of one act.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scribed {
-    Listed { query: String, names: Vec<String> },
-    Read { name: String, source: String },
-    Wrote { name: String, path: PathBuf, created: bool },
-    Edited { name: String, path: PathBuf },
+    Listed {
+        query: String,
+        names: Vec<String>,
+    },
+    Read {
+        name: String,
+        source: String,
+    },
+    Wrote {
+        name: String,
+        path: PathBuf,
+        created: bool,
+    },
+    Edited {
+        name: String,
+        path: PathBuf,
+    },
     /// The act was legal to ask for and could not be done. Always says why:
     /// a refusal a model cannot read is a refusal it will repeat.
-    Refused { name: String, why: String },
+    Refused {
+        name: String,
+        why: String,
+    },
 }
 
 impl Scribed {
@@ -140,7 +156,9 @@ fn parse_act(text: &str) -> Option<Act> {
     let args = parse_args(&text[open_end + 1..body_end]);
     let get = |key: &str| args.get(key).cloned().unwrap_or_default();
     match tool.as_str() {
-        "sigil_list" | "sigils" => Some(Act::List { query: get("query") }),
+        "sigil_list" | "sigils" => Some(Act::List {
+            query: get("query"),
+        }),
         "sigil_read" | "sigil_open" => Some(Act::Read { name: get("name") }),
         "sigil_write" | "sigil_save" => Some(Act::Write {
             name: get("name"),
@@ -282,11 +300,9 @@ fn refuse(name: &str, error: &SigilError) -> Scribed {
     Scribed::Refused {
         name: name.to_string(),
         why: match error {
-            SigilError::Reserved => {
-                "that name belongs to the standard library or the collection, \
+            SigilError::Reserved => "that name belongs to the standard library or the collection, \
                  which are read-only — save it under a personal name instead"
-                    .to_string()
-            }
+                .to_string(),
             other => other.to_string(),
         },
     }
@@ -413,7 +429,10 @@ mod tests {
                 source: source.into(),
             },
         );
-        assert!(matches!(first, Scribed::Wrote { created: true, .. }), "{first:?}");
+        assert!(
+            matches!(first, Scribed::Wrote { created: true, .. }),
+            "{first:?}"
+        );
         assert_eq!(library.load("team/reviews").unwrap(), source);
 
         let again = perform(
@@ -433,7 +452,12 @@ mod tests {
     fn std_is_readable_and_never_writable() {
         let library = library();
         // Readable: a model improving a sigil should see what it imports.
-        match perform(&library, &Act::Read { name: "std/flow".into() }) {
+        match perform(
+            &library,
+            &Act::Read {
+                name: "std/flow".into(),
+            },
+        ) {
             Scribed::Read { source, .. } => assert!(source.contains("std-twice"), "{source}"),
             other => panic!("std/ should be readable: {other:?}"),
         }

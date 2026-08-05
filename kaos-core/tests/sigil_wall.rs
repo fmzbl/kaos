@@ -95,7 +95,10 @@ fn the_wall_lists_what_is_on_it_and_can_forget() {
     assert!(wall.names().is_empty());
     wall.save("second", &mark(), 64).expect("save");
     wall.save("first", &mark(), 64).expect("save");
-    assert_eq!(wall.names(), vec!["first".to_string(), "second".to_string()]);
+    assert_eq!(
+        wall.names(),
+        vec!["first".to_string(), "second".to_string()]
+    );
 
     wall.forget("first").expect("forget");
     assert_eq!(wall.names(), vec!["second".to_string()]);
@@ -139,9 +142,16 @@ fn a_stack_of_drawings_becomes_a_program_that_parses() {
 
     // Every drawing is in scope, and the ask is a `><`.
     for name in ["one", "two", "three"] {
-        assert!(source.contains(name), "{name} should be framed in: {source}");
+        assert!(
+            source.contains(name),
+            "{name} should be framed in: {source}"
+        );
     }
-    assert_eq!(source.matches("(+ (&: ").count(), 3, "one framing per sigil");
+    assert_eq!(
+        source.matches("(+ (&: ").count(),
+        3,
+        "one framing per sigil"
+    );
     assert!(source.contains("(>< "), "the ask is a meta form");
     let _ = std::fs::remove_dir_all(wall.root());
 }
@@ -169,7 +179,9 @@ fn anything_said_alongside_the_marks_is_carried() {
     let mut stack = Stack::default();
     stack.push("a.png".into());
     stack.said = "the retry queue, after the fix".to_string();
-    assert!(stack.instruction().contains("the retry queue, after the fix"));
+    assert!(stack
+        .instruction()
+        .contains("the retry queue, after the fix"));
     assert!(rebis_lang::parse(&stack.program()).is_ok());
 }
 

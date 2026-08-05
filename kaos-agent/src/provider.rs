@@ -279,7 +279,10 @@ impl Spec {
     ) -> (Result<String, String>, Vec<String>) {
         let refusals = crate::attach::Wire::of(self.kind).refusals(files);
         if files.is_empty() {
-            return (self.complete_sampled(system, user, timeout, sampling), refusals);
+            return (
+                self.complete_sampled(system, user, timeout, sampling),
+                refusals,
+            );
         }
         let answer = match (self.kind, sampling) {
             #[cfg(feature = "api")]
@@ -574,7 +577,14 @@ impl Spec {
             .map_err(|_| "OPENROUTER_API_KEY is not set".to_string())?;
         let base = openrouter_base();
         self.chat_completions_attached(
-            "openrouter", &base, &key, system, user, files, timeout, sampling,
+            "openrouter",
+            &base,
+            &key,
+            system,
+            user,
+            files,
+            timeout,
+            sampling,
         )
     }
 
@@ -587,8 +597,8 @@ impl Spec {
         timeout: Duration,
         sampling: Option<crate::backend::Sampling>,
     ) -> Result<String, String> {
-        let key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| "OPENAI_API_KEY is not set".to_string())?;
+        let key =
+            std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?;
         self.chat_completions_attached(
             "openai",
             "https://api.openai.com",

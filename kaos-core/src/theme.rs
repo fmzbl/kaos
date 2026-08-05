@@ -528,9 +528,8 @@ mod tests {
             // "grey" — beige is tinted by definition — so it means PLAINER than
             // anything carrying state: no text tone may be as coloured as the least
             // coloured of the three voices.
-            let spread = |(r, g, b): (u8, u8, u8)| {
-                i32::from(r.max(g).max(b)) - i32::from(r.min(g).min(b))
-            };
+            let spread =
+                |(r, g, b): (u8, u8, u8)| i32::from(r.max(g).max(b)) - i32::from(r.min(g).min(b));
             let loudest_text = [p.ink, p.mid, p.faint]
                 .into_iter()
                 .map(spread)
@@ -633,9 +632,7 @@ mod tests {
         // They share a hue on purpose, so nothing else can tell them apart.
         for mode in [Mode::Dark, Mode::Light] {
             let p = palette(mode);
-            let lightness = |(r, g, b): (u8, u8, u8)| {
-                i32::from(r) + i32::from(g) + i32::from(b)
-            };
+            let lightness = |(r, g, b): (u8, u8, u8)| i32::from(r) + i32::from(g) + i32::from(b);
             assert!(
                 (lightness(p.accent) - lightness(p.secondary)).abs() > 90,
                 "{mode:?}: accent and secondary are too close to read apart"

@@ -141,7 +141,12 @@ fn every_example_runs_against_the_whole_library() {
         if entry.path().extension().is_none_or(|e| e != "rebis") {
             continue;
         }
-        let name = entry.path().file_stem().expect("stem").to_string_lossy().into_owned();
+        let name = entry
+            .path()
+            .file_stem()
+            .expect("stem")
+            .to_string_lossy()
+            .into_owned();
         let source = std::fs::read_to_string(entry.path()).expect("read");
         let Ok(tree) = parse(&source) else {
             failures.push(format!("{name} does not parse"));
@@ -172,14 +177,20 @@ fn every_standard_library_macro_runs() {
             failures.extend(invoke(module, &name, arity));
         }
     }
-    assert!(count > 150, "only {count} macros found — the scan is broken");
+    assert!(
+        count > 150,
+        "only {count} macros found — the scan is broken"
+    );
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
 #[test]
 fn every_collection_macro_runs() {
     let mut modules: BTreeMap<String, String> = BTreeMap::new();
-    for family in std::fs::read_dir(collection()).expect("collection").flatten() {
+    for family in std::fs::read_dir(collection())
+        .expect("collection")
+        .flatten()
+    {
         if !family.path().is_dir() {
             continue;
         }
@@ -202,6 +213,9 @@ fn every_collection_macro_runs() {
             failures.extend(invoke(module, &name, arity));
         }
     }
-    assert!(count > 140, "only {count} macros found — the scan is broken");
+    assert!(
+        count > 140,
+        "only {count} macros found — the scan is broken"
+    );
     assert!(failures.is_empty(), "{failures:#?}");
 }

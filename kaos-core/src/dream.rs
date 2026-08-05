@@ -229,9 +229,8 @@ impl Dream {
             .collect::<Vec<_>>()
             .join(SEPARATOR);
         let temporary = self.path.with_extension("tmp");
-        std::fs::write(&temporary, body).map_err(|error| {
-            format!("could not write {}: {error}", temporary.display())
-        })?;
+        std::fs::write(&temporary, body)
+            .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
         std::fs::rename(&temporary, &self.path)
             .map_err(|error| format!("could not write {}: {error}", self.path.display()))
     }
@@ -369,7 +368,9 @@ mod tests {
     #[test]
     fn the_oldest_claims_fall_off_the_end() {
         let dream = scratch("capacity");
-        let many: Vec<String> = (0..CAPACITY + 10).map(|index| format!("finding {index}")).collect();
+        let many: Vec<String> = (0..CAPACITY + 10)
+            .map(|index| format!("finding {index}"))
+            .collect();
         dream.keep(&many).unwrap();
         let kept = dream.texts();
         assert_eq!(kept.len(), CAPACITY, "the store grew past its capacity");
@@ -441,7 +442,10 @@ mod tests {
             tree.join(".git"),
             format!(
                 "gitdir: {}\n",
-                repo.join(".git").join("worktrees").join("branch-work").display()
+                repo.join(".git")
+                    .join("worktrees")
+                    .join("branch-work")
+                    .display()
             ),
         )
         .expect("the worktree pointer");
@@ -458,7 +462,10 @@ mod tests {
         std::fs::create_dir_all(&submodule).expect("the fixture submodule");
         std::fs::write(
             submodule.join(".git"),
-            format!("gitdir: {}\n", repo.join(".git").join("modules").join("thing").display()),
+            format!(
+                "gitdir: {}\n",
+                repo.join(".git").join("modules").join("thing").display()
+            ),
         )
         .expect("the submodule pointer");
         assert_eq!(
@@ -474,7 +481,10 @@ mod tests {
         let dream = scratch("forget");
         dream.keep(&["first", "second", "third"]).unwrap();
         assert_eq!(dream.forget(Some(1)).unwrap(), 1);
-        assert_eq!(dream.texts(), vec!["first".to_string(), "third".to_string()]);
+        assert_eq!(
+            dream.texts(),
+            vec!["first".to_string(), "third".to_string()]
+        );
         assert!(dream.forget(Some(9)).is_err(), "there is no ninth memory");
         assert_eq!(dream.forget(None).unwrap(), 2);
         assert!(dream.is_empty());

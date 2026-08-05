@@ -448,7 +448,10 @@ fn a_space_recalls_its_own_earlier_stages() {
     );
     assert_eq!(
         record.len(),
-        answer.lines().filter(|line| !line.trim().is_empty()).count(),
+        answer
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
         "the working leaked: the record should hold the crossing alone.\n\
          crossing: {answer:?}"
     );
@@ -485,7 +488,10 @@ fn the_library_shapes_hide_their_deliberation() {
 
     // Both branches fired — the deliberation really happened.
     let prompts = model.prompts();
-    assert!(prompts.iter().any(|p| p.contains("phlogiston")), "{prompts:?}");
+    assert!(
+        prompts.iter().any(|p| p.contains("phlogiston")),
+        "{prompts:?}"
+    );
     assert!(prompts.iter().any(|p| p.contains("cobalt")), "{prompts:?}");
 
     // And neither branch's ANSWER is evidence. Which option the mediator

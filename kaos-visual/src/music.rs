@@ -215,10 +215,7 @@ fn wave(ui: &mut egui::Ui, pane: &mut MusicPane, k: &Ink) {
         );
         let core = band.rms * half;
         painter.line_segment(
-            [
-                Pos2::new(x, middle - core),
-                Pos2::new(x, middle + core),
-            ],
+            [Pos2::new(x, middle - core), Pos2::new(x, middle + core)],
             Stroke::new(1.0, k.accent),
         );
     }
@@ -283,7 +280,10 @@ fn wave(ui: &mut egui::Ui, pane: &mut MusicPane, k: &Ink) {
 /// terms it decomposes into and the degree they choose are all on screen
 /// together, so the reader can check it.
 fn reading(ui: &mut egui::Ui, pane: &MusicPane, k: &Ink) {
-    let Some(note) = pane.reading.and_then(|index| pane.desk.score.notes.get(index)) else {
+    let Some(note) = pane
+        .reading
+        .and_then(|index| pane.desk.score.notes.get(index))
+    else {
         ui.colored_label(k.faint, "hover the wave to read a tone");
         return;
     };
@@ -409,12 +409,9 @@ mod tests {
 
     #[test]
     fn the_sound_tab_draws_a_wave_and_names_what_it_is_playing() {
-        let mut pane = MusicPane::from_source(
-            "(\"joy and expansion\" x)",
-            "drawing".to_string(),
-            None,
-        )
-        .expect("the fixture parses");
+        let mut pane =
+            MusicPane::from_source("(\"joy and expansion\" x)", "drawing".to_string(), None)
+                .expect("the fixture parses");
         let (text, lines) = painted(&mut pane);
 
         // The score, word by word — the atomic level is what the tab is for.
@@ -446,7 +443,10 @@ mod tests {
         let torn = painted_with(&mut pane, false).0;
         for control in ["re-read", "export wav"] {
             assert!(full.contains(control), "the full tab lost {control}");
-            assert!(!torn.contains(control), "the torn window still offers {control}");
+            assert!(
+                !torn.contains(control),
+                "the torn window still offers {control}"
+            );
         }
         // Everything the view is actually for is still there.
         for control in ["play", "stop", "ROOT", "joy"] {

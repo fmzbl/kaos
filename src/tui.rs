@@ -8201,7 +8201,8 @@ mod tests {
     /// Rebis run flag: in chaos mode a typed line asks for a program.
     #[test]
     fn a_chat_line_asks_for_a_program_only_in_chaos_mode() {
-        let direct = kaos_core::chat::DEFAULT_CONTEXT.render_turn(false, "", "add a --version flag");
+        let direct =
+            kaos_core::chat::DEFAULT_CONTEXT.render_turn(false, "", "add a --version flag");
         let chaos = kaos_core::chat::DEFAULT_CONTEXT.render_turn(true, "", "add a --version flag");
         assert!(!direct.contains(kaos_core::chaos::COMPOSE_CONTRACT));
         assert!(chaos.contains(kaos_core::chaos::COMPOSE_CONTRACT));
@@ -8223,7 +8224,10 @@ mod tests {
 
         assert_eq!(app.rebis_runs.len(), 1, "the program was not adopted");
         assert_eq!(app.rebis_runs[0].state, RebisRunState::Queued);
-        assert!(app.queue.iter().any(|work| matches!(work, QueuedWork::Rebis { .. })));
+        assert!(app
+            .queue
+            .iter()
+            .any(|work| matches!(work, QueuedWork::Rebis { .. })));
         // The prose stays in the conversation; only the fence became a run.
         assert!(app
             .session

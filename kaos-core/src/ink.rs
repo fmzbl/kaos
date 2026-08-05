@@ -79,8 +79,7 @@ impl Sigil {
     #[must_use]
     pub fn bounds(&self) -> Option<(f32, f32, f32, f32)> {
         let mut seen = false;
-        let (mut min_x, mut min_y, mut max_x, mut max_y) =
-            (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
         for point in self.strokes.iter().flat_map(|s| s.points.iter()) {
             seen = true;
             min_x = min_x.min(point.0);
@@ -172,8 +171,7 @@ impl Raster {
         for dy in -reach..=reach {
             for dx in -reach..=reach {
                 let (x, y) = (cx.round() as isize + dx, cy.round() as isize + dy);
-                let distance =
-                    ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+                let distance = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
                 // One pixel of falloff at the rim, so a curve does not look
                 // like a staircase.
                 let coverage = (radius - distance + 0.5).clamp(0.0, 1.0);
@@ -319,9 +317,8 @@ mod tests {
         while at + 8 <= png.len() {
             let length = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
             let checked = &png[at + 4..at + 8 + length];
-            let stated = u32::from_be_bytes(
-                png[at + 8 + length..at + 12 + length].try_into().unwrap(),
-            );
+            let stated =
+                u32::from_be_bytes(png[at + 8 + length..at + 12 + length].try_into().unwrap());
             assert_eq!(crc32(checked), stated, "chunk CRC");
             kinds.push(String::from_utf8_lossy(&png[at + 4..at + 8]).into_owned());
             at += 12 + length;
@@ -361,7 +358,10 @@ mod tests {
         far.add(900.0, 900.0);
         far.add(1000.0, 1000.0);
 
-        let one = Sigil { strokes: vec![near] }.raster(64);
+        let one = Sigil {
+            strokes: vec![near],
+        }
+        .raster(64);
         let other = Sigil { strokes: vec![far] }.raster(64);
         let darkness = |r: &Raster| r.pixels.iter().filter(|p| **p < 128).count();
         // Same shape, ten times the size and a thousand pixels away: the same
@@ -379,7 +379,10 @@ mod tests {
         let mut tap = Stroke::new(4.0);
         tap.add(50.0, 50.0);
         let raster = Sigil { strokes: vec![tap] }.raster(64);
-        assert!(raster.pixels.iter().any(|p| *p < 128), "a tap leaves a mark");
+        assert!(
+            raster.pixels.iter().any(|p| *p < 128),
+            "a tap leaves a mark"
+        );
     }
 
     #[test]
@@ -407,7 +410,9 @@ mod written {
             let angle = t * std::f32::consts::TAU;
             stroke.add(50.0 + angle.cos() * 30.0, 50.0 + (angle * 3.0).sin() * 25.0);
         }
-        let sigil = Sigil { strokes: vec![stroke] };
+        let sigil = Sigil {
+            strokes: vec![stroke],
+        };
         sigil.raster(256).write_png(&path).expect("write");
         let bytes = std::fs::read(&path).expect("read back");
         assert!(bytes.len() > 1000, "a drawn sigil is not a trivial file");
@@ -524,7 +529,12 @@ impl Wall {
     /// # Errors
     ///
     /// When the name is unusable or the filesystem refuses.
-    pub fn save(&self, name: &str, sigil: &Sigil, size: usize) -> Result<std::path::PathBuf, WallError> {
+    pub fn save(
+        &self,
+        name: &str,
+        sigil: &Sigil,
+        size: usize,
+    ) -> Result<std::path::PathBuf, WallError> {
         let (strokes, picture) = self.paths(name)?;
         std::fs::create_dir_all(&self.root)?;
         std::fs::write(&strokes, write_strokes(sigil))?;
@@ -692,10 +702,7 @@ impl Stack {
         inner.push_str(&quoted(&self.instruction()));
         inner.push(')');
         for picture in self.pictures.iter().rev() {
-            inner = format!(
-                "(+ (&: {}) {inner})",
-                quoted(&picture.to_string_lossy())
-            );
+            inner = format!("(+ (&: {}) {inner})", quoted(&picture.to_string_lossy()));
         }
         inner
     }

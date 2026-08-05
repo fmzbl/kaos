@@ -68,8 +68,7 @@ pub fn programs() -> PathBuf {
 #[must_use]
 pub fn program(name: &str) -> String {
     let path = programs().join(name);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
 /// A local model, recorded.
@@ -210,8 +209,8 @@ pub fn run(name: &str) -> (Orchestration, Local) {
 /// If the program does not parse.
 pub fn run_with(name: &str, inlet: &dyn Inlet) -> (Orchestration, Local) {
     let source = program(name);
-    let expression = rebis_lang::parse(&source)
-        .unwrap_or_else(|error| panic!("{name} does not parse: {error}"));
+    let expression =
+        rebis_lang::parse(&source).unwrap_or_else(|error| panic!("{name} does not parse: {error}"));
     let oracle = Local::new();
     let mut record = Record::from_texts::<&str>(&[]);
     let result = rebis_lang::orchestrate_with_inlet(
@@ -241,8 +240,8 @@ pub fn run_with(name: &str, inlet: &dyn Inlet) -> (Orchestration, Local) {
 /// If the program does not parse.
 pub fn run_recording(name: &str) -> (Orchestration, Local, Record) {
     let source = program(name);
-    let expression = rebis_lang::parse(&source)
-        .unwrap_or_else(|error| panic!("{name} does not parse: {error}"));
+    let expression =
+        rebis_lang::parse(&source).unwrap_or_else(|error| panic!("{name} does not parse: {error}"));
     let oracle = Local::new();
     let mut record = Record::from_texts::<&str>(&[]);
     let result = rebis_lang::orchestrate_with_inlet(
@@ -265,7 +264,11 @@ pub fn run_recording(name: &str) -> (Orchestration, Local, Record) {
 #[must_use]
 pub fn remembers(record: &Record, topic: &str) -> bool {
     !record
-        .recall(topic, rebis_lang::FLASHBACK_LINES, rebis_lang::FLASHBACK_CHARS)
+        .recall(
+            topic,
+            rebis_lang::FLASHBACK_LINES,
+            rebis_lang::FLASHBACK_CHARS,
+        )
         .is_empty()
 }
 
@@ -285,11 +288,7 @@ impl Inlet for InletRef<'_> {
 /// says what went wrong rather than only that something did.
 #[must_use]
 pub fn diagnostics(result: &Orchestration) -> Vec<String> {
-    result
-        .diagnostics
-        .iter()
-        .map(ToString::to_string)
-        .collect()
+    result.diagnostics.iter().map(ToString::to_string).collect()
 }
 
 /// Assert a run reported nothing, showing what it reported when it did.

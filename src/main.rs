@@ -2203,7 +2203,8 @@ fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
     // it again would tell the model to compose its own composer. Presence of
     // the contract is the test, so the two paths cannot both fire.
     let composed;
-    let task = if kaos_core::chaos::enabled() && !task.contains(kaos_core::chaos::COMPOSE_CONTRACT) {
+    let task = if kaos_core::chaos::enabled() && !task.contains(kaos_core::chaos::COMPOSE_CONTRACT)
+    {
         composed = kaos_core::chat::DEFAULT_CONTEXT.render_chaos_chat("", task);
         if stream {
             println!("chat    chaos mode · composing the intent as a Rebis program first");

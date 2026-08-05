@@ -32,8 +32,8 @@ use kaos_workspace::rebis_workspace::{
 mod actions;
 mod automata;
 mod music;
-mod torn;
 mod pdf;
+mod torn;
 /// The automaton's geometry, re-exported for `examples/generation_preview.rs`.
 ///
 /// That example renders the same composition to a PNG so the figure can be
@@ -2075,7 +2075,8 @@ impl Editor {
                 Some("chaos mode composed a program that does not parse — left in the chat".into());
             return;
         }
-        self.tabs.open("composed", Pane::Source(SourcePane::with_text(source)));
+        self.tabs
+            .open("composed", Pane::Source(SourcePane::with_text(source)));
         self.notice = Some(
             "chaos mode composed a program · opened as a tab, not started — run it when you have read it"
                 .into(),
@@ -2800,11 +2801,9 @@ impl Editor {
     fn open_music(&mut self) {
         let from = self.tabs.active_id();
         let program = match self.tabs.active() {
-            Some(Pane::Source(pane)) => Some((
-                pane.editor.source().to_string(),
-                "source".to_string(),
-                from,
-            )),
+            Some(Pane::Source(pane)) => {
+                Some((pane.editor.source().to_string(), "source".to_string(), from))
+            }
             Some(Pane::Mandala(_)) => match self.doc().mandala.to_rebis() {
                 Ok(text) => Some((text, "drawing".to_string(), from)),
                 Err(error) => {
@@ -2832,7 +2831,9 @@ impl Editor {
                     .open(format!("sound · {origin}"), Pane::Music(Box::new(pane)));
             }
             Err(error) => {
-                self.notice = Some(format!("that program does not parse, so it has no sound: {error}"));
+                self.notice = Some(format!(
+                    "that program does not parse, so it has no sound: {error}"
+                ));
             }
         }
     }
@@ -3218,9 +3219,8 @@ impl Editor {
         };
         self.torn_sequence += 1;
         self.torn.push(torn::Torn::new(torn, self.torn_sequence));
-        self.notice = Some(
-            "torn off into its own window · closing it brings the tab back".to_string(),
-        );
+        self.notice =
+            Some("torn off into its own window · closing it brings the tab back".to_string());
     }
 
     /// Draw every torn-off window, and take back the ones that were closed.
@@ -3251,8 +3251,10 @@ impl Editor {
                 }
                 torn::TornPane::Generation(machine, origin) => {
                     let pane = AutomataPane::from_machine(*machine, origin.clone());
-                    self.tabs
-                        .open(format!("generation · {origin}"), Pane::Automata(Box::new(pane)));
+                    self.tabs.open(
+                        format!("generation · {origin}"),
+                        Pane::Automata(Box::new(pane)),
+                    );
                 }
             }
         }
@@ -5035,247 +5037,260 @@ impl Editor {
                     .id_salt("side_panel_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                ui.add_space(6.0);
-                let selection_len = self.doc().selection_len();
-                if selection_len > 1 {
-                    ui.colored_label(self.ink.accent, format!("{selection_len} FORMS SELECTED"));
-                    ui.colored_label(
-                        self.ink.faint,
-                        "Ctrl-click toggles · right-drag replaces the block",
-                    );
-                }
-                if let Some(id) = self.doc().primary_selected() {
-                    if let Some(node) = self.doc_mut().mandala.node(id).cloned() {
-                        ui.colored_label(self.ink.mid, node.form.name().to_uppercase());
-                        if text_editable && node.form.uses_text() {
-                            let mut text = node.text.clone();
-                            // A tall, wrapping field inside a height-capped
-                            // scroll area: long text wraps and scrolls instead
-                            // of being clipped to one line.
-                            let response = ui.add(
-                                egui::TextEdit::multiline(&mut text)
-                                    .desired_rows(4)
-                                    .desired_width(f32::INFINITY),
-                            );
-                            keep_focus_over_escape(ui, response.id);
-                            let changed = response.changed();
-                            if changed {
-                                // Only a prompt may span lines; a name or path
-                                // stays on one line so the source stays valid.
-                                if !matches!(node.form, Form::Prompt) {
-                                    text = text.replace(['\n', '\r'], "");
-                                }
-                                let doc = self.doc_mut();
-                                doc.checkpoint();
-                                doc.mandala.set_text(id, text);
-                            }
-                        }
-                        if text_editable {
-                            if let Form::Function(params) = &node.form {
-                                let mut joined = params.join(" ");
-                                if ui.text_edit_singleline(&mut joined).changed() {
-                                    let ps: Vec<String> =
-                                        joined.split_whitespace().map(str::to_string).collect();
-                                    let doc = self.doc_mut();
-                                    doc.checkpoint();
-                                    doc.mandala.set_form(id, Form::Function(ps));
-                                }
-                                ui.colored_label(self.ink.faint, "parameters, space separated");
-                            }
-                        }
-                        if text_editable {
-                            let mut model = node.model.clone().unwrap_or_default();
+                        ui.add_space(6.0);
+                        let selection_len = self.doc().selection_len();
+                        if selection_len > 1 {
                             ui.colored_label(
-                                self.ink.secondary,
-                                "MODEL OVERRIDE · optional /provider:model",
+                                self.ink.accent,
+                                format!("{selection_len} FORMS SELECTED"),
                             );
-                            if ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut model)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("ollama:qwen4:4b"),
-                                )
-                                .changed()
-                            {
-                                let model = model.replace(['\n', '\r'], "");
-                                let model = model.trim();
-                                let model = (!model.is_empty()).then(|| model.to_string());
-                                let doc = self.doc_mut();
-                                doc.checkpoint();
-                                doc.mandala.set_model(id, model);
-                            }
-                            ui.colored_label(self.ink.faint, "blank inherits the run default");
+                            ui.colored_label(
+                                self.ink.faint,
+                                "Ctrl-click toggles · right-drag replaces the block",
+                            );
                         }
-                        ui.colored_label(
-                            self.ink.faint,
-                            format!("takes {} ordered children", node.form.arity()),
-                        );
-                        self.child_order_editor(ui, id, graph_editable);
-                        self.arrow_order_editor(ui, id, graph_editable);
-                        // The code of the selected block — the exact Rebis the
-                        // selection generates on its own, so selecting a shape
-                        // shows what that shape (and its operands) is.
-                        ui.add_space(4.0);
-                        ui.colored_label(
-                            self.ink.mid,
-                            if selection_len > 1 {
-                                "SELECTED BLOCK"
-                            } else {
-                                "THIS BLOCK"
-                            },
-                        );
-                        match self.doc().selected_source() {
-                            Ok(Some(code)) => {
-                                // Show the block in the readable, indented form.
-                                let code = rebis_lang::parse(&code)
-                                    .map(|expr| rebis_lang::pretty_format(&expr))
-                                    .unwrap_or(code);
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(&code)
-                                            .monospace()
-                                            .color(self.ink.ink),
-                                    )
-                                    .wrap(),
-                                );
-                                if ui.small_button("copy block").clicked() {
-                                    ui.ctx().copy_text(code);
+                        if let Some(id) = self.doc().primary_selected() {
+                            if let Some(node) = self.doc_mut().mandala.node(id).cloned() {
+                                ui.colored_label(self.ink.mid, node.form.name().to_uppercase());
+                                if text_editable && node.form.uses_text() {
+                                    let mut text = node.text.clone();
+                                    // A tall, wrapping field inside a height-capped
+                                    // scroll area: long text wraps and scrolls instead
+                                    // of being clipped to one line.
+                                    let response = ui.add(
+                                        egui::TextEdit::multiline(&mut text)
+                                            .desired_rows(4)
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                    keep_focus_over_escape(ui, response.id);
+                                    let changed = response.changed();
+                                    if changed {
+                                        // Only a prompt may span lines; a name or path
+                                        // stays on one line so the source stays valid.
+                                        if !matches!(node.form, Form::Prompt) {
+                                            text = text.replace(['\n', '\r'], "");
+                                        }
+                                        let doc = self.doc_mut();
+                                        doc.checkpoint();
+                                        doc.mandala.set_text(id, text);
+                                    }
                                 }
-                            }
-                            Ok(None) => {}
-                            Err(error) => {
+                                if text_editable {
+                                    if let Form::Function(params) = &node.form {
+                                        let mut joined = params.join(" ");
+                                        if ui.text_edit_singleline(&mut joined).changed() {
+                                            let ps: Vec<String> = joined
+                                                .split_whitespace()
+                                                .map(str::to_string)
+                                                .collect();
+                                            let doc = self.doc_mut();
+                                            doc.checkpoint();
+                                            doc.mandala.set_form(id, Form::Function(ps));
+                                        }
+                                        ui.colored_label(
+                                            self.ink.faint,
+                                            "parameters, space separated",
+                                        );
+                                    }
+                                }
+                                if text_editable {
+                                    let mut model = node.model.clone().unwrap_or_default();
+                                    ui.colored_label(
+                                        self.ink.secondary,
+                                        "MODEL OVERRIDE · optional /provider:model",
+                                    );
+                                    if ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut model)
+                                                .desired_width(f32::INFINITY)
+                                                .hint_text("ollama:qwen4:4b"),
+                                        )
+                                        .changed()
+                                    {
+                                        let model = model.replace(['\n', '\r'], "");
+                                        let model = model.trim();
+                                        let model = (!model.is_empty()).then(|| model.to_string());
+                                        let doc = self.doc_mut();
+                                        doc.checkpoint();
+                                        doc.mandala.set_model(id, model);
+                                    }
+                                    ui.colored_label(
+                                        self.ink.faint,
+                                        "blank inherits the run default",
+                                    );
+                                }
                                 ui.colored_label(
-                                    self.ink.danger,
-                                    format!("block is not one exact form: {error}"),
+                                    self.ink.faint,
+                                    format!("takes {} ordered children", node.form.arity()),
                                 );
-                            }
-                        }
-                        ui.add_space(4.0);
-                        if graph_editable
-                            && ui
-                                .button(
-                                    egui::RichText::new(if selection_len > 1 {
-                                        "delete selection"
+                                self.child_order_editor(ui, id, graph_editable);
+                                self.arrow_order_editor(ui, id, graph_editable);
+                                // The code of the selected block — the exact Rebis the
+                                // selection generates on its own, so selecting a shape
+                                // shows what that shape (and its operands) is.
+                                ui.add_space(4.0);
+                                ui.colored_label(
+                                    self.ink.mid,
+                                    if selection_len > 1 {
+                                        "SELECTED BLOCK"
                                     } else {
-                                        "delete shape"
-                                    })
-                                    .color(self.ink.danger),
-                                )
-                                .clicked()
-                        {
-                            self.doc_mut().delete_selected();
-                        }
-                        // A mark written on this form, with the way to take it
-                        // off. Clicking the same tool again also removes it, but
-                        // that is only findable if you already know it; the form
-                        // itself is where you look when you want it undone.
-                        if graph_editable && selection_len == 1 {
-                            let marked = self
-                                .doc()
-                                .selected
-                                .map(|id| (id, self.doc().mandala.written_prefix(id)));
-                            if let Some((id, written)) = marked.filter(|(_, w)| !w.is_empty()) {
-                                ui.horizontal(|ui| {
-                                    ui.colored_label(self.ink.faint, "MARKED");
-                                    ui.colored_label(self.ink.ink, &written);
-                                    if ui.small_button("remove").clicked() {
-                                        if let Some(outer) =
-                                            self.doc().mandala.father(id).filter(|f| {
-                                                self.doc().mandala.is_written_prefix(*f)
-                                            })
-                                        {
-                                            self.doc_mut().checkpoint();
-                                            self.doc_mut().mandala.unwrap_form(outer);
-                                            self.doc_mut().select_only(id);
+                                        "THIS BLOCK"
+                                    },
+                                );
+                                match self.doc().selected_source() {
+                                    Ok(Some(code)) => {
+                                        // Show the block in the readable, indented form.
+                                        let code = rebis_lang::parse(&code)
+                                            .map(|expr| rebis_lang::pretty_format(&expr))
+                                            .unwrap_or(code);
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&code)
+                                                    .monospace()
+                                                    .color(self.ink.ink),
+                                            )
+                                            .wrap(),
+                                        );
+                                        if ui.small_button("copy block").clicked() {
+                                            ui.ctx().copy_text(code);
                                         }
                                     }
-                                });
-                            }
-                        }
-                        // Deleting a boundary takes everything inside it with
-                        // it. Removing a level of nesting while keeping what it
-                        // held is a different move, and had none.
-                        if graph_editable
-                            && selection_len == 1
-                            && ui.button("remove this level, keep its contents").clicked()
-                        {
-                            if let Some(id) = self.doc().selected {
-                                self.doc_mut().checkpoint();
-                                let kept = self.doc_mut().mandala.unwrap_form(id);
-                                self.doc_mut().reset_interaction();
-                                self.notice = Some(format!(
-                                    "removed one level, kept {} form{}",
-                                    kept.len(),
-                                    plural(kept.len())
-                                ));
-                            }
-                        }
-                        if !graph_editable {
-                            ui.colored_label(
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        ui.colored_label(
+                                            self.ink.danger,
+                                            format!("block is not one exact form: {error}"),
+                                        );
+                                    }
+                                }
+                                ui.add_space(4.0);
+                                if graph_editable
+                                    && ui
+                                        .button(
+                                            egui::RichText::new(if selection_len > 1 {
+                                                "delete selection"
+                                            } else {
+                                                "delete shape"
+                                            })
+                                            .color(self.ink.danger),
+                                        )
+                                        .clicked()
+                                {
+                                    self.doc_mut().delete_selected();
+                                }
+                                // A mark written on this form, with the way to take it
+                                // off. Clicking the same tool again also removes it, but
+                                // that is only findable if you already know it; the form
+                                // itself is where you look when you want it undone.
+                                if graph_editable && selection_len == 1 {
+                                    let marked = self
+                                        .doc()
+                                        .selected
+                                        .map(|id| (id, self.doc().mandala.written_prefix(id)));
+                                    if let Some((id, written)) =
+                                        marked.filter(|(_, w)| !w.is_empty())
+                                    {
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(self.ink.faint, "MARKED");
+                                            ui.colored_label(self.ink.ink, &written);
+                                            if ui.small_button("remove").clicked() {
+                                                if let Some(outer) =
+                                                    self.doc().mandala.father(id).filter(|f| {
+                                                        self.doc().mandala.is_written_prefix(*f)
+                                                    })
+                                                {
+                                                    self.doc_mut().checkpoint();
+                                                    self.doc_mut().mandala.unwrap_form(outer);
+                                                    self.doc_mut().select_only(id);
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                                // Deleting a boundary takes everything inside it with
+                                // it. Removing a level of nesting while keeping what it
+                                // held is a different move, and had none.
+                                if graph_editable
+                                    && selection_len == 1
+                                    && ui.button("remove this level, keep its contents").clicked()
+                                {
+                                    if let Some(id) = self.doc().selected {
+                                        self.doc_mut().checkpoint();
+                                        let kept = self.doc_mut().mandala.unwrap_form(id);
+                                        self.doc_mut().reset_interaction();
+                                        self.notice = Some(format!(
+                                            "removed one level, kept {} form{}",
+                                            kept.len(),
+                                            plural(kept.len())
+                                        ));
+                                    }
+                                }
+                                if !graph_editable {
+                                    ui.colored_label(
                                 self.ink.faint,
                                 "3D inspection · text edits are live; switch to 2D for graph edits",
                             );
+                                }
+                                ui.separator();
+                            }
                         }
-                        ui.separator();
-                    }
-                }
-                let k = self.ink;
-                let exact = self.doc().mandala.to_rebis();
-                // `open in editor` + `format` + `format mandala` overflow 330px
-                // together; wrapping keeps the last button reachable.
-                ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(k.faint, "REBIS");
-                    let typed = self.doc().text.clone();
-                    let status = if typed.trim().is_empty() {
-                        String::new()
-                    } else if let Err(error) = &exact {
-                        error.to_string()
-                    } else if rebis_lang::parse(&typed).is_err() {
-                        "unparsed — the mandala is unchanged".to_string()
-                    } else {
-                        "exact · 1:1".to_string()
-                    };
-                    let status_tone = if typed.trim().is_empty() {
-                        k.faint
-                    } else if exact.is_err() || rebis_lang::parse(&typed).is_err() {
-                        k.danger
-                    } else {
-                        k.accent
-                    };
-                    ui.colored_label(status_tone, status);
-                    if exact.is_ok() && ui.small_button("open in editor").clicked() {
-                        open_in_editor = true;
-                    }
-                    // Format the written source: reparse what is in the box and
-                    // rewrite it in canonical indented form. Only ever applied
-                    // to source that parses, so a half-typed program is never
-                    // mangled.
-                    if text_editable
-                        && ui
-                            .small_button("format")
-                            .on_hover_text("rewrite the source in canonical form")
-                            .clicked()
-                    {
-                        format_source = true;
-                    }
-                    // Redraw the drawing itself with the standard circuit
-                    // layout, so a hand-dragged graph snaps back onto the grid.
-                    if graph_editable
-                        && ui
-                            .small_button("format mandala")
-                            .on_hover_text("re-lay the mandala out as a circuit")
-                            .clicked()
-                    {
-                        format_drawing = true;
-                    }
-                });
-                // Two readings of the same drawing. Both change what the layout
-                // produces rather than only how it is painted, so both are
-                // applied by re-laying it out — and both are therefore one
-                // undoable step, like `format mandala` beside them.
-                ui.horizontal_wrapped(|ui| {
-                    let mut whole = self.doc().mandala.legend() == Legend::Whole;
-                    if ui
+                        let k = self.ink;
+                        let exact = self.doc().mandala.to_rebis();
+                        // `open in editor` + `format` + `format mandala` overflow 330px
+                        // together; wrapping keeps the last button reachable.
+                        ui.horizontal_wrapped(|ui| {
+                            ui.colored_label(k.faint, "REBIS");
+                            let typed = self.doc().text.clone();
+                            let status = if typed.trim().is_empty() {
+                                String::new()
+                            } else if let Err(error) = &exact {
+                                error.to_string()
+                            } else if rebis_lang::parse(&typed).is_err() {
+                                "unparsed — the mandala is unchanged".to_string()
+                            } else {
+                                "exact · 1:1".to_string()
+                            };
+                            let status_tone = if typed.trim().is_empty() {
+                                k.faint
+                            } else if exact.is_err() || rebis_lang::parse(&typed).is_err() {
+                                k.danger
+                            } else {
+                                k.accent
+                            };
+                            ui.colored_label(status_tone, status);
+                            if exact.is_ok() && ui.small_button("open in editor").clicked() {
+                                open_in_editor = true;
+                            }
+                            // Format the written source: reparse what is in the box and
+                            // rewrite it in canonical indented form. Only ever applied
+                            // to source that parses, so a half-typed program is never
+                            // mangled.
+                            if text_editable
+                                && ui
+                                    .small_button("format")
+                                    .on_hover_text("rewrite the source in canonical form")
+                                    .clicked()
+                            {
+                                format_source = true;
+                            }
+                            // Redraw the drawing itself with the standard circuit
+                            // layout, so a hand-dragged graph snaps back onto the grid.
+                            if graph_editable
+                                && ui
+                                    .small_button("format mandala")
+                                    .on_hover_text("re-lay the mandala out as a circuit")
+                                    .clicked()
+                            {
+                                format_drawing = true;
+                            }
+                        });
+                        // Two readings of the same drawing. Both change what the layout
+                        // produces rather than only how it is painted, so both are
+                        // applied by re-laying it out — and both are therefore one
+                        // undoable step, like `format mandala` beside them.
+                        ui.horizontal_wrapped(|ui| {
+                            let mut whole = self.doc().mandala.legend() == Legend::Whole;
+                            if ui
                         .add_enabled(graph_editable, egui::Checkbox::new(&mut whole, "whole text"))
                         .on_hover_text(
                             "grow every form until its whole text fits inside it, instead of \
@@ -5285,17 +5300,17 @@ impl Editor {
                     {
                         set_legend = Some(if whole { Legend::Whole } else { Legend::Token });
                     }
-                    // `normalize` is the per-level equalisation: brothers drawn
-                    // at one size, each boundary grown until what it holds
-                    // fills it. That is what reads as normalized on the page —
-                    // a level whose forms all match, and no circle standing
-                    // half empty. `Sizing::Even` is the flatter thing, one size
-                    // shared by every depth; it is the default because it costs
-                    // a quarter of the area, but a drawing that ignores levels
-                    // is not what the word means, so it is the unticked state
-                    // rather than the ticked one.
-                    let mut normalized = self.doc().mandala.sizing() == Sizing::ByLevel;
-                    if ui
+                            // `normalize` is the per-level equalisation: brothers drawn
+                            // at one size, each boundary grown until what it holds
+                            // fills it. That is what reads as normalized on the page —
+                            // a level whose forms all match, and no circle standing
+                            // half empty. `Sizing::Even` is the flatter thing, one size
+                            // shared by every depth; it is the default because it costs
+                            // a quarter of the area, but a drawing that ignores levels
+                            // is not what the word means, so it is the unticked state
+                            // rather than the ticked one.
+                            let mut normalized = self.doc().mandala.sizing() == Sizing::ByLevel;
+                            if ui
                         .add_enabled(
                             graph_editable,
                             egui::Checkbox::new(&mut normalized, "normalize"),
@@ -5313,67 +5328,70 @@ impl Editor {
                             Sizing::Even
                         });
                     }
-                });
-                let edited;
-                // Vertical only: a long line wraps onto the next row instead of
-                // running off the right edge, so there is nothing to the right to
-                // scroll to.
-                {
-                    // Same colouring and the same parenthesis matching as the
-                    // Source tab: this box holds Rebis too, and one without
-                    // them reads as a different editor.
-                    let id = egui::Id::new("side_source_edit");
-                    let pair = matched_pair(ui.ctx(), id, &self.doc().text);
-                    let mut layouter = |ui: &egui::Ui, text: &str, wrap: f32| {
-                        ui.fonts(|fonts| {
-                            let mut job = rebis_layout_job(text, k, 12.5, &|_| false, pair);
-                            // Wrapping is the layouter's job: without this the job
-                            // reports infinite width and the box scrolls instead.
-                            job.wrap.max_width = wrap;
-                            fonts.layout_job(job)
-                        })
-                    };
-                    let gutter = gutter_px(ui, self.doc().text.lines().count());
-                    let available = ui.available_width();
-                    let output = ui
-                        .horizontal(|ui| {
-                            // The gutter is reserved first and painted afterwards
-                            // from the galley, so the numbers are never part of the
-                            // text and a selection cannot pick them up.
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(gutter, ui.available_height().max(1.0)),
-                                egui::Sense::hover(),
+                        });
+                        let edited;
+                        // Vertical only: a long line wraps onto the next row instead of
+                        // running off the right edge, so there is nothing to the right to
+                        // scroll to.
+                        {
+                            // Same colouring and the same parenthesis matching as the
+                            // Source tab: this box holds Rebis too, and one without
+                            // them reads as a different editor.
+                            let id = egui::Id::new("side_source_edit");
+                            let pair = matched_pair(ui.ctx(), id, &self.doc().text);
+                            let mut layouter = |ui: &egui::Ui, text: &str, wrap: f32| {
+                                ui.fonts(|fonts| {
+                                    let mut job = rebis_layout_job(text, k, 12.5, &|_| false, pair);
+                                    // Wrapping is the layouter's job: without this the job
+                                    // reports infinite width and the box scrolls instead.
+                                    job.wrap.max_width = wrap;
+                                    fonts.layout_job(job)
+                                })
+                            };
+                            let gutter = gutter_px(ui, self.doc().text.lines().count());
+                            let available = ui.available_width();
+                            let output = ui
+                                .horizontal(|ui| {
+                                    // The gutter is reserved first and painted afterwards
+                                    // from the galley, so the numbers are never part of the
+                                    // text and a selection cannot pick them up.
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(gutter, ui.available_height().max(1.0)),
+                                        egui::Sense::hover(),
+                                    );
+                                    let doc = self.doc_mut();
+                                    let output = egui::TextEdit::multiline(&mut doc.text)
+                                        .id(id)
+                                        .code_editor()
+                                        .interactive(text_editable)
+                                        .desired_width((available - gutter).max(80.0))
+                                        .desired_rows(24)
+                                        .layouter(&mut layouter)
+                                        .show(ui);
+                                    (rect, output)
+                                })
+                                .inner;
+                            let (gutter_rect, output) = output;
+                            edited = output.response.changed();
+                            keep_focus_over_escape(ui, output.response.id);
+                            paint_line_numbers(ui, k, gutter_rect, &output);
+                        }
+                        source_status(ui, k, &self.doc().text);
+                        // When the drawing has no source at all, say which state it is
+                        // in. Silence here reads as a broken panel; the reason reads as
+                        // a drawing that is not finished yet.
+                        if let Some(note) = self.doc().source_note.clone() {
+                            ui.colored_label(
+                                k.danger,
+                                format!("the drawing has no source yet · {note}"),
                             );
-                            let doc = self.doc_mut();
-                            let output = egui::TextEdit::multiline(&mut doc.text)
-                                .id(id)
-                                .code_editor()
-                                .interactive(text_editable)
-                                .desired_width((available - gutter).max(80.0))
-                                .desired_rows(24)
-                                .layouter(&mut layouter)
-                                .show(ui);
-                            (rect, output)
-                        })
-                        .inner;
-                    let (gutter_rect, output) = output;
-                    edited = output.response.changed();
-                    keep_focus_over_escape(ui, output.response.id);
-                    paint_line_numbers(ui, k, gutter_rect, &output);
-                }
-                source_status(ui, k, &self.doc().text);
-                // When the drawing has no source at all, say which state it is
-                // in. Silence here reads as a broken panel; the reason reads as
-                // a drawing that is not finished yet.
-                if let Some(note) = self.doc().source_note.clone() {
-                    ui.colored_label(k.danger, format!("the drawing has no source yet · {note}"));
-                }
-                // Typing redraws the canvas as soon as what you have typed is a
-                // program.
-                if edited {
-                    self.adopt_text();
-                }
-                });
+                        }
+                        // Typing redraws the canvas as soon as what you have typed is a
+                        // program.
+                        if edited {
+                            self.adopt_text();
+                        }
+                    });
             });
         if format_source {
             let typed = self.doc().text.clone();
@@ -7188,7 +7206,10 @@ impl Editor {
                     let marks = pane.sigil.strokes.len();
                     ui.horizontal(|ui| {
                         ui.label(format!("{marks} mark(s)"));
-                        if ui.add_enabled(marks > 0, egui::Button::new("undo")).clicked() {
+                        if ui
+                            .add_enabled(marks > 0, egui::Button::new("undo"))
+                            .clicked()
+                        {
                             if let Some(stroke) = pane.sigil.strokes.pop() {
                                 pane.undone.push(stroke);
                             }
@@ -7201,7 +7222,10 @@ impl Editor {
                                 pane.sigil.strokes.push(stroke);
                             }
                         }
-                        if ui.add_enabled(marks > 0, egui::Button::new("erase")).clicked() {
+                        if ui
+                            .add_enabled(marks > 0, egui::Button::new("erase"))
+                            .clicked()
+                        {
                             pane.undone.clear();
                             pane.sigil.strokes.clear();
                         }
@@ -7280,7 +7304,10 @@ impl Editor {
                         });
 
                     ui.add_space(8.0);
-                    ui.colored_label(k.secondary, format!("STACK — {}", pane.stack.pictures.len()));
+                    ui.colored_label(
+                        k.secondary,
+                        format!("STACK — {}", pane.stack.pictures.len()),
+                    );
                     if pane.stack.is_empty() {
                         ui.colored_label(k.faint, "draw, then keep & stack");
                     }
@@ -7342,8 +7369,7 @@ impl Editor {
 
         // ── the paper ──────────────────────────────────────────────────
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            let (response, painter) =
-                ui.allocate_painter(ui.available_size(), egui::Sense::drag());
+            let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::drag());
             let rect = response.rect;
             // White paper regardless of theme: a sigil is drawn in ink, and
             // what the model is shown is black on white, so what you draw on
@@ -8519,7 +8545,6 @@ impl Editor {
         paint_marks(false);
         paint_marks(true);
 
-
         if let Some(id) = hovered {
             if let Some(node) = self.doc().mandala.node(id) {
                 self.paint_resize_outline(painter, node, at(node.x, node.y), zoom);
@@ -8616,7 +8641,10 @@ fn dash_dotted_path(painter: &egui::Painter, points: &[Pos2], scale: f32, stroke
             let run = left.min(length - travelled);
             if pattern[step].1 {
                 painter.line_segment(
-                    [from + direction * travelled, from + direction * (travelled + run)],
+                    [
+                        from + direction * travelled,
+                        from + direction * (travelled + run),
+                    ],
                     stroke,
                 );
             }
@@ -9554,9 +9582,7 @@ fn keep_focus_over_escape(ui: &egui::Ui, id: egui::Id) {
 /// digits, plus a little air on each side of them.
 fn gutter_px(ui: &egui::Ui, lines: usize) -> f32 {
     let digits = kaos_workspace::rebis_workspace::gutter_width(lines.max(1));
-    let glyph = ui.fonts(|fonts| {
-        fonts.glyph_width(&FontId::monospace(GUTTER_PX), '0')
-    });
+    let glyph = ui.fonts(|fonts| fonts.glyph_width(&FontId::monospace(GUTTER_PX), '0'));
     glyph * digits as f32 + 10.0
 }
 
@@ -9612,13 +9638,7 @@ fn paint_line_numbers(
 /// editor: a number on the row that starts a source line and on no other row, so a
 /// line wrapped over three rows is numbered once and the absence of a number is
 /// what says "still the same line".
-fn paint_galley_line_numbers(
-    ui: &egui::Ui,
-    k: Ink,
-    gutter: Rect,
-    galley: &egui::Galley,
-    top: f32,
-) {
+fn paint_galley_line_numbers(ui: &egui::Ui, k: Ink, gutter: Rect, galley: &egui::Galley, top: f32) {
     let font = FontId::monospace(GUTTER_PX);
     let painter = ui.painter().with_clip_rect(gutter);
     let mut line = 0usize;
@@ -11192,8 +11212,7 @@ mod tests {
                 // Widest of the characters a mark is actually made of: sigils, and
                 // the letters, digits and dashes of a callee's name.
                 for character in "$?^%&~'-abcdefghijklmnopqrstuvwxyz0123456789".chars() {
-                    measured =
-                        measured.max(ui.fonts(|fonts| fonts.glyph_width(&font, character)));
+                    measured = measured.max(ui.fonts(|fonts| fonts.glyph_width(&font, character)));
                 }
             });
         });
@@ -11228,10 +11247,7 @@ mod tests {
             editor.doc_mut().select_only(first);
             let ctx = egui::Context::default();
             let input = RawInput {
-                screen_rect: Some(Rect::from_min_size(
-                    Pos2::ZERO,
-                    Vec2::new(1100.0, height),
-                )),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1100.0, height))),
                 ..Default::default()
             };
             let mut text = String::new();
@@ -11334,10 +11350,15 @@ mod tests {
         // And the proof that matters: a key after Escape still lands.
         frame(&mut editor, vec![Event::Text("Z".into())]);
         assert_ne!(
-            editor.doc().text, before,
+            editor.doc().text,
+            before,
             "typing after Escape went nowhere — the caret is frozen"
         );
-        assert!(editor.doc().text.contains('Z'), "got {:?}", editor.doc().text);
+        assert!(
+            editor.doc().text.contains('Z'),
+            "got {:?}",
+            editor.doc().text
+        );
     }
 
     #[test]
@@ -11361,11 +11382,7 @@ mod tests {
         hops.sort_by_key(|(from, _)| from.0);
         assert_eq!(
             hops,
-            vec![
-                (at("a"), at("b")),
-                (at("b"), at("c")),
-                (at("c"), at("d")),
-            ],
+            vec![(at("a"), at("b")), (at("b"), at("c")), (at("c"), at("d")),],
             "the chain must be one arrow per hop"
         );
         for text in ["a", "b", "c"] {
@@ -11397,7 +11414,11 @@ mod tests {
             false,
         );
         // One run plus two barbs, against a run per leg of the elbow plus barbs.
-        assert_eq!(straight.len(), 3, "a straight trace is one line and two barbs");
+        assert_eq!(
+            straight.len(),
+            3,
+            "a straight trace is one line and two barbs"
+        );
         assert!(
             squared.len() > straight.len(),
             "the right-angle trace should have more legs: {} vs {}",
@@ -11407,7 +11428,10 @@ mod tests {
         // The straight run really does join the two ends, trimmed to their walls.
         let run = straight[0];
         assert!(run[0].x > 0.0 && run[0].y > 0.0, "left the source's wall");
-        assert!(run[1].x < 200.0 && run[1].y < 120.0, "stopped at the target's wall");
+        assert!(
+            run[1].x < 200.0 && run[1].y < 120.0,
+            "stopped at the target's wall"
+        );
     }
 
     #[test]
@@ -11554,10 +11578,7 @@ mod tests {
             view.tx,
             view.ty
         );
-        assert_eq!(
-            before, after,
-            "and it must not drag the form it started on"
-        );
+        assert_eq!(before, after, "and it must not drag the form it started on");
 
         // The same drive without space is the control: Select drags the form.
         let (framed, view, before, after) = run(false);
@@ -11596,7 +11617,10 @@ mod tests {
         // Put the caret in the source box, exactly as writing a prompt does.
         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("side_source_edit")));
         frame(&mut editor, Vec::new(), &mut origin);
-        assert!(ctx.wants_keyboard_input(), "the box never took the keyboard");
+        assert!(
+            ctx.wants_keyboard_input(),
+            "the box never took the keyboard"
+        );
 
         // The space goes to the box, so it must not arm the pan. Dragging a FORM
         // afterwards has to keep doing what the selected tool says — moving the

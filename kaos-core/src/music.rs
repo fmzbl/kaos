@@ -621,13 +621,7 @@ fn phrase(text: &str, start: f64, span: f64, depth: usize, tuning: &Tuning, out:
     }
     let each = (span / words.len() as f64).max(FLOOR);
     for (index, word) in words.iter().enumerate() {
-        out.push(tone(
-            word,
-            start + each * index as f64,
-            each,
-            depth,
-            tuning,
-        ));
+        out.push(tone(word, start + each * index as f64, each, depth, tuning));
     }
 }
 
@@ -977,10 +971,8 @@ pub mod sink {
                 "no audio player found — install one of: {names} (the wave can still be exported)"
             ));
         };
-        let path = std::env::temp_dir().join(format!(
-            "kaos-music-{}-{sequence}.wav",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("kaos-music-{}-{sequence}.wav", std::process::id()));
         write(&path, wav)?;
         let child = Command::new(program)
             .args(*args)
@@ -1205,7 +1197,18 @@ mod tests {
     #[test]
     fn zeckendorf_is_a_unique_sum_of_non_consecutive_fibonacci_numbers() {
         let table = fibonacci();
-        for value in [1u64, 2, 3, 4, 12, 100, 1_000, 4_181, 999_999, u32::MAX as u64] {
+        for value in [
+            1u64,
+            2,
+            3,
+            4,
+            12,
+            100,
+            1_000,
+            4_181,
+            999_999,
+            u32::MAX as u64,
+        ] {
             let indices = zeckendorf(value);
             let sum: u64 = indices.iter().map(|index| table[*index]).sum();
             assert_eq!(sum, value, "the decomposition of {value} does not sum back");
@@ -1270,7 +1273,8 @@ mod tests {
         let tuning = Tuning::default();
         // Written with prompts rather than symbols: `(a (b c))` is a *call* to
         // `a`, and the fixture is about indentation, not about calls.
-        let score = Score::from_source("(\"a\" (\"b\" \"c\"))", &tuning).expect("the program parses");
+        let score =
+            Score::from_source("(\"a\" (\"b\" \"c\"))", &tuning).expect("the program parses");
         let note = |token: &str| {
             score
                 .notes
@@ -1290,15 +1294,8 @@ mod tests {
         // Contained, too: a form cannot sound outside the indentation that
         // holds it, which is the other half of the same claim.
         let holder = note("(");
-        let inner: Vec<&Note> = score
-            .notes
-            .iter()
-            .filter(|note| note.depth == 2)
-            .collect();
-        let opens = inner
-            .iter()
-            .map(|note| note.start)
-            .fold(f64::MAX, f64::min);
+        let inner: Vec<&Note> = score.notes.iter().filter(|note| note.depth == 2).collect();
+        let opens = inner.iter().map(|note| note.start).fold(f64::MAX, f64::min);
         assert!(
             opens >= holder.start,
             "a held form began before the boundary that holds it"
@@ -1329,11 +1326,7 @@ mod tests {
     fn a_prompt_sounds_as_its_words() {
         let tuning = Tuning::default();
         let score = Score::from_source("(\"joy and expansion\")", &tuning).expect("parses");
-        let sung: Vec<&str> = score
-            .notes
-            .iter()
-            .map(|note| note.token.as_str())
-            .collect();
+        let sung: Vec<&str> = score.notes.iter().map(|note| note.token.as_str()).collect();
         assert!(
             sung.contains(&"joy") && sung.contains(&"and") && sung.contains(&"expansion"),
             "the prompt did not sound word by word: {sung:?}"
@@ -1374,7 +1367,8 @@ mod tests {
         assert_eq!(once, twice, "the synth is not deterministic");
         assert!(!once.is_empty(), "nothing was rendered");
         assert!(
-            once.iter().all(|sample| sample.is_finite() && sample.abs() <= 1.0),
+            once.iter()
+                .all(|sample| sample.is_finite() && sample.abs() <= 1.0),
             "a sample left the range"
         );
         assert!(
@@ -1397,7 +1391,10 @@ mod tests {
         assert!(
             lines.iter().all(|line| line.chars().count() == 60),
             "a row came out the wrong width: {:?}",
-            lines.iter().map(|line| line.chars().count()).collect::<Vec<_>>()
+            lines
+                .iter()
+                .map(|line| line.chars().count())
+                .collect::<Vec<_>>()
         );
         assert!(
             lines
@@ -1438,9 +1435,7 @@ mod tests {
 
     #[test]
     fn the_waveform_covers_the_samples_it_is_drawn_from() {
-        let samples: Vec<f32> = (0..1000)
-            .map(|index| (index as f32 / 50.0).sin())
-            .collect();
+        let samples: Vec<f32> = (0..1000).map(|index| (index as f32 / 50.0).sin()).collect();
         let bands = waveform(&samples, 40);
         assert_eq!(bands.len(), 40);
         let peak = bands.iter().fold(0f32, |peak, band| peak.max(band.high));

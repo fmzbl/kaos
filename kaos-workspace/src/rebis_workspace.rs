@@ -144,9 +144,7 @@ pub fn gutter_width(lines: usize) -> usize {
 #[must_use]
 pub fn row_of_offset(rows: &[VisualRow], offset: usize) -> (usize, usize) {
     for (index, row) in rows.iter().enumerate() {
-        let last_of_line = rows
-            .get(index + 1)
-            .is_none_or(|next| next.line != row.line);
+        let last_of_line = rows.get(index + 1).is_none_or(|next| next.line != row.line);
         if offset < row.end || (last_of_line && offset <= row.end) {
             return (index, offset.saturating_sub(row.start));
         }
@@ -159,8 +157,8 @@ pub fn row_of_offset(rows: &[VisualRow], offset: usize) -> (usize, usize) {
 /// Complete punctuation token set accepted by Rebis, in reference-manual
 /// order. The editor renders this as a compact top-bar language legend.
 pub const REBIS_SYMBOLS: &[&str] = &[
-    "(", ")", "[", "]", "{", "}", "|", "~", "#", "'", ",", "$", "?", "!", "*", "=", "&", "&:", "+", "@",
-    "/", "%", "^", "<>", "><", "->", "<-", ";", "\"",
+    "(", ")", "[", "]", "{", "}", "|", "~", "#", "'", ",", "$", "?", "!", "*", "=", "&", "&:", "+",
+    "@", "/", "%", "^", "<>", "><", "->", "<-", ";", "\"",
 ];
 
 /// The live state of a source buffer, for an editor's status line.
@@ -379,7 +377,10 @@ fn dream_command(cwd: &Path, rest: &str) -> String {
                 .rev()
                 .take(3)
                 .map(|(index, entry)| {
-                    format!("{index}: {}", truncate(entry.text.lines().next().unwrap_or(""), 40))
+                    format!(
+                        "{index}: {}",
+                        truncate(entry.text.lines().next().unwrap_or(""), 40)
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join(" · ");
@@ -4522,8 +4523,7 @@ impl Workspace {
             "pace" => match number {
                 Ok(seconds) if (0.02..=2.0).contains(&seconds) => self.music.tuning.pace = seconds,
                 _ => {
-                    self.music.message =
-                        "music · pace wants seconds per atom, 0.02–2".to_string();
+                    self.music.message = "music · pace wants seconds per atom, 0.02–2".to_string();
                     return;
                 }
             },
@@ -5206,10 +5206,10 @@ mod tests {
 
         let lines = workspace.music_lines(60, 24);
         assert!(
-            lines
-                .iter()
-                .any(|line| line.chars().all(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
-                    && !line.is_empty()),
+            lines.iter().any(
+                |line| line.chars().all(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+                    && !line.is_empty()
+            ),
             "no wave was drawn: {lines:#?}"
         );
         // Every word of the prompt is in the score, with the sum it came from.
@@ -5236,7 +5236,11 @@ mod tests {
         // A knob that will not take the value says so and changes nothing.
         workspace.command = "music root nonsense".to_string();
         assert_eq!(workspace.execute_kaos_command(), WorkspaceAction::None);
-        assert!(workspace.message.contains("20–4000"), "{}", workspace.message);
+        assert!(
+            workspace.message.contains("20–4000"),
+            "{}",
+            workspace.message
+        );
         assert!((workspace.music.tuning.root_hz - 220.0).abs() < f64::EPSILON);
     }
 
@@ -6176,7 +6180,8 @@ mod tests {
 
     #[test]
     fn block_runs_keep_model_bound_top_level_definitions() {
-        let source = "(/ claude:opus5 (~ inspect (topic) (-> topic \"report\")))\n(inspect \"parser\")";
+        let source =
+            "(/ claude:opus5 (~ inspect (topic) (-> topic \"report\")))\n(inspect \"parser\")";
         let scoped = scoped_block_source(source, "(inspect \"parser\")").unwrap();
         let parsed = rebis_lang::parse(&scoped).unwrap();
 
@@ -6469,7 +6474,10 @@ mod tests {
                 .count(),
             rebis_lang::std_modules().len()
         );
-        assert!(workspace.sigil_hits.is_empty(), "a name search read contents");
+        assert!(
+            workspace.sigil_hits.is_empty(),
+            "a name search read contents"
+        );
 
         // A macro nothing is named after falls through to the contents, and the
         // result records where.
@@ -6490,7 +6498,11 @@ mod tests {
             text.to_ascii_lowercase().contains("std-memo"),
             "the recorded line is not the matching one: {text}"
         );
-        assert!(workspace.message.contains("contain it"), "{}", workspace.message);
+        assert!(
+            workspace.message.contains("contain it"),
+            "{}",
+            workspace.message
+        );
 
         // The browser says where, so the question is answered before anything
         // is opened.
@@ -6502,7 +6514,10 @@ mod tests {
                 _ => None,
             })
             .expect("the hit is on a row");
-        assert!(row.contains(&format!(":{line}")), "the row hides the line: {row}");
+        assert!(
+            row.contains(&format!(":{line}")),
+            "the row hides the line: {row}"
+        );
 
         // And opening it lands there rather than at the top.
         workspace.sigil_choice = workspace
@@ -6514,7 +6529,12 @@ mod tests {
         let (row, _) = workspace.editor.row_col();
         assert_eq!(row + 1, line, "opening did not go to the matched line");
         assert!(
-            workspace.editor.source().lines().nth(row).is_some_and(|at| at.contains("std-memo")),
+            workspace
+                .editor
+                .source()
+                .lines()
+                .nth(row)
+                .is_some_and(|at| at.contains("std-memo")),
             "the cursor landed away from the match"
         );
     }

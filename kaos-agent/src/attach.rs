@@ -219,7 +219,9 @@ mod tests {
         // The whole reason refusals exist. A silently omitted file means the
         // model answers confidently about a picture it never saw, and nothing
         // in the transcript says so.
-        assert!(Wire::Anthropic.refusals(&[picture(), document()]).is_empty());
+        assert!(Wire::Anthropic
+            .refusals(&[picture(), document()])
+            .is_empty());
         assert!(Wire::Read.refusals(&[picture(), document()]).is_empty());
         assert!(Wire::OpenAi.refusals(&[picture()]).is_empty());
 

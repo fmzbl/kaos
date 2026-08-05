@@ -363,9 +363,7 @@ impl Form {
             | Form::Meta
             | Form::Numeric
             | Form::Compose
-            | Form::Imaginary => {
-                Arity::AtLeast(1)
-            }
+            | Form::Imaginary => Arity::AtLeast(1),
             // A dream keeps ITS answer, and two operands are two answers.
             Form::Dream => Arity::Exactly(1),
             // The value, then the scope that uses it.
@@ -1567,11 +1565,7 @@ impl MandalaGeometry {
                     // actually be drawn — a flat one was right for an unresized
                     // circle and short by up to six times for a resized one, so a
                     // scaled-up `~` disappeared under its container's wall.
-                    let band = mark_band(
-                        inner,
-                        &mandala.written_prefix(*inner_id),
-                        child_extent,
-                    );
+                    let band = mark_band(inner, &mandala.written_prefix(*inner_id), child_extent);
                     let child_extent = (child_extent.0 + band, child_extent.1 + band);
                     let far_x = (inner.x - container.x).abs() + child_extent.0;
                     let far_y = (inner.y - container.y).abs() + child_extent.1;
@@ -2155,9 +2149,7 @@ impl Mandala {
             .iter()
             .map(|(id, _)| {
                 let footprint = self.footprint(*id);
-                let shape = self
-                    .node(*id)
-                    .map_or(Shape::Circle, |node| node.shape());
+                let shape = self.node(*id).map_or(Shape::Circle, |node| node.shape());
                 (*id, footprint, circumscribed_reach(shape, footprint))
             })
             .collect::<Vec<_>>();
@@ -2259,7 +2251,9 @@ impl Mandala {
             .or_else(|| self.father(id).filter(|f| self.is_flow_node(*f)))?;
         let mut seen = HashSet::new();
         while seen.insert(cursor) {
-            let Some(father) = self.father(cursor) else { break };
+            let Some(father) = self.father(cursor) else {
+                break;
+            };
             if !self.is_flow_node(father) {
                 break;
             }
@@ -4468,7 +4462,11 @@ impl Mandala {
                 self.node(id).map_or("", |node| node.text.trim()),
                 parts.join(" ")
             ),
-            Form::Bind => format!("(= {} {})", self.node(id).map_or("", |node| node.text.trim()), parts.join(" ")),
+            Form::Bind => format!(
+                "(= {} {})",
+                self.node(id).map_or("", |node| node.text.trim()),
+                parts.join(" ")
+            ),
             Form::Meta => format!("(>< {})", parts.join(" ")),
             Form::Numeric => format!("|{}|", parts.join(" ")),
             Form::Supersede => format!("(* {})", parts.join(" ")),
@@ -4610,7 +4608,6 @@ fn spiral_advance(b: f64, from: f64, anchor: (f64, f64), clearance: f64) -> f64 
     high
 }
 
-
 /// The golden-section positions for one BOX's direct contents.
 ///
 /// A box is not a circle and should not be packed like one. Where a circle gets the
@@ -4633,13 +4630,12 @@ fn golden_grid_spots(items: &[(NodeId, (f64, f64), f64)]) -> Vec<(NodeId, f64, f
     }
     // One cell size for the whole grid — the widest form decides it, so the rows and
     // columns line up and the figure reads as a grid rather than as a drift.
-    let cell = items.iter().fold((0.0_f64, 0.0_f64), |cell, (_, extent, _)| {
-        (cell.0.max(extent.0), cell.1.max(extent.1))
-    });
-    let (pitch_x, pitch_y) = (
-        2.0 * cell.0 + CONTENT_GAP,
-        2.0 * cell.1 + CONTENT_GAP,
-    );
+    let cell = items
+        .iter()
+        .fold((0.0_f64, 0.0_f64), |cell, (_, extent, _)| {
+            (cell.0.max(extent.0), cell.1.max(extent.1))
+        });
+    let (pitch_x, pitch_y) = (2.0 * cell.0 + CONTENT_GAP, 2.0 * cell.1 + CONTENT_GAP);
     #[allow(clippy::cast_precision_loss)]
     let count = items.len() as f64;
     let mut best = (1usize, f64::INFINITY);
@@ -4816,11 +4812,9 @@ impl Mandala {
                 vec![context.as_ref(), body.as_ref()],
             ),
             Expr::Program(v) => (Form::Program, String::new(), v.iter().collect()),
-            Expr::Model { selector, body } => (
-                Form::Route,
-                selector.to_string(),
-                vec![body.as_ref()],
-            ),
+            Expr::Model { selector, body } => {
+                (Form::Route, selector.to_string(), vec![body.as_ref()])
+            }
         };
 
         let indents = form.opens_indentation();
@@ -5384,7 +5378,12 @@ mod tests {
         // drawing cannot say which is which, and a caller cannot see what to
         // pass.
         let mut mandala = Mandala::new();
-        let named = mandala.add(Form::Function(vec!["url".into(), "depth".into()]), "fetch", 0.0, 0.0);
+        let named = mandala.add(
+            Form::Function(vec!["url".into(), "depth".into()]),
+            "fetch",
+            0.0,
+            0.0,
+        );
         assert_eq!(mandala.node(named).unwrap().mark(), "~ fetch (url depth)");
         let port = mandala.add(Form::Input, "review", 0.0, 0.0);
         assert_eq!(mandala.node(port).unwrap().mark(), "& review");
@@ -5847,11 +5846,14 @@ mod tests {
             .expect("the group")
             .id;
         let held = mandala.contained_children(compose);
-        assert_eq!(held.len(), 3, "two flow operands and the third form: {held:?}");
+        assert_eq!(
+            held.len(),
+            3,
+            "two flow operands and the third form: {held:?}"
+        );
         assert!(
-            held.iter().all(|id| mandala
-                .node(*id)
-                .is_some_and(|node| !node.form.is_flow())),
+            held.iter()
+                .all(|id| mandala.node(*id).is_some_and(|node| !node.form.is_flow())),
             "a flow claimed a slot of its own"
         );
         assert_eq!(mandala.to_rebis().unwrap(), "((-> \"a\" \"b\") \"c\")");
@@ -5915,9 +5917,7 @@ mod tests {
                 .id
         };
         let stage_names = |mandala: &Mandala| {
-            let root = mandala
-                .flow_chain_root(at(mandala, "a"))
-                .expect("a chain");
+            let root = mandala.flow_chain_root(at(mandala, "a")).expect("a chain");
             mandala
                 .flow_stages(root)
                 .into_iter()
@@ -6462,7 +6462,10 @@ mod tests {
         // out roughly twenty times the area a circle needs.
         assert_eq!(Form::Program.shape(), Form::Compose.shape());
         assert_eq!(Form::Program.shape(), Shape::Circle);
-        assert!(Form::Program.opens_indentation(), "and it holds what it names");
+        assert!(
+            Form::Program.opens_indentation(),
+            "and it holds what it names"
+        );
 
         // Told apart by position and by name, not by outline: it is the boundary
         // nothing else holds, and its label appears when it is selected.
@@ -6479,7 +6482,11 @@ mod tests {
             Form::Compose.name().replace("compose", ""),
             "a program says no more on the canvas than a bare compose does"
         );
-        assert_eq!(program.mark(), "", "it wears no sigil, as a bare compose does not");
+        assert_eq!(
+            program.mark(),
+            "",
+            "it wears no sigil, as a bare compose does not"
+        );
         // And it still prints as a bare sequence rather than gaining parentheses.
         assert_eq!(mandala.to_rebis().unwrap(), source);
     }
@@ -6852,8 +6859,8 @@ mod tests {
         for id in &held {
             let node = mandala.node(*id).expect("held");
             let footprint = mandala.footprint(*id);
-            let reach = (node.x - program.x).hypot(node.y - program.y)
-                + footprint.0.max(footprint.1);
+            let reach =
+                (node.x - program.x).hypot(node.y - program.y) + footprint.0.max(footprint.1);
             assert!(
                 reach <= radius + 1e-6,
                 "{:?} reaches {reach:.0} of the program's {radius:.0}",
@@ -6867,10 +6874,7 @@ mod tests {
             .filter_map(|id| {
                 let node = mandala.node(*id)?;
                 let footprint = mandala.footprint(*id);
-                Some(
-                    (node.x - program.x).hypot(node.y - program.y)
-                        + footprint.0.max(footprint.1),
-                )
+                Some((node.x - program.x).hypot(node.y - program.y) + footprint.0.max(footprint.1))
             })
             .fold(0.0_f64, f64::max);
         assert!(
@@ -6895,10 +6899,7 @@ mod tests {
                 .join("\n");
             let mandala = Mandala::from_rebis(&source).expect("the fixture parses");
             let bounds = mandala.bounds().expect("the drawing has bounds");
-            let (width, height) = (
-                bounds.max_x - bounds.min_x,
-                bounds.max_y - bounds.min_y,
-            );
+            let (width, height) = (bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y);
             let aspect = width / height;
             assert!(
                 (0.4..2.5).contains(&aspect),
@@ -7140,10 +7141,7 @@ mod tests {
         assert!(band > LABEL_BAND * 3.0, "the band did not grow: {band}");
 
         // And the container closes outside the mark, not through it.
-        let (inner_x, inner_y) = (
-            m.node(macro_form).unwrap().x,
-            m.node(macro_form).unwrap().y,
-        );
+        let (inner_x, inner_y) = (m.node(macro_form).unwrap().x, m.node(macro_form).unwrap().y);
         let centre = m.node(outer).unwrap();
         let reach = (inner_x - centre.x).hypot(inner_y - centre.y) + m.footprint(macro_form).0;
         assert!(
@@ -7459,8 +7457,7 @@ mod tests {
                         (left.centre.1 - right.centre.1).abs(),
                     );
                     assert!(
-                        dx >= left.half.0 + right.half.0
-                            || dy >= left.half.1 + right.half.1,
+                        dx >= left.half.0 + right.half.0 || dy >= left.half.1 + right.half.1,
                         "{source}: {:?} and {:?} overlap — {dx:.0} apart across \
                          (needs {:.0}) and {dy:.0} up (needs {:.0})",
                         left.text,
@@ -7502,11 +7499,7 @@ mod tests {
             let height = MARK_HEIGHT;
             #[allow(clippy::cast_precision_loss)]
             let half_w = mark.chars().count() as f64 * height * MARK_ADVANCE / 2.0;
-            (
-                (node.x, node.y - extent.1),
-                (half_w, height / 2.0),
-                mark,
-            )
+            ((node.x, node.y - extent.1), (half_w, height / 2.0), mark)
         };
         for (index, left) in held.iter().copied().enumerate() {
             let (a, ha, name_a) = written(left);
@@ -7603,8 +7596,8 @@ mod tests {
                 .map(|index| format!("\"b{index}\""))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let mut mandala = Mandala::from_rebis(&format!("([\"m\"] {branches})"))
-                .expect("the fixture parses");
+            let mut mandala =
+                Mandala::from_rebis(&format!("([\"m\"] {branches})")).expect("the fixture parses");
             mandala.relayout();
             let square = mandala
                 .nodes()
@@ -7750,16 +7743,23 @@ mod tests {
                 .or_default()
                 .push(m.extent(*id));
         }
-        assert_eq!(kinds.len(), 2, "the fixture mixes boundaries and bare forms");
+        assert_eq!(
+            kinds.len(),
+            2,
+            "the fixture mixes boundaries and bare forms"
+        );
         for (holds, sizes) in &kinds {
             let first = sizes[0];
             assert!(
                 sizes
                     .iter()
-                    .all(|size| (size.0 - first.0).abs() < 1e-6
-                        && (size.1 - first.1).abs() < 1e-6),
+                    .all(|size| (size.0 - first.0).abs() < 1e-6 && (size.1 - first.1).abs() < 1e-6),
                 "brothers that {} are drawn at mixed sizes: {sizes:?}",
-                if *holds { "hold something" } else { "hold nothing" }
+                if *holds {
+                    "hold something"
+                } else {
+                    "hold nothing"
+                }
             );
         }
 
@@ -7796,9 +7796,7 @@ mod tests {
         let alone = |m: &Mandala| {
             m.nodes()
                 .iter()
-                .find(|node| {
-                    node.form == Form::Compose && m.contained_children(node.id).len() == 1
-                })
+                .find(|node| node.form == Form::Compose && m.contained_children(node.id).len() == 1)
                 .expect("one circle holds a single form")
                 .id
         };
@@ -9046,5 +9044,4 @@ mod tests {
             );
         }
     }
-
 }
