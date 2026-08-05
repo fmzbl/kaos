@@ -77,6 +77,40 @@ pub struct Spec {
     pub model: String,
 }
 
+/// Where an ollama selector is served from.
+///
+/// A model may carry its own host — `ollama:llama3.2\\192.168.1.20:11434` — so
+/// one Kaos can address several machines at once. Without it there is a single
+/// global `OLLAMA_HOST`, and a rack of boxes with different models on them
+/// cannot be reached from one program.
+///
+/// `\\` marks the host because it is the one punctuation character Rebis leaves
+/// as an ordinary word character — `@` is the invariant operator and `:` and
+/// `/` already appear inside selectors. It is the cheapest mark available and
+/// this is the first thing to need one.
+///
+/// Precedence: the host written on the selector, then `OLLAMA_HOST`, then
+/// localhost. The selector wins because it is the most specific thing said, and
+/// a program that names a machine means that machine.
+///
+/// A bare `host:port` is fine; the scheme is filled in.
+fn ollama_base(model: &str) -> String {
+    let written = model.rsplit_once('\\').map(|(_, host)| host.to_string());
+    let host = written
+        .or_else(|| std::env::var("OLLAMA_HOST").ok())
+        .unwrap_or_else(|| "http://127.0.0.1:11434".into());
+    if host.starts_with("http") {
+        host
+    } else {
+        format!("http://{host}")
+    }
+}
+
+/// The model name with any `\\host` stripped, which is what ollama is asked for.
+fn ollama_model(model: &str) -> &str {
+    model.rsplit_once('\\').map_or(model, |(name, _)| name)
+}
+
 impl Spec {
     pub fn new(kind: Kind, model: impl Into<String>) -> Spec {
         Spec {
@@ -220,6 +254,54 @@ impl Spec {
     /// (OpenAI, OpenRouter) honour temperature + seed in the request body — this
     /// is what makes the spiral's POLARITY (solar/lunar universes) real on hosted
     /// minds. Other kinds — and `None` — fall back to [`Spec::complete`].
+    /// A completion carrying files, for a prompt fired inside a Rebis `+`
+    /// that framed with something loaded by `&:`.
+    ///
+    /// Everything about the request except the user message is what
+    /// [`Self::complete_sampled`] would build, so this is that call with one
+    /// substitution — see [`crate::attach`] for the substitution.
+    ///
+    /// A file the provider cannot carry is reported, never dropped: the
+    /// refusals come back so the caller can show them, and the request is sent
+    /// with what remains. An answer about a picture the model never saw is a
+    /// worse outcome than an error.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying provider call returns.
+    pub fn complete_attached(
+        &self,
+        system: &str,
+        user: &str,
+        files: &[rebis_lang::Attachment],
+        timeout: Duration,
+        sampling: Option<crate::backend::Sampling>,
+    ) -> (Result<String, String>, Vec<String>) {
+        let refusals = crate::attach::Wire::of(self.kind).refusals(files);
+        if files.is_empty() {
+            return (self.complete_sampled(system, user, timeout, sampling), refusals);
+        }
+        let answer = match (self.kind, sampling) {
+            #[cfg(feature = "api")]
+            (Kind::Ollama, Some(s)) => {
+                let prompt = format!("{system}\n\n{user}");
+                crate::backend::ollama_generate_attached(&self.model, &prompt, files, timeout, s)
+            }
+            #[cfg(feature = "api")]
+            (Kind::OpenAi, s) => self.openai_api_sampled_attached(system, user, files, timeout, s),
+            #[cfg(feature = "api")]
+            (Kind::OpenRouter, s) => {
+                self.openrouter_api_sampled_attached(system, user, files, timeout, s)
+            }
+            #[cfg(feature = "api")]
+            (Kind::ClaudeApi, _) => self.claude_api_attached(system, user, files, timeout),
+            // The CLI reads the path the program named, and a simulated mind
+            // reads nothing — neither needs the bytes on a wire.
+            _ => self.complete_sampled(system, user, timeout, sampling),
+        };
+        (answer, refusals)
+    }
+
     pub fn complete_sampled(
         &self,
         system: &str,
@@ -382,13 +464,7 @@ impl Spec {
                 Err(last_err)
             }
             Kind::Ollama => {
-                let host = std::env::var("OLLAMA_HOST")
-                    .unwrap_or_else(|_| "http://127.0.0.1:11434".into());
-                let base = if host.starts_with("http") {
-                    host
-                } else {
-                    format!("http://{host}")
-                };
+                let base = ollama_base(&self.model);
                 let mut options = serde_json::json!({});
                 let mut think = false;
                 if let Some(s) = sampling {
@@ -402,7 +478,7 @@ impl Spec {
                     think = s.think;
                 }
                 let body = serde_json::json!({
-                    "model": self.model,
+                    "model": ollama_model(&self.model),
                     "messages": messages,
                     "tools": tools,
                     "stream": false,
@@ -413,7 +489,11 @@ impl Spec {
                     .post(&format!("{base}/api/chat"))
                     .timeout(timeout)
                     .send_json(body)
-                    .map_err(|e| format!("ollama chat: {e}"))?;
+                    // Name the host. A remote inference server that is off,
+                    // unreachable or listening elsewhere is the commonest way
+                    // this fails, and `ollama chat: …` alone does not say which
+                    // machine was asked.
+                    .map_err(|e| format!("ollama chat at {base}: {e}"))?;
                 let v: serde_json::Value = resp
                     .into_json()
                     .map_err(|e| format!("ollama: bad json: {e}"))?;
@@ -478,10 +558,47 @@ impl Spec {
         timeout: Duration,
         sampling: Option<crate::backend::Sampling>,
     ) -> Result<String, String> {
+        self.openrouter_api_sampled_attached(system, user, &[], timeout, sampling)
+    }
+
+    #[cfg(feature = "api")]
+    fn openrouter_api_sampled_attached(
+        &self,
+        system: &str,
+        user: &str,
+        files: &[rebis_lang::Attachment],
+        timeout: Duration,
+        sampling: Option<crate::backend::Sampling>,
+    ) -> Result<String, String> {
         let key = std::env::var("OPENROUTER_API_KEY")
             .map_err(|_| "OPENROUTER_API_KEY is not set".to_string())?;
         let base = openrouter_base();
-        self.chat_completions("openrouter", &base, &key, system, user, timeout, sampling)
+        self.chat_completions_attached(
+            "openrouter", &base, &key, system, user, files, timeout, sampling,
+        )
+    }
+
+    #[cfg(feature = "api")]
+    fn openai_api_sampled_attached(
+        &self,
+        system: &str,
+        user: &str,
+        files: &[rebis_lang::Attachment],
+        timeout: Duration,
+        sampling: Option<crate::backend::Sampling>,
+    ) -> Result<String, String> {
+        let key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| "OPENAI_API_KEY is not set".to_string())?;
+        self.chat_completions_attached(
+            "openai",
+            "https://api.openai.com",
+            &key,
+            system,
+            user,
+            files,
+            timeout,
+            sampling,
+        )
     }
 
     /// One OpenAI-compatible Chat Completions call — the shape OpenAI, OpenRouter,
@@ -501,6 +618,24 @@ impl Spec {
         timeout: Duration,
         sampling: Option<crate::backend::Sampling>,
     ) -> Result<String, String> {
+        self.chat_completions_attached(who, base, key, system, user, &[], timeout, sampling)
+    }
+
+    /// The real builder. OpenAI and OpenRouter speak one shape, so they share
+    /// one request and one attachment path.
+    #[cfg(feature = "api")]
+    #[allow(clippy::too_many_arguments)]
+    fn chat_completions_attached(
+        &self,
+        who: &'static str,
+        base: &str,
+        key: &str,
+        system: &str,
+        user: &str,
+        files: &[rebis_lang::Attachment],
+        timeout: Duration,
+        sampling: Option<crate::backend::Sampling>,
+    ) -> Result<String, String> {
         // The cap matters beyond cost: without it a degenerate long generation
         // buffers server-side past any read timeout and the call never returns.
         let max_tokens: u64 = std::env::var("KAOS_MAX_TOKENS")
@@ -512,7 +647,7 @@ impl Spec {
             "max_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user}
+                crate::attach::Wire::OpenAi.user_message(user, files)
             ],
         });
         if let Some(s) = sampling {
@@ -597,13 +732,27 @@ impl Spec {
 
     #[cfg(feature = "api")]
     fn claude_api(&self, system: &str, user: &str, timeout: Duration) -> Result<String, String> {
+        self.claude_api_attached(system, user, &[], timeout)
+    }
+
+    /// The real builder. `claude_api` is this with nothing attached, which is
+    /// every ordinary prompt — so one request shape serves both and a file
+    /// changes exactly one line of it.
+    #[cfg(feature = "api")]
+    fn claude_api_attached(
+        &self,
+        system: &str,
+        user: &str,
+        files: &[rebis_lang::Attachment],
+        timeout: Duration,
+    ) -> Result<String, String> {
         let key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| "ANTHROPIC_API_KEY is not set".to_string())?;
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": 4096,
             "system": system,
-            "messages": [{"role": "user", "content": user}],
+            "messages": [crate::attach::Wire::Anthropic.user_message(user, files)],
         });
         let fallback = (self.model == FABLE_5_MODEL)
             .then(|| std::env::var("KAOS_FABLE_FALLBACK_MODEL").ok())
@@ -936,5 +1085,53 @@ mod tests {
             ]
         });
         assert_eq!(parse_claude_response(&response).unwrap(), "completed");
+    }
+}
+
+#[cfg(test)]
+mod endpoints {
+    use super::*;
+
+    /// A model may name the machine that serves it, so one Kaos reaches a rack.
+    #[test]
+    fn a_selector_can_carry_its_own_host() {
+        std::env::remove_var("OLLAMA_HOST");
+        assert_eq!(
+            ollama_base("llama3.2\\192.168.1.20:11434"),
+            "http://192.168.1.20:11434"
+        );
+        // The host is not part of what ollama is asked for.
+        assert_eq!(ollama_model("llama3.2\\192.168.1.20:11434"), "llama3.2");
+        // A bare host:port gets a scheme; a full URL is left alone.
+        assert_eq!(ollama_base("m\\10.0.0.5:11434"), "http://10.0.0.5:11434");
+        assert_eq!(
+            ollama_base("m\\https://box.local:11434"),
+            "https://box.local:11434"
+        );
+    }
+
+    /// Precedence: what the selector says, then the environment, then localhost.
+    /// The selector wins because a program that names a machine means it.
+    #[test]
+    fn the_selector_outranks_the_environment_which_outranks_localhost() {
+        std::env::remove_var("OLLAMA_HOST");
+        assert_eq!(ollama_base("llama3.2"), "http://127.0.0.1:11434");
+
+        std::env::set_var("OLLAMA_HOST", "192.168.1.9:11434");
+        assert_eq!(ollama_base("llama3.2"), "http://192.168.1.9:11434");
+        assert_eq!(
+            ollama_base("llama3.2\\192.168.1.20:11434"),
+            "http://192.168.1.20:11434",
+            "the selector is the most specific thing said"
+        );
+        std::env::remove_var("OLLAMA_HOST");
+    }
+
+    /// A model tag with no host is untouched — every existing selector keeps
+    /// meaning exactly what it meant.
+    #[test]
+    fn an_ordinary_model_tag_is_unchanged() {
+        assert_eq!(ollama_model("qwen3:14b"), "qwen3:14b");
+        assert_eq!(ollama_model("llama3.2:3b"), "llama3.2:3b");
     }
 }

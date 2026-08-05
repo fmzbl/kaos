@@ -8,6 +8,7 @@
 //! Nothing in this crate knows about a terminal or a window.
 
 pub mod agent;
+pub mod attach;
 pub mod auth;
 pub mod backend;
 pub mod conductor;
@@ -18,6 +19,8 @@ pub mod myth;
 pub mod pause;
 pub mod provider;
 pub mod rebis_worktree;
+pub mod scriptorium;
 pub mod scry;
 pub mod solve;
 pub mod spiral;
+pub mod web;

@@ -15,6 +15,11 @@ pub const PROVIDERS: &[(&str, &str)] = &[
     ("openrouter", "OPENROUTER_API_KEY"),
     ("openai", "OPENAI_API_KEY"),
     ("anthropic", "ANTHROPIC_API_KEY"),
+    // Search providers use the same store: a key is a key, and having two
+    // places to put one is how a host ends up with the wrong one set.
+    ("brave", "BRAVE_API_KEY"),
+    ("serper", "SERPER_API_KEY"),
+    ("tavily", "TAVILY_API_KEY"),
 ];
 
 /// Map a friendly provider name (or an alias) to the env var the backends read.
@@ -23,6 +28,9 @@ pub fn var_for(provider: &str) -> Option<&'static str> {
         "openrouter" | "or" => Some("OPENROUTER_API_KEY"),
         "openai" | "oai" | "gpt" => Some("OPENAI_API_KEY"),
         "anthropic" | "claude-api" => Some("ANTHROPIC_API_KEY"),
+        "brave" => Some("BRAVE_API_KEY"),
+        "serper" | "google" => Some("SERPER_API_KEY"),
+        "tavily" => Some("TAVILY_API_KEY"),
         _ => None,
     }
 }
@@ -87,7 +95,10 @@ pub fn store(provider: &str, key: &str) -> io::Result<(&'static str, PathBuf)> {
     let var = var_for(provider).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("unknown provider '{provider}' — try openrouter | openai | anthropic"),
+            format!(
+                "unknown provider '{provider}' — try openrouter | openai | anthropic \
+                 | brave | serper | tavily"
+            ),
         )
     })?;
     let mut map = read_all();
@@ -102,7 +113,10 @@ pub fn forget(provider: &str) -> io::Result<&'static str> {
     let var = var_for(provider).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("unknown provider '{provider}' — try openrouter | openai | anthropic"),
+            format!(
+                "unknown provider '{provider}' — try openrouter | openai | anthropic \
+                 | brave | serper | tavily"
+            ),
         )
     })?;
     let mut map = read_all();

@@ -26,14 +26,6 @@ fn claude_completion_permission_args(approved: bool) -> &'static [&'static str] 
     }
 }
 
-/// Fire a charged intent at the `claude` CLI in non-interactive mode. The charged
-/// intent is the *banished* prompt — the verbose statement of intent has already
-/// been lost to the mind; only the compressed imperative is sent. Returns the
-/// model's reply, or an error string if the CLI is unavailable.
-pub fn fire_claude(charged_intent: &str, system: &str) -> Result<String, String> {
-    fire_claude_as(None, charged_intent, system)
-}
-
 /// [`fire_claude`] with an explicit model tag (`sonnet`, `opus`, a full model id…)
 /// passed to the CLI's `--model`. `None` keeps the CLI's own default.
 pub fn fire_claude_as(
@@ -574,17 +566,6 @@ fn clip(s: &str, n: usize) -> String {
     }
 }
 
-/// Fire a charged intent at a local `ollama` model. The `ollama run` CLI takes a
-/// single prompt and has no system flag, so the adept's persona is prepended as a
-/// preamble — the charged intent still follows last, where it carries most weight.
-/// Stays zero-dependency (no HTTP crate): we shell out exactly as for `claude`.
-/// qwen3-style `<think>…</think>` reasoning is stripped so only the work remains.
-pub fn fire_ollama(model: &str, charged_intent: &str, system: &str) -> Result<String, String> {
-    let prompt = format!("{system}\n\nCHARGED SIGIL: {charged_intent}");
-    // A generous ceiling for interactive use; the benchmark sets its own.
-    ollama_complete(model, &prompt, Duration::from_secs(300))
-}
-
 /// Sampling controls for a local ollama completion.
 ///
 /// The audit's finding: the conclave's whole premise is *k diverse samples*, but the
@@ -687,6 +668,41 @@ pub fn ollama_generate(
     timeout: Duration,
     sampling: Sampling,
 ) -> Result<String, String> {
+    ollama_generate_attached(model, prompt, &[], timeout, sampling)
+}
+
+/// A local completion carrying images, for a vision model.
+///
+/// The HTTP path only: the `ollama run` CLI fallback takes a prompt on stdin
+/// and has nowhere to put a picture, so a request with files that cannot reach
+/// the endpoint fails rather than silently answering about nothing.
+///
+/// # Errors
+///
+/// Whatever the endpoint returns, or a message when files are present and the
+/// endpoint is unreachable.
+pub fn ollama_generate_attached(
+    model: &str,
+    prompt: &str,
+    files: &[rebis_lang::Attachment],
+    timeout: Duration,
+    sampling: Sampling,
+) -> Result<String, String> {
+    #[cfg(feature = "api")]
+    if !files.is_empty() {
+        return ollama_http_attached(model, prompt, files, timeout, sampling);
+    }
+    let _ = files;
+    ollama_generate_text(model, prompt, timeout, sampling)
+}
+
+/// The original text-only path, unchanged.
+fn ollama_generate_text(
+    model: &str,
+    prompt: &str,
+    timeout: Duration,
+    sampling: Sampling,
+) -> Result<String, String> {
     #[cfg(feature = "api")]
     {
         match ollama_http(model, prompt, timeout, sampling) {
@@ -708,6 +724,22 @@ pub fn ollama_generate(
 pub fn ollama_http(
     model: &str,
     prompt: &str,
+    timeout: Duration,
+    sampling: Sampling,
+) -> Result<String, String> {
+    ollama_http_attached(model, prompt, &[], timeout, sampling)
+}
+
+/// The real builder: `ollama_http` is this with nothing attached.
+///
+/// # Errors
+///
+/// Whatever the endpoint returns.
+#[cfg(feature = "api")]
+pub fn ollama_http_attached(
+    model: &str,
+    prompt: &str,
+    files: &[rebis_lang::Attachment],
     timeout: Duration,
     sampling: Sampling,
 ) -> Result<String, String> {
@@ -745,6 +777,12 @@ pub fn ollama_http(
         "think": sampling.think, // reasoning at the source: off for terse Q&A, on when asked
         "options": options,
     });
+    // This endpoint keeps the prompt a flat string and takes pictures beside
+    // it. See `crate::attach` for why the shape lives there and not here.
+    let images = crate::attach::Wire::Ollama.images(files);
+    if !images.is_empty() {
+        body["images"] = serde_json::json!(images);
+    }
     // Structured output, when the caller asked for it: constrain the sampler to
     // valid JSON so a model can't burn its budget on a prose preamble.
     if sampling.json {
@@ -788,10 +826,24 @@ pub fn ollama_http(
 /// local generation; one-shot callers retain the hard-kill timeout.
 /// This is the primitive the real benchmark and `fire_ollama` are built on.
 pub fn ollama_complete(model: &str, prompt: &str, timeout: Duration) -> Result<String, String> {
-    let mut child = Command::new("ollama")
-        .arg("run")
-        .arg(model)
-        .arg(prompt)
+    // A selector may name the machine that serves it —
+    // `llama3.2:3b\\192.168.1.20:11434` — so one Kaos reaches a rack of boxes
+    // with different models on them. Without it there is a single global
+    // `OLLAMA_HOST` and every model has to live on the same server.
+    //
+    // The host is handed to the child through its environment rather than a
+    // flag, because that is what the `ollama` CLI reads. The model name it is
+    // asked for never carries the host.
+    let (model, host) = match model.rsplit_once('\\') {
+        Some((name, host)) if !host.is_empty() => (name, Some(host.to_string())),
+        _ => (model, None),
+    };
+    let mut command = Command::new("ollama");
+    command.arg("run").arg(model).arg(prompt);
+    if let Some(host) = &host {
+        command.env("OLLAMA_HOST", host);
+    }
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null()) // ollama writes load/progress noise here; ignore it
@@ -835,10 +887,14 @@ pub fn ollama_complete(model: &str, prompt: &str, timeout: Duration) -> Result<S
     if status.success() {
         Ok(strip_think(&raw).trim().to_string())
     } else {
-        Err(format!(
-            "charge fizzled (exit {})",
-            status.code().unwrap_or(-1)
-        ))
+        Err(match &host {
+            Some(host) => format!(
+                "charge fizzled (exit {}) — `{model}` on {host}; is ollama reachable there \
+                 and does it have that model?",
+                status.code().unwrap_or(-1)
+            ),
+            None => format!("charge fizzled (exit {})", status.code().unwrap_or(-1)),
+        })
     }
 }
 

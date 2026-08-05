@@ -217,6 +217,7 @@ mod tests {
             finished,
             final_message: String::new(),
             error,
+            nested: Vec::new(),
         }
     }
 
@@ -259,6 +260,7 @@ mod tests {
             finished: false,
             final_message: String::new(),
             error: None,
+            nested: Vec::new(),
         });
         assert!(g.contains("ledger/periods.py") && g.contains("STAND"));
         assert!(g.contains("ledger/models.py") && g.contains("examined"));

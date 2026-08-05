@@ -104,6 +104,31 @@ pub fn tool_schemas() -> serde_json::Value {
             &["cmd"]
         ),
         f(
+            "search",
+            "Look something up on the open web. Returns a ranked list of pages — \
+             titles, URLs and short summaries — not the answer itself. Read one \
+             with `fetch` before relying on what it says.",
+            serde_json::json!({ "query": {"type": "string"} }),
+            &["query"]
+        ),
+        f(
+            "fetch",
+            "Read one web page as text. Takes an http:// or https:// URL, usually \
+             one that `search` returned. Long pages are truncated; ask for a more \
+             specific page rather than expecting the whole of a large one.",
+            serde_json::json!({ "url": {"type": "string"} }),
+            &["url"]
+        ),
+        f(
+            "rebis",
+            "Open a Rebis program as a run nested under this one. `source` is the \
+             program and `note` says what it is for. Use it to carry out a plan \
+             you have written, rather than doing every step yourself: the host \
+             runs it and shows it beneath this run.",
+            serde_json::json!({ "source": {"type": "string"}, "note": {"type": "string"} }),
+            &["source", "note"]
+        ),
+        f(
             "timer",
             "Come back to something later instead of checking for it now. `for` is a \
              delay (30s, 5m, 2h) and `note` is what you want handed back then — use it \
@@ -138,6 +163,12 @@ pub fn parse_call(name: &str, args: &serde_json::Value) -> Option<Tool> {
             replace: s("replace")?,
         }),
         "bash" => Some(Tool::Bash { cmd: s("cmd")? }),
+        "search" => Some(Tool::Search { query: s("query")? }),
+        "fetch" => Some(Tool::Fetch { url: s("url")? }),
+        "rebis" => Some(Tool::Rebis {
+            source: s("source")?,
+            note: s("note").unwrap_or_default(),
+        }),
         "timer" => Some(Tool::Timer {
             after: s("for").or_else(|| s("after")).unwrap_or_default(),
             note: s("note").or_else(|| s("message")).unwrap_or_default(),
@@ -203,6 +234,12 @@ fn tool_call_json(id: &str, t: &Tool) -> serde_json::Value {
             serde_json::json!({ "path": path, "find": find, "replace": replace }),
         ),
         Tool::Bash { cmd } => ("bash", serde_json::json!({ "cmd": cmd })),
+        Tool::Search { query } => ("search", serde_json::json!({ "query": query })),
+        Tool::Fetch { url } => ("fetch", serde_json::json!({ "url": url })),
+        Tool::Rebis { source, note } => (
+            "rebis",
+            serde_json::json!({ "source": source, "note": note }),
+        ),
         Tool::Timer { after, note } => ("timer", serde_json::json!({ "for": after, "note": note })),
         Tool::Finish { message } => ("finish", serde_json::json!({ "message": message })),
     };
@@ -273,6 +310,9 @@ mod tests {
                 "write_file",
                 "edit_file",
                 "bash",
+                "search",
+                "fetch",
+                "rebis",
                 "timer",
                 "finish"
             ]

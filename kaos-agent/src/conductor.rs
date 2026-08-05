@@ -14,7 +14,8 @@
 //!     transcript += reply + observation           // it sees the result, continues
 //! ```
 //!
-//! Tools: `read_file`, `write_file`, `edit_file`, `bash`, `timer`, `finish` — with
+//! Tools: `read_file`, `write_file`, `edit_file`, `bash`, `search`, `fetch`,
+//! `rebis`, `timer`, `finish` — with
 //! `bash` the agent can grep, list, run the tests, anything, and with `timer` it can
 //! start something slow and be brought back to it. The model is behind the [`Chat`]
 //! seam so the same loop runs on claude, a local ollama model, or a scripted stub
@@ -27,6 +28,14 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::agent::{self, Workspace};
+
+/// How much of a fetched page reaches the prompt.
+///
+/// The page itself is capped in bytes by [`crate::web`]; this is the tighter
+/// question of how much of it a turn can carry without crowding out everything
+/// the agent already knows. A page longer than this is nearly always a page the
+/// agent should be reading a section of.
+const WEB_PAGE_CHARS: usize = 12_000;
 
 // ───────────────────────────── tools ───────────────────────────────
 
@@ -48,6 +57,33 @@ pub enum Tool {
     Bash {
         cmd: String,
     },
+    /// Look something up on the open web.
+    ///
+    /// The agent asks a question; the answer is a ranked list of places to
+    /// look, not the answer itself. Reading one of them is [`Tool::Fetch`],
+    /// deliberately a separate act so a run's transcript shows which page an
+    /// assertion actually came from.
+    Search {
+        query: String,
+    },
+    /// Open a Rebis program as a run nested under this one.
+    ///
+    /// The agent writes a program; the host runs it and hands back what came of
+    /// it. Like [`Tool::Timer`], this is an action the workspace cannot carry
+    /// out itself — a run belongs to the frontend that owns the queue — so the
+    /// loop collects it and the host acts on it.
+    Rebis {
+        source: String,
+        /// Why this program is being opened, for the run's own label.
+        note: String,
+    },
+    /// Read one web page as text.
+    ///
+    /// Only `http`/`https`: a fetch that accepted `file://` would be an
+    /// unaudited file read wearing another tool's name.
+    Fetch {
+        url: String,
+    },
     /// Come back to something later. The agent names a delay and what to be
     /// handed back then; the loop waits rather than polling for it.
     ///
@@ -67,6 +103,13 @@ pub enum Tool {
 /// a wait longer than this is a scheduling decision belonging to the person
 /// driving Kaos, not to the agent inside one run.
 pub const MAX_TIMER: Duration = Duration::from_secs(60 * 60);
+/// How many nested runs one run may ask for.
+///
+/// A bound on breadth, where [`kaos_core::run_model::MAX_NESTING`] bounds
+/// depth. Without it one turn can queue a hundred runs and the reader is
+/// looking at a wall rather than a tree.
+const MAX_NESTED_RUNS: usize = 8;
+
 /// How many timers one run may hold at once.
 pub const MAX_TIMERS: usize = 8;
 
@@ -214,6 +257,11 @@ impl Tool {
                 format!("edit_file {path} (find {:?})", trunc(find, 40))
             }
             Tool::Bash { cmd } => format!("bash: {}", trunc(cmd, 60)),
+            Tool::Search { query } => format!("search: {}", trunc(query, 60)),
+            Tool::Fetch { url } => format!("fetch {}", trunc(url, 80)),
+            Tool::Rebis { note, source } => {
+                format!("rebis run: {} ({} bytes)", trunc(note, 48), source.len())
+            }
             Tool::Timer { after, note } => format!("timer {after} ({})", trunc(note, 40)),
             Tool::Finish { .. } => "finish".to_string(),
         }
@@ -286,6 +334,16 @@ pub fn parse_action(text: &str) -> Option<Tool> {
         }),
         "bash" | "run" | "shell" => Some(Tool::Bash {
             cmd: get(&["cmd", "command"]),
+        }),
+        "search" | "web_search" | "web" | "google" => Some(Tool::Search {
+            query: get(&["query", "q", "search", "question"]),
+        }),
+        "fetch" | "web_fetch" | "open" | "read_url" | "browse" => Some(Tool::Fetch {
+            url: get(&["url", "link", "address", "page"]),
+        }),
+        "rebis" | "rebis_run" | "subprogram" | "nested_run" => Some(Tool::Rebis {
+            source: get(&["source", "program", "rebis", "code"]),
+            note: get(&["note", "why", "reason", "label", "purpose"]),
         }),
         "timer" | "wait" | "later" | "remind" => Some(Tool::Timer {
             after: get(&["for", "after", "in", "delay"]),
@@ -451,18 +509,33 @@ pub fn claude_agent_rebis_appendix() -> String {
     )
 }
 
-/// System prompt for a normal-mode Rebis node. The execution constraint is
-/// repeated after the reference so a long cookbook cannot displace the node's
-/// actual contract from the model's most recent instructions.
+/// System prompt for a normal-mode Rebis node.
+///
+/// The contract and nothing else. This deliberately does NOT carry
+/// [`REBIS_AUTHORING_CONTEXT`], and the reason is in the words that used to
+/// follow it: *you are now executing one node, not authoring the surrounding
+/// program*. The reference teaches a model to WRITE Rebis; a node answering
+/// `"name one primary colour"` is not writing anything, so the cookbook was
+/// eighteen kilobytes of instructions sent in order to be countermanded two
+/// sentences later.
+///
+/// Measured, the cost is not theoretical. That is ~4,500 tokens on every node
+/// of every program. A hosted model hides it behind caching and network
+/// latency; a small local model on CPU spends its entire budget there, and a
+/// one-word answer takes minutes. It made local models unusable as Rebis
+/// hosts, which is the case this project cares most about.
+///
+/// The chat mind still gets the reference through
+/// [`claude_agent_rebis_appendix`] and [`rebis_authoring_context`] — that is
+/// where a model actually authors Rebis, and where the knowledge belongs.
 pub fn rebis_agent_system_prompt() -> String {
-    format!(
-        "You are exactly one agent node in a Rebis program. Answer the supplied \
-         prompt directly and return only the value that should flow to the next \
-         node. Do not delegate, create more agents, propose tool calls, or wrap \
-         the answer in orchestration metadata.\n\n{REBIS_AUTHORING_CONTEXT}\n\n\
-         You are now executing one node, not authoring the surrounding program. \
-         Follow only the supplied node prompt and return only its flow value."
-    )
+    "You are exactly one agent node in a Rebis program. Answer the supplied \
+     prompt directly and return only the value that should flow to the next \
+     node. Do not delegate, create more agents, propose tool calls, or wrap the \
+     answer in orchestration metadata. You are executing one node, not \
+     authoring the surrounding program: follow only the supplied node prompt \
+     and return only its flow value."
+        .to_string()
 }
 
 /// Contract for one Conductor run that hosts exactly one Rebis node — the
@@ -529,6 +602,13 @@ pub fn system_prompt() -> String {
      - write_file: args path, contents\n\
      - edit_file: args path, find, replace (replaces the first exact occurrence)\n\
      - bash: args cmd (run any shell command in the project root — ls, grep, run tests)\n\
+     - search: args query (look something up on the open web; returns a ranked \
+     list of pages, not the answer)\n\
+     - fetch: args url (read one http/https page as text, usually one search \
+     returned; long pages are truncated)\n\
+     - rebis: args source, note (open a Rebis program as a run nested under \
+     this one — write the program, the host runs it and shows it beneath this \
+     run; use it to carry out a plan rather than doing every step yourself)\n\
      - timer: args for, note (come back to something later: `for` is a delay like \
      30s, 5m, 2h and `note` is what to hand you back then — use it after starting \
      something slow, such as a command left running in the background, instead of \
@@ -545,7 +625,11 @@ pub fn system_prompt() -> String {
      file, use edit_file or write_file (never sed/tee via bash) so every change \
      is shown as a diff. After editing, run the tests with bash to verify, then \
      finish. When you start something slow and mean to look at it later, set a \
-     timer instead of checking on it straight away. \
+     timer instead of checking on it straight away. When a fact about the world \
+     outside this checkout would change what you do \u{2014} a library's current \
+     API, an error nobody here has seen, what a standard actually says \u{2014} \
+     search for it and fetch the page rather than recalling it, and say which \
+     page you read. \
      Directly before your first <act> block, narrate in ONE short line \
      what you are about to do and why \u{2014} the reader follows your work live. \
      Nothing else outside the blocks."
@@ -617,6 +701,19 @@ pub struct Session {
     pub finished: bool,
     pub final_message: String,
     pub error: Option<String>,
+    /// Rebis programs the agent asked to have run beneath this one, in the
+    /// order it asked. The loop cannot open a run — the queue belongs to the
+    /// frontend — so it collects the requests and the host acts on them.
+    pub nested: Vec<NestedRun>,
+}
+
+/// One Rebis program an agent asked the host to run beneath its own run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NestedRun {
+    /// The program, exactly as the agent wrote it.
+    pub source: String,
+    /// What the agent said it is for; becomes the child run's label.
+    pub note: String,
 }
 
 /// The agent: a workspace root and a step budget.
@@ -687,6 +784,7 @@ impl Conductor {
             std::collections::HashMap::new();
         let mut model_turn = 0usize;
         let mut timers = Timers::default();
+        let mut nested: Vec<NestedRun> = Vec::new();
         // The previous turn asked for nothing but timers, so no work is in hand
         // and the loop may wait for one rather than pay for a turn that could
         // only say "still waiting".
@@ -720,6 +818,7 @@ impl Conductor {
                         finished: false,
                         final_message: String::new(),
                         error: Some(e),
+                        nested,
                     };
                 }
             };
@@ -741,6 +840,7 @@ impl Conductor {
                         error: Some(
                             "the mind would not speak in <act> blocks (3 banished replies)".into(),
                         ),
+                        nested,
                     };
                 }
                 turns.push((
@@ -794,6 +894,7 @@ impl Conductor {
                         self.execute(&tool)
                     }
                     Tool::Timer { after, note } => Self::set_timer(&mut timers, after, note),
+                    Tool::Rebis { source, note } => Self::request_run(&mut nested, source, note),
                     _ => self.execute(&tool),
                 };
 
@@ -832,6 +933,7 @@ impl Conductor {
                     finished: true,
                     final_message: message,
                     error: None,
+                    nested,
                 };
             }
 
@@ -850,6 +952,7 @@ impl Conductor {
             finished: false,
             final_message: "step budget exhausted".into(),
             error: None,
+            nested,
         }
     }
 
@@ -896,6 +999,7 @@ impl Conductor {
             std::collections::HashMap::new();
         let mut model_turn = 0usize;
         let mut timers = Timers::default();
+        let mut nested: Vec<NestedRun> = Vec::new();
         // Same law as the act loop: a reply that asked only for timers leaves no
         // work in hand, so the loop may wait for one instead of taking a turn.
         let mut only_waiting = false;
@@ -930,6 +1034,7 @@ impl Conductor {
                             finished: false,
                             final_message: String::new(),
                             error: Some(error),
+                            nested,
                         };
                     }
                 }
@@ -950,6 +1055,7 @@ impl Conductor {
                         finished: false,
                         final_message: String::new(),
                         error: Some("the mind stopped calling tools (3 idle replies)".into()),
+                        nested,
                     };
                 }
                 history.push(Msg::assistant(reply.content, Vec::new()));
@@ -1011,6 +1117,7 @@ impl Conductor {
                         self.execute(tool)
                     }
                     Tool::Timer { after, note } => Self::set_timer(&mut timers, after, note),
+                    Tool::Rebis { source, note } => Self::request_run(&mut nested, source, note),
                     _ => self.execute(tool),
                 };
                 let step = Step {
@@ -1045,6 +1152,7 @@ impl Conductor {
                     finished: true,
                     final_message: message,
                     error: None,
+                    nested,
                 };
             }
         }
@@ -1053,6 +1161,7 @@ impl Conductor {
             finished: false,
             final_message: "step budget exhausted".into(),
             error: None,
+            nested,
         }
     }
 
@@ -1236,14 +1345,78 @@ impl Conductor {
                 }
             }
             Tool::Bash { cmd } => self.run_bash(cmd),
+            Tool::Search { query } => match crate::web::search(query) {
+                Ok(hits) => hits
+                    .iter()
+                    .enumerate()
+                    .map(|(index, hit)| {
+                        format!(
+                            "{}. {}\n   {}\n   {}",
+                            index + 1,
+                            hit.title,
+                            hit.url,
+                            hit.snippet
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Err(error) => format!("error: {error}"),
+            },
+            Tool::Fetch { url } => match crate::web::fetch(url) {
+                // Clipped here rather than in `fetch`: the ceiling is about what
+                // a prompt can carry, which is this loop's concern.
+                Ok(text) => crate::web::clip(&text, WEB_PAGE_CHARS),
+                Err(error) => format!("error: {error}"),
+            },
             // A timer is the one action the workspace cannot carry out: it is a
             // decision about when the NEXT turn happens, so the loop holds it.
             // Reaching here means a caller executed a tool outside a loop.
             Tool::Timer { after, .. } => {
                 format!("error: a timer ({after}) can only be set inside an agent run")
             }
+            // Likewise a nested run: the queue belongs to the frontend, so the
+            // loop collects the request and the host opens it.
+            Tool::Rebis { .. } => {
+                "error: a nested run can only be opened from inside an agent run".to_string()
+            }
             Tool::Finish { message } => message.clone(),
         }
+    }
+
+    /// Record a nested run the agent asked for, and tell it what will happen.
+    ///
+    /// The program is not run here. The loop has no queue to put it on — that
+    /// belongs to whichever frontend owns this run — so the request travels out
+    /// on the [`Session`] and the host opens it beneath the run that asked.
+    fn request_run(nested: &mut Vec<NestedRun>, source: &str, note: &str) -> String {
+        let source = source.trim();
+        if source.is_empty() {
+            return "REFUSED: a nested run needs a program in `source`.".to_string();
+        }
+        if nested.len() >= MAX_NESTED_RUNS {
+            return format!(
+                "REFUSED: {MAX_NESTED_RUNS} nested runs already asked for in this run. \
+                 Let them finish before opening more."
+            );
+        }
+        nested.push(NestedRun {
+            source: source.to_string(),
+            note: note.trim().to_string(),
+        });
+        // Hosted runs cross a process boundary: the queue is in the frontend,
+        // not here. The request goes out through the per-run sidecar the host
+        // drains. When there is no sidecar this is an in-process run and the
+        // caller reads `Session::nested` directly.
+        if let Some(path) = kaos_core::nest::path_from_env() {
+            if let Err(error) = kaos_core::nest::request(&path, note, source) {
+                return format!("REFUSED: the nested run could not be recorded: {error}");
+            }
+        }
+        format!(
+            "queued as a run beneath this one ({} bytes). It is shown nested under \
+             this run; its result is not part of this turn.",
+            source.len()
+        )
     }
 
     /// Register a timer the agent asked for, or report why it could not be.
@@ -1853,6 +2026,7 @@ mod tests {
             "equivalent to `(-> B A)`",
             "(~ name (parameters) body)",
             "(# std)",
+            "(? A B ...)",
             "/run block parallel",
             "finish(message)",
         ] {
@@ -1868,7 +2042,7 @@ mod tests {
             .skip(1)
             .map(|tail| tail.split("\n```").next().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(examples.len(), 7);
+        assert_eq!(examples.len(), 8);
         for (index, source) in examples.iter().enumerate() {
             rebis_lang::parse(source)
                 .unwrap_or_else(|error| panic!("Rebis chat example {}: {error}", index + 1));
@@ -1883,10 +2057,14 @@ mod tests {
         assert!(task_requests_rebis_authoring_context(
             "You are a Rebis agent operating in this workspace:\n/tmp/project"
         ));
+        // A node's contract is the contract, not the cookbook: the authoring
+        // reference is for the mind that WRITES Rebis, and sending it to one
+        // that is executing a single node costs ~4,500 tokens per call to say
+        // something the next sentence countermands.
         let node_prompt = rebis_agent_system_prompt();
-        assert!(node_prompt.contains("## Example 7: bounded recursive refinement"));
-        assert!(node_prompt
-            .ends_with("Follow only the supplied node prompt and return only its flow value."));
+        assert!(!node_prompt.contains("## Example 7: bounded recursive refinement"));
+        assert!(node_prompt.len() < 600, "the node contract grew a cookbook");
+        assert!(node_prompt.ends_with("return only its flow value."));
         assert_eq!(rebis_authoring_context(), REBIS_AUTHORING_CONTEXT);
     }
 
