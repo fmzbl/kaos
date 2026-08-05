@@ -89,6 +89,51 @@ missing *module* — so the fix was to extend it: `InputUnavailable`, and the
 `UnboundValue` cascade it causes, are expected. An example showing the shape of
 reading a file should not require the reader to have that file.
 
+## 6. The suite was run, and it is green · **2026-08-05**
+
+`./kaos-conformance/run.sh` against `ollama:llama3.2:3b`, at commit `1d35433`:
+
+```
+75 passed, 0 failed
+```
+
+76 programs; the one skip is `61-meta`, which asks a model to *write* Rebis and
+needs `GENERATION=1` — a capability rather than a language property, and the
+default 3B does not have it.
+
+**What this replaces.** The number quoted before this run was 75/75 against
+qwen3-32b, taken *before* attachments, the sigil wall, agent-to-agent prompting,
+the ollama host setting and chaos mode landed. It was stale and was being quoted
+as though it were not. This one is not.
+
+**What it is not.** It is llama3.2:3b, not qwen3-32b, because that is what is on
+this machine — `run.sh` defaults to the 3B for a measured reason (qwen3:4b takes
+~110s for a one-word answer here, so a fifty-program suite is ninety minutes and
+nobody runs it twice). A larger model is a different and worthwhile measurement,
+and `MODEL=… ./kaos-conformance/run.sh` is how to take it. What this run
+establishes is that the *language* properties hold end-to-end through the
+shipped binary after the last several features, which is what the suite is for.
+
+**No regressions.** Nothing needed fixing, which was not the expected outcome —
+this was the item most likely to find something.
+
+### And a second instrument, from the same corpus
+
+Every program declares its price in a `; expect: calls N` header, verified
+against a real model by the runner. `kaos-conformance/tests/cost.rs` points
+`kaos_core::cost` at that corpus and checks the *predicted* count against the
+measured one, for the 36 programs whose price is exactly predictable.
+
+It found two defects in the predictor immediately — a framing counted as a
+firing, and a bound value not counted at all — neither of which the predictor's
+own unit tests would have caught, because they asserted what its author
+believed. It also fixed the boundary of the claim: `65-invariant-refuses` costs
+5 unbroken and 3 refused, so an invariant scope's price is an upper bound and
+the predictor now says so rather than reporting a number it cannot stand behind.
+
+That is the argument for keeping a measured corpus around: it is the only thing
+that can tell a cost model it is wrong.
+
 ## What this suite has NOT yet proved
 
 Being exact, because the difference matters and it would be easy to imply
