@@ -1724,32 +1724,86 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             kaos::fold::close();
             let _ = std::io::stdout().flush();
         };
+        // Solve times are heavy-tailed, so restart theory applies here exactly
+        // as it does on the `/code` path: a node that fizzles is banished whole
+        // and retried on a fresh context, under the opposite polarity, with a
+        // Fibonacci-longer budget.
+        //
+        // **The total does not grow.** `spiral::budgets` splits the step
+        // allowance this node already had into rungs, so a node that wanders
+        // spends its budget on two or three shorter attempts instead of one long
+        // one — which is the whole content of restart theory, and would be an
+        // ordinary budget increase if the schedule were additive.
+        //
+        // A node that CHANGED something is not fizzled and ends the spiral on
+        // the first attempt, so the common case pays nothing for this.
+        let rungs = kaos::spiral::budgets(max_steps());
+        let attempts = rungs.len();
+        let mut node_task = task.clone();
+        let mut spiralled: Option<kaos::conductor::Session> = None;
+
         // One bounded Conductor run per node is the only tool mechanism an
         // HTTP backend offers; the appended contract scopes it to one direct
         // node agent, while --chaos keeps the unscoped Kaos pipeline.
-        let session = loop {
-            let session = run_session_with_timeout(
-                &root,
-                &task,
-                model,
-                sampling,
-                max_steps(),
-                timeout_s,
-                (!self.chaos).then(kaos::conductor::rebis_node_tool_contract),
-                SessionObservers {
-                    on_model_call: &mut on_model_call,
-                    on_model_reply: &mut on_model_reply,
-                    on_step: &mut |event| {
-                        step += 1;
-                        render_step(step, event);
+        let session = 'spiral: loop {
+            for (attempt, &steps_budget) in rungs.iter().enumerate() {
+                let polarity = kaos::spiral::Polarity::of_attempt(attempt);
+                let mut attempt_sampling = sampling;
+                if attempt > 0 {
+                    attempt_sampling.temperature = polarity.temperature();
+                    println!(
+                        "model    the node fizzled \u{2014} banished; the spiral turns \
+                         ({} stars, {steps_budget} steps, attempt {}/{attempts})",
+                        polarity.name(),
+                        attempt + 1
+                    );
+                    let _ = std::io::stdout().flush();
+                }
+                let session = run_session_with_timeout(
+                    &root,
+                    &node_task,
+                    model,
+                    attempt_sampling,
+                    steps_budget,
+                    timeout_s,
+                    (!self.chaos).then(kaos::conductor::rebis_node_tool_contract),
+                    SessionObservers {
+                        on_model_call: &mut on_model_call,
+                        on_model_reply: &mut on_model_reply,
+                        on_step: &mut |event| {
+                            step += 1;
+                            render_step(step, event);
+                        },
                     },
-                },
-            );
+                );
+                // A provider failure is not a fizzle: nothing was learned, and
+                // the existing pause protocol already owns that case.
+                if session.error.is_some() {
+                    spiralled = Some(session);
+                    break;
+                }
+                let last = attempt + 1 == attempts;
+                if !kaos::spiral::fizzled(&session) || last {
+                    spiralled = Some(session);
+                    break;
+                }
+                // The Gnosis Crossing: the banished self's map survives, so the
+                // next attempt does not pay the re-exploration tax that made
+                // blind restarts measurably slower.
+                let gnosis = kaos::spiral::gnosis(&session);
+                node_task = format!(
+                    "{task}\n\nYou have attempted this before; that working was banished, \
+                     but its gnosis crosses:\n{gnosis}\n\
+                     Use the map \u{2014} go straight to what matters, make the change, \
+                     verify it, then finish."
+                );
+            }
+            let session = spiralled.take().expect("the spiral ran at least one rung");
             let Some(error) = session.error.as_deref() else {
                 if session.final_message.trim().is_empty()
                     && self.pause_failed_prompt("model returned no answer")
                 {
-                    continue;
+                    continue 'spiral;
                 }
                 break session;
             };

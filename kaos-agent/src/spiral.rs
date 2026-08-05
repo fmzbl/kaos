@@ -299,3 +299,63 @@ mod tests {
         assert!(fizzled(&session(vec![edit_ok], true, Some("boom".into()))));
     }
 }
+
+#[cfg(test)]
+mod restart_contract {
+    use super::*;
+
+    /// The property a caller wiring this in has to be able to rely on, and the
+    /// one that separates a restart schedule from a budget increase.
+    ///
+    /// `budgets(n)` splits `n` into rungs. It does not add to it. A node that
+    /// wanders therefore spends the allowance it already had across two or three
+    /// shorter attempts rather than one long one — which is the whole content of
+    /// restart theory against heavy-tailed solve times, and would be an ordinary
+    /// (and much less interesting) budget rise if the schedule were additive.
+    #[test]
+    fn the_schedule_redistributes_and_never_grows_the_total() {
+        for total in [1_usize, 5, 8, 13, 14, 21, 34, 55, 100, 233] {
+            let rungs = budgets(total);
+            assert!(!rungs.is_empty(), "{total} produced no attempt");
+            assert_eq!(
+                rungs.iter().sum::<usize>(),
+                total,
+                "{total} became {rungs:?}, which spends a different allowance"
+            );
+            assert!(
+                rungs.iter().all(|rung| *rung > 0),
+                "{total} produced an attempt with no steps: {rungs:?}"
+            );
+        }
+    }
+
+    /// Each rung is longer than the last, so a retry is a deeper dive rather
+    /// than the same shallow attempt again.
+    #[test]
+    fn each_rung_is_at_least_as_long_as_the_one_before() {
+        for total in [21_usize, 34, 55, 100, 233] {
+            let rungs = budgets(total);
+            for pair in rungs.windows(2) {
+                assert!(
+                    pair[1] >= pair[0],
+                    "{total} became {rungs:?}, which retries no deeper than it started"
+                );
+            }
+        }
+    }
+
+    /// Consecutive attempts alternate polarity, so a banished working is never
+    /// retried under the same stars.
+    #[test]
+    fn consecutive_attempts_alternate_polarity() {
+        for total in [21_usize, 55, 233] {
+            let polarities: Vec<Polarity> = (0..budgets(total).len())
+                .map(Polarity::of_attempt)
+                .collect();
+            assert_eq!(polarities[0], Polarity::Solar, "the first is convergent");
+            for pair in polarities.windows(2) {
+                assert_ne!(pair[0], pair[1], "{polarities:?}");
+            }
+        }
+    }
+}
