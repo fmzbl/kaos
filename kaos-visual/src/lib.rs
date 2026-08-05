@@ -3074,7 +3074,18 @@ impl Editor {
     /// so switching back returns you exactly where you were.
     fn tab_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            // Tabs are opened by runs, chats, source projections, and tools, so
+            // a real session can outgrow the window quickly. Keep the whole
+            // command row in one horizontal scroller: every tab and every
+            // action remains reachable instead of the right side disappearing
+            // past the panel edge. New tabs append at the visible end until the
+            // user drags the strip elsewhere.
+            egui::ScrollArea::horizontal()
+                .id_salt("tabs_scroll")
+                .auto_shrink([false, true])
+                .stick_to_right(true)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
                 let active = self.tabs.active_id();
                 let mut select: Option<TabId> = None;
                 let mut close: Option<TabId> = None;
@@ -3209,7 +3220,8 @@ impl Editor {
                 if actions {
                     self.open_actions();
                 }
-            });
+                    });
+                });
         });
     }
 
