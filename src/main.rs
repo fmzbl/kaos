@@ -2460,9 +2460,9 @@ fn request_cmd(session: &Session, arg: &str) {
 }
 
 /// Render one literal chat task. Shell callers receive a flushed live trace and
-/// then the cleaned assistant answer; interactive terminal and visual chat set
-/// `KAOS_CHAT_OUTPUT` so this boundary stays final-answer-only for their child
-/// transport.
+/// then the cleaned assistant answer; interactive front ends additionally set
+/// `KAOS_CHAT_TRACE` so they can render the same visible work while still
+/// receiving a final-answer-only durable conversation turn.
 fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
     // The TUI and visual editor set this private flag because they collect the
     // child output into a durable assistant turn. A direct shell request leaves
@@ -2471,6 +2471,11 @@ fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
         std::env::var("KAOS_CHAT_OUTPUT").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
     );
+    let trace = stream
+        || matches!(
+            std::env::var("KAOS_CHAT_TRACE").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        );
 
     // Chaos mode is applied HERE rather than only at each frontend, so that
     // `kaos chat "…"` from a shell, `kaos request chat`, and a scripted pipe
@@ -2485,7 +2490,7 @@ fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
     let task = if kaos_core::chaos::enabled() && !task.contains(kaos_core::chaos::COMPOSE_CONTRACT)
     {
         composed = kaos_core::chat::DEFAULT_CONTEXT.render_chaos_chat("", task);
-        if stream {
+        if trace {
             println!("chat    chaos mode · composing the intent as a Rebis program first");
             let _ = io::stdout().flush();
         }
@@ -2494,10 +2499,16 @@ fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
         task
     };
     let result = if spec.kind == Kind::ClaudeCli {
-        if stream {
+        if trace {
             let mut emit = |line: &str| {
                 for rendered in kaos::backend::claude_event_lines(line) {
+                    if kaos::fold::enabled() {
+                        kaos::fold::open("claude · visible model/tool work");
+                    }
                     println!("chat    {rendered}");
+                    if kaos::fold::enabled() {
+                        kaos::fold::close();
+                    }
                 }
                 let _ = io::stdout().flush();
             };
@@ -2513,27 +2524,47 @@ fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
     } else {
         let model_label = spec.label();
         let timeout_s = chat_timeout_s();
+        let model_fold_open = std::cell::Cell::new(false);
         let mut on_model_call = |turn: usize| {
-            if stream {
-                println!(
-                    "chat    model turn {turn} · {} · limit {timeout_s}s",
-                    model_label
+            if trace {
+                let title = format!(
+                    "chat model turn {turn} · working · {model_label} · limit {timeout_s}s"
                 );
+                if kaos::fold::enabled() {
+                    kaos::fold::open(&title);
+                    model_fold_open.set(true);
+                } else {
+                    println!("chat    {title}");
+                }
                 let _ = io::stdout().flush();
             }
         };
         let mut on_model_reply = |turn: usize, response: &str| {
-            if stream {
-                println!("chat    model turn {turn} · response");
+            if trace {
+                if model_fold_open.replace(false) {
+                    kaos::fold::close();
+                }
+                let title = format!("chat model turn {turn} · complete response");
+                if kaos::fold::enabled() {
+                    kaos::fold::open(&title);
+                } else {
+                    println!("chat    {title}");
+                }
                 for line in response.lines() {
                     println!("chat      {line}");
+                }
+                if response.is_empty() {
+                    println!("chat      (empty response)");
+                }
+                if kaos::fold::enabled() {
+                    kaos::fold::close();
                 }
                 let _ = io::stdout().flush();
             }
         };
         let mut step = 0usize;
         let mut on_step = |event: &kaos::conductor::Step| {
-            if stream {
+            if trace {
                 step += 1;
                 render_step(step, event);
                 let _ = io::stdout().flush();
@@ -2553,6 +2584,9 @@ fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
                 on_step: &mut on_step,
             },
         );
+        if model_fold_open.replace(false) && kaos::fold::enabled() {
+            kaos::fold::close();
+        }
         match (session.error, session.final_message) {
             (Some(error), _) => Err(error),
             (None, answer) if !answer.trim().is_empty() => Ok(answer),
@@ -2563,7 +2597,7 @@ fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
         Ok(answer) => {
             let answer = kaos_core::chat::clean_chat_reply(&answer);
             if !answer.is_empty() {
-                if stream {
+                if trace {
                     println!("chat    final answer");
                 }
                 println!("{answer}");

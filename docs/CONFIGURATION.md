@@ -243,6 +243,7 @@ child. They are not user configuration knobs:
 | `KAOS_REBIS_CONTEXT` | Adds Rebis authoring and validation guidance to a coding chat. |
 | `KAOS_RAW_CHAT_TASK_STDIN` | Marks a raw task supplied through standard input. |
 | `KAOS_CHAT_OUTPUT` | Requests an assistant-only child response. |
+| `KAOS_CHAT_TRACE` | Requests visible model/tool work alongside the assistant response; terminal and visual front ends render it as collapsible sections. |
 | `KAOS_PAUSE_ON_TRANSIENT` | Enables continuation-safe pauses after retryable model failures. |
 | `KAOS_RUN_PROCESS_GROUP` | Extends hosted pause/cancel signals to command descendants. |
 | `KAOS_REBIS_CHECKPOINT` | Selects the prompt journal used to resume a hosted Rebis run. |

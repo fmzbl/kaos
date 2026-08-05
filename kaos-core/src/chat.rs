@@ -251,6 +251,74 @@ pub fn clean_chat_reply(text: &str) -> String {
     strip_terminal_escapes(text).trim().to_string()
 }
 
+/// Extract the answer from a streamed chat child.
+///
+/// Interactive front ends ask the child to emit its visible work as foldable
+/// sections before a `chat    final answer` line. Those sections belong in the
+/// live transcript, not in the durable conversation history. Older/final-only
+/// children do not emit that delimiter, so the fallback keeps their complete
+/// output compatible.
+#[must_use]
+pub fn extract_chat_reply(text: &str) -> String {
+    let mut final_answer = Vec::new();
+    let mut fallback = Vec::new();
+    let mut collecting_final = false;
+    let mut saw_final = false;
+    let mut saw_fold = false;
+    let mut saw_chat_line = false;
+
+    for raw in text.lines() {
+        match crate::fold::classify(raw) {
+            crate::fold::Marker::Open(_) | crate::fold::Marker::Close => {
+                saw_fold = true;
+                continue;
+            }
+            crate::fold::Marker::Line(_) => {}
+        }
+        let line = strip_terminal_escapes(raw);
+        if line.trim_start().starts_with("chat    ") || line.trim_start().starts_with("chat ") {
+            saw_chat_line = true;
+        }
+        if line.trim_start().starts_with("chat    final answer")
+            || line.trim_start().starts_with("chat final answer")
+        {
+            collecting_final = true;
+            saw_final = true;
+            continue;
+        }
+        if collecting_final {
+            final_answer.push(line);
+        } else {
+            fallback.push(line);
+        }
+    }
+
+    let fallback = fallback
+        .iter()
+        .find(|line| line.trim_start().starts_with("chat error:"))
+        .cloned()
+        .map_or_else(
+            || {
+                if saw_fold {
+                    if saw_chat_line {
+                        String::new()
+                    } else {
+                        fallback.join("\n")
+                    }
+                } else {
+                    fallback.join("\n")
+                }
+            },
+            |error| error,
+        );
+    let output = if saw_final {
+        final_answer.join("\n")
+    } else {
+        fallback
+    };
+    clean_chat_reply(&output)
+}
+
 /// Strip terminal escapes — CSI colours, OSC hyperlinks, carriage returns —
 /// leaving the text itself exactly as it was, indentation included.
 ///
@@ -463,6 +531,60 @@ mod tests {
             "red\nnextlink"
         );
         assert_eq!(clean_chat_reply("␛[2mvisible␛[0m"), "visible");
+    }
+
+    #[test]
+    fn streamed_chat_reply_excludes_folded_work() {
+        let stream = concat!(
+            "\u{1e}FOLD_OPEN\u{1f}model turn 1 · working\n",
+            "chat    generating turn 1\n",
+            "\u{1e}FOLD_CLOSE\n",
+            "chat    final answer\n",
+            "Here is the answer.\n",
+            "\n",
+            "Second paragraph.\n",
+        );
+        assert_eq!(
+            extract_chat_reply(stream),
+            "Here is the answer.\n\nSecond paragraph."
+        );
+    }
+
+    #[test]
+    fn final_only_chat_reply_stays_compatible() {
+        assert_eq!(
+            extract_chat_reply("plain answer\nnext line\n"),
+            "plain answer\nnext line"
+        );
+    }
+
+    #[test]
+    fn folded_non_chat_output_is_not_dropped_from_the_session() {
+        let stream = concat!(
+            "\u{1e}FOLD_OPEN\u{1f}inner working\n",
+            "model    editing the requested file\n",
+            "\u{1e}FOLD_CLOSE\n",
+        );
+        assert_eq!(
+            extract_chat_reply(stream),
+            "model    editing the requested file"
+        );
+    }
+
+    #[test]
+    fn interrupted_stream_does_not_become_a_model_answer() {
+        let stream = concat!(
+            "\u{1e}FOLD_OPEN\u{1f}model turn 1 · working\n",
+            "chat    model turn 1 · working\n",
+            "\u{1e}FOLD_CLOSE\n",
+        );
+        assert!(extract_chat_reply(stream).is_empty());
+        assert_eq!(
+            extract_chat_reply(
+                "\u{1e}FOLD_OPEN\u{1f}work\nchat error: offline\n\u{1e}FOLD_CLOSE\n"
+            ),
+            "chat error: offline"
+        );
     }
 
     #[test]

@@ -57,29 +57,10 @@ pub fn close() {
     }
 }
 
-/// Parse a line the TUI streamed from a child. Returns what kind of marker it is (if
-/// any) so the renderer can build the fold tree. Kept here so the wire format lives
-/// in exactly one place.
-pub enum Marker<'a> {
-    Open(&'a str),
-    Close,
-    /// An ordinary content line (the common case).
-    Line(&'a str),
-}
-
-/// Classify one raw line (ANSI-bearing content is passed through untouched as
-/// [`Marker::Line`]). Only the exact control-led marker lines are special.
-pub fn classify(line: &str) -> Marker<'_> {
-    if let Some(rest) = line.strip_prefix(RS) {
-        if let Some(summary) = rest.strip_prefix(&format!("{OPEN_TAG}{US}")) {
-            return Marker::Open(summary);
-        }
-        if rest == CLOSE_TAG {
-            return Marker::Close;
-        }
-    }
-    Marker::Line(line)
-}
+// The protocol is shared with the visual editor. Keep this module as the
+// terminal-facing emission API and re-export the classifier so existing TUI
+// call sites continue to read naturally.
+pub use kaos_core::fold::{classify, Marker};
 
 #[cfg(test)]
 mod tests {

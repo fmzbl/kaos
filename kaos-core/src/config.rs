@@ -88,6 +88,10 @@ pub const ENVIRONMENT_DOCS: &[EnvironmentDoc] = &[
         details: "Private flag requesting a clean assistant-only response from a child chat.",
     },
     EnvironmentDoc {
+        key: "KAOS_CHAT_TRACE",
+        details: "Private flag requesting visible model and tool work alongside the clean chat response; front ends render it as collapsible sections.",
+    },
+    EnvironmentDoc {
         key: "KAOS_PAUSE_ON_TRANSIENT",
         details: "Hosted-run transport flag enabling continuation-safe pauses after retryable model failures.",
     },
@@ -626,7 +630,7 @@ KAOS_DEBUG = 0
 #   OPENAI_API_KEY  ANTHROPIC_API_KEY  OPENROUTER_API_KEY   — credentials
 #   REBIS_COLLECTION_PATH                                   — collection root
 #   KAOS_BIN  KAOS_SESSION  KAOS_RESUME  KAOS_FOLD          — child process
-#   KAOS_CHAT_OUTPUT  KAOS_REBIS_CONTEXT                    — child process
+#   KAOS_CHAT_OUTPUT  KAOS_CHAT_TRACE  KAOS_REBIS_CONTEXT   — child process
 #   KAOS_RAW_CHAT_TASK_STDIN  KAOS_CONFORMANCE_MODEL        — child / harness
 #   KAOS_PAUSE_ON_TRANSIENT  KAOS_RUN_PROCESS_GROUP         — run transport
 #   KAOS_REBIS_CHECKPOINT  KAOS_REBIS_DIRECTIVE             — run transport

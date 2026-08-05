@@ -2810,6 +2810,7 @@ pub struct Workspace {
     sigil_chat_visible: bool,
     sigil_chat_input: String,
     sigil_chat_lines: Vec<String>,
+    sigil_chat_expanded: BTreeSet<usize>,
     sigil_chat_busy: bool,
     sigil_chat_run_id: Option<u64>,
     sigil_results: Vec<SigilEntry>,
@@ -2895,6 +2896,7 @@ impl Workspace {
             sigil_chat_visible: false,
             sigil_chat_input: String::new(),
             sigil_chat_lines: Vec::new(),
+            sigil_chat_expanded: BTreeSet::new(),
             sigil_chat_busy: false,
             sigil_chat_run_id: None,
             sigil_results: Vec::new(),
@@ -3071,6 +3073,7 @@ impl Workspace {
         self.sigil_chat_visible = false;
         self.sigil_chat_input.clear();
         self.sigil_chat_lines.clear();
+        self.sigil_chat_expanded.clear();
         self.sigil_chat_busy = false;
         self.sigil_chat_run_id = None;
     }
@@ -3103,6 +3106,77 @@ impl Workspace {
     #[must_use]
     pub fn sigil_chat_lines(&self) -> &[String] {
         &self.sigil_chat_lines
+    }
+
+    /// Whether one streamed model-work section is expanded in the terminal
+    /// projection. The line index is stable for the lifetime of this channel.
+    #[must_use]
+    pub fn sigil_chat_fold_expanded(&self, line: usize) -> bool {
+        self.sigil_chat_expanded.contains(&line)
+    }
+
+    /// Toggle the newest fold, or all folds when `all` is requested. Fold
+    /// sections are collapsed by default so a long supervisor trace does not
+    /// bury the source-bound conversation.
+    pub fn toggle_sigil_chat_fold(&mut self, all: bool) {
+        let folds = self
+            .sigil_chat_lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                matches!(
+                    kaos_core::fold::classify(line),
+                    kaos_core::fold::Marker::Open(_)
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if folds.is_empty() {
+            return;
+        }
+        if all {
+            let any_collapsed = folds
+                .iter()
+                .any(|index| !self.sigil_chat_expanded.contains(index));
+            if any_collapsed {
+                self.sigil_chat_expanded.extend(folds);
+            } else {
+                self.sigil_chat_expanded.clear();
+            }
+        } else if let Some(index) = folds.last() {
+            if !self.sigil_chat_expanded.remove(index) {
+                self.sigil_chat_expanded.insert(*index);
+            }
+        }
+    }
+
+    /// Number of rows the collapsed/expanded channel occupies in the terminal
+    /// panel, used to keep scrolling bounded to what is actually visible.
+    #[must_use]
+    pub fn sigil_chat_visible_rows(&self) -> usize {
+        let mut visible = 0usize;
+        let mut stack = Vec::new();
+        for (index, line) in self.sigil_chat_lines.iter().enumerate() {
+            match kaos_core::fold::classify(line) {
+                kaos_core::fold::Marker::Open(_) => {
+                    let parent_visible = stack.last().copied().unwrap_or(true);
+                    let this_visible = parent_visible;
+                    if this_visible {
+                        visible += 1;
+                    }
+                    stack.push(this_visible && self.sigil_chat_expanded.contains(&index));
+                }
+                kaos_core::fold::Marker::Close => {
+                    stack.pop();
+                }
+                kaos_core::fold::Marker::Line(_) => {
+                    if stack.last().copied().unwrap_or(true) {
+                        visible += 1;
+                    }
+                }
+            }
+        }
+        visible.max(1)
     }
 
     #[must_use]
@@ -4771,7 +4845,7 @@ impl Workspace {
     /// Scroll the right-hand projection without permitting blank overscroll.
     pub fn scroll_graph_vertical(&mut self, delta: isize, visible_rows: usize) {
         let row_count = if self.sigil_chat_visible {
-            self.sigil_chat_lines.len()
+            self.sigil_chat_visible_rows()
         } else if self.result_only_visible {
             self.output_lines().len()
         } else if self.run_output_visible && !self.run_output.is_empty() {
@@ -5955,6 +6029,25 @@ mod tests {
             .iter()
             .any(|line| line.contains("change the final mediator")));
         assert_eq!(workspace.editor.source(), original);
+    }
+
+    #[test]
+    fn sigil_chat_work_sections_collapse_and_expand_without_losing_rows() {
+        let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+        workspace.dismiss_chaos_star();
+        workspace.open_sigil_chat();
+        workspace.push_sigil_chat_line("\u{1e}FOLD_OPEN\u{1f}model work");
+        workspace.push_sigil_chat_line("god     reading source");
+        workspace.push_sigil_chat_line("\u{1e}FOLD_CLOSE");
+
+        let collapsed = workspace.sigil_chat_visible_rows();
+        workspace.toggle_sigil_chat_fold(false);
+        let expanded = workspace.sigil_chat_visible_rows();
+
+        assert_eq!(collapsed + 1, expanded);
+        assert!(workspace.sigil_chat_fold_expanded(3));
+        workspace.toggle_sigil_chat_fold(false);
+        assert_eq!(workspace.sigil_chat_visible_rows(), collapsed);
     }
 
     #[test]

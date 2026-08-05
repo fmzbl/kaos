@@ -908,23 +908,6 @@ struct AutomataPane {
 }
 
 impl AutomataPane {
-    /// Rebuild a pane around a lattice that has already been stepping — what a
-    /// torn-off generation returns as when its window closes. The run it was
-    /// watching is not carried back: a window that ran on its own for a while
-    /// has consumed a transcript this pane can no longer say the length of, and
-    /// claiming otherwise would re-feed it from the start.
-    fn from_machine(machine: automata::Automaton, origin: String) -> Self {
-        Self {
-            machine,
-            run: None,
-            origin,
-            consumed: 0,
-            running: false,
-            interval: 0.25,
-            last_step: std::time::Instant::now(),
-        }
-    }
-
     /// Build the lattice by parsing `source`. The program's shape is the
     /// lattice, so a program that does not parse has no lattice.
     fn from_source(source: &str, origin: impl Into<String>) -> Result<Self, String> {
@@ -1183,12 +1166,12 @@ fn sigil_catalog_row(
 
 /// Whether this pane can stand in a window of its own.
 ///
-/// The condition is not a list of blessed kinds, it is a property: a pane can
-/// be torn off exactly when it draws from its own state without the editor. See
-/// [`torn`] for why that is the same thing as being able to run on its own
-/// clock.
-fn can_tear(pane: &Pane) -> bool {
-    matches!(pane, Pane::Music(_) | Pane::Automata(_))
+/// Every pane owns enough state to travel into a detached editor. The
+/// independent viewport owns that editor rather than borrowing this one, so
+/// the same action works for document, conversation, source, settings, run,
+/// and action tabs as well as the animated panes.
+fn can_tear(_pane: &Pane) -> bool {
+    true
 }
 
 /// The title a pane is put back on the bar under.
@@ -1647,6 +1630,134 @@ impl Editor {
             unfolded: std::collections::HashSet::new(),
             space_pan: false,
         }
+    }
+
+    /// Build the small editor that lives behind a torn-off viewport.
+    ///
+    /// A viewport callback cannot borrow the main editor: it is a deferred
+    /// paint pass, possibly on another thread. Keeping a complete editor
+    /// around the moved pane lets every tab keep using its existing controls
+    /// and state, including source actions, chat, runs, and settings, rather
+    /// than reducing the less independent tabs to a static preview.
+    fn detached(
+        pane: Pane,
+        ink: Ink,
+        cwd: std::path::PathBuf,
+        runs: &runs::Desk,
+        actions: &actions::Desk,
+    ) -> Self {
+        let mut editor = Self::opened(Opened::Drawing(Mandala::new()));
+        editor.tabs = Tabs::new();
+        editor.tabs.open(pane_title(&pane), pane);
+        editor.ink = ink;
+        editor.cwd_edit = cwd.display().to_string();
+        editor.cwd = cwd;
+        editor.runs = runs.snapshot();
+        editor.actions = actions.snapshot();
+        editor.torn.clear();
+        editor.torn_sequence = 0;
+        editor.notice = None;
+        editor
+    }
+
+    /// Title the viewport after the pane it owns.
+    fn detached_title(&self) -> String {
+        self.tabs
+            .active()
+            .map(pane_title)
+            .unwrap_or_else(|| "kaos visual".to_string())
+    }
+
+    /// Paint the active pane in a deferred viewport.
+    ///
+    /// The normal window surrounds this with its header, palette, side panel,
+    /// and footer. A torn window deliberately has none of that chrome, but it
+    /// still runs the same pane renderer and polls its own process desks so a
+    /// chat or run remains live after leaving the main window.
+    fn show_detached(&mut self, ui: &mut egui::Ui, ink: Ink) {
+        self.ink = ink;
+        self.poll_run(ui.ctx());
+        self.poll_actions(ui.ctx());
+        self.detached_stop_bar(ui);
+        if self.on_mandala() {
+            self.sync();
+        }
+        match self.tabs.active() {
+            Some(Pane::Mandala(_)) => self.canvas(ui),
+            Some(Pane::Chat(_)) => self.chat(ui),
+            Some(Pane::Source(_)) => self.source(ui),
+            Some(Pane::Ink(_)) => self.ink_tab(ui),
+            Some(Pane::Sigils(_)) => self.sigils(ui),
+            Some(Pane::Automata(_)) => self.automata_tab(ui),
+            Some(Pane::Music(_)) => self.detached_music_tab(ui),
+            Some(Pane::Settings(_)) => self.settings(ui),
+            Some(Pane::Runs) => self.runs_tab(ui),
+            Some(Pane::Actions) => self.actions_tab(ui),
+            None => {}
+        }
+        self.run_modal(ui.ctx());
+        self.run_status_modal(ui.ctx());
+    }
+
+    /// A detached window has no main header, so keep its stop affordance local
+    /// as well. This covers model work launched from a detached chat, source,
+    /// runs, or actions pane.
+    fn detached_stop_bar(&mut self, ui: &mut egui::Ui) {
+        let active = self.runs.active_count() + self.actions.active_count();
+        if active == 0 {
+            return;
+        }
+        let mut stop = false;
+        ui.horizontal(|ui| {
+            ui.colored_label(self.ink.secondary, format!("{active} model task(s) active"));
+            if ui
+                .button(egui::RichText::new("stop all").color(self.ink.danger))
+                .on_hover_text("cancel every active model or tool process in this window")
+                .clicked()
+            {
+                stop = true;
+            }
+        });
+        if stop {
+            self.stop_all_work();
+        }
+        ui.separator();
+    }
+
+    /// Stop every model/tool child owned by this editor and discard queued chat
+    /// turns, while leaving text currently being drafted untouched.
+    fn stop_all_work(&mut self) {
+        let runs = self.runs.active_count();
+        let actions = self.actions.active_count();
+        self.runs.cancel_all(&self.cwd);
+        self.actions.cancel_all(&self.cwd);
+        let mut queued = 0;
+        for tab in self.tabs.iter_mut() {
+            if let Pane::Chat(chat) = &mut tab.content {
+                queued += chat.queued.len();
+                chat.queued.clear();
+            }
+        }
+        let total = runs + actions + queued;
+        if total > 0 {
+            self.notice = Some(format!("stopped {total} active/queued model task(s)"));
+        }
+    }
+
+    /// Return every tab still owned by a detached editor when its viewport
+    /// closes. A pane may have opened a related tab while it was away (for
+    /// example, source can open a mandala), so reclaiming only the active one
+    /// would silently discard user work.
+    fn reclaim_detached(mut self) -> Vec<Pane> {
+        let mut panes = Vec::new();
+        while let Some(id) = self.tabs.active_id() {
+            let Some(pane) = self.tabs.close(id) else {
+                break;
+            };
+            panes.push(pane);
+        }
+        panes.reverse();
+        panes
     }
 
     fn request_run_options(
@@ -2324,6 +2435,122 @@ fn paint_stream_line(ui: &mut egui::Ui, line: &str, k: Ink) {
     });
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StreamSection {
+    Line(String),
+    Fold {
+        title: String,
+        body: Vec<StreamSection>,
+    },
+}
+
+/// Turn the shared child stream into a small tree. Folds are deliberately
+/// parsed at paint time: retained logs can grow while a model is working, and
+/// egui's stable header ids preserve a user's open/closed choice between frames.
+fn stream_sections(lines: &[String]) -> Vec<StreamSection> {
+    let mut roots = Vec::new();
+    let mut stack: Vec<(String, Vec<StreamSection>)> = Vec::new();
+
+    for raw in lines {
+        match kaos_core::fold::classify(raw) {
+            kaos_core::fold::Marker::Open(title) => {
+                stack.push((kaos_core::chat::strip_terminal_escapes(title), Vec::new()));
+            }
+            kaos_core::fold::Marker::Close => {
+                let Some((title, body)) = stack.pop() else {
+                    continue;
+                };
+                let section = StreamSection::Fold { title, body };
+                if let Some((_, parent)) = stack.last_mut() {
+                    parent.push(section);
+                } else {
+                    roots.push(section);
+                }
+            }
+            kaos_core::fold::Marker::Line(line) => {
+                let line = kaos_core::chat::strip_terminal_escapes(line);
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Some((_, body)) = stack.last_mut() {
+                    body.push(StreamSection::Line(line));
+                } else {
+                    roots.push(StreamSection::Line(line));
+                }
+            }
+        }
+    }
+
+    // A killed child can leave an open section without its CLOSE marker. Keep
+    // that visible as a collapsible section rather than losing its partial work.
+    while let Some((title, body)) = stack.pop() {
+        let section = StreamSection::Fold { title, body };
+        if let Some((_, parent)) = stack.last_mut() {
+            parent.push(section);
+        } else {
+            roots.push(section);
+        }
+    }
+    roots
+}
+
+fn stream_section_lines(items: &[StreamSection]) -> usize {
+    items
+        .iter()
+        .map(|item| match item {
+            StreamSection::Line(_) => 1,
+            StreamSection::Fold { body, .. } => stream_section_lines(body),
+        })
+        .sum()
+}
+
+fn paint_stream_sections(ui: &mut egui::Ui, lines: &[String], k: Ink, salt: &str) {
+    let sections = stream_sections(lines);
+    for (index, section) in sections.iter().enumerate() {
+        paint_stream_section(ui, section, k, salt, &[index]);
+    }
+}
+
+fn paint_stream_section(
+    ui: &mut egui::Ui,
+    section: &StreamSection,
+    k: Ink,
+    salt: &str,
+    path: &[usize],
+) {
+    match section {
+        StreamSection::Line(line) => paint_stream_line(ui, line, k),
+        StreamSection::Fold { title, body } => {
+            let line_count = stream_section_lines(body);
+            let header = if line_count == 0 {
+                title.clone()
+            } else {
+                format!(
+                    "{}  ·  {} line{}",
+                    title,
+                    line_count,
+                    if line_count == 1 { "" } else { "s" }
+                )
+            };
+            egui::CollapsingHeader::new(
+                egui::RichText::new(header)
+                    .monospace()
+                    .size(11.5)
+                    .color(k.secondary),
+            )
+            .id_salt(("model_work", salt, path.to_vec()))
+            .default_open(false)
+            .show(ui, |ui| {
+                for (index, child) in body.iter().enumerate() {
+                    let mut child_path = path.to_vec();
+                    child_path.push(index);
+                    paint_stream_section(ui, child, k, salt, &child_path);
+                }
+            });
+        }
+    }
+}
+
 fn role_wash(tone: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(tone.r(), tone.g(), tone.b(), alpha)
 }
@@ -2629,6 +2856,21 @@ impl Editor {
             // window used to cut the last of them off the right edge.
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(self.ink.accent, "KAOS VISUAL");
+                let active = self.runs.active_count() + self.actions.active_count();
+                if active > 0 {
+                    let mut stop = false;
+                    if ui
+                        .button(egui::RichText::new("stop all").color(self.ink.danger))
+                        .on_hover_text("cancel every active model or tool process")
+                        .clicked()
+                    {
+                        stop = true;
+                    }
+                    ui.colored_label(self.ink.secondary, format!("{active} active"));
+                    if stop {
+                        self.stop_all_work();
+                    }
+                }
                 ui.separator();
                 if self.on_mandala() {
                     let mut mode = self.doc().canvas_mode;
@@ -2873,15 +3115,27 @@ impl Editor {
     /// cannot reach from inside a tab — the program in another tab, and a file
     /// dialog.
     fn music_tab(&mut self, ui: &mut egui::Ui) {
+        self.music_tab_with_controls(ui, true);
+    }
+
+    /// Draw sound in a detached editor. Its original source tab belongs to the
+    /// main editor, so re-read would otherwise resolve a stale numeric tab id.
+    /// Export is a file dialog owned by the main window as well; play, tuning,
+    /// looping, and the score remain available here.
+    fn detached_music_tab(&mut self, ui: &mut egui::Ui) {
+        self.music_tab_with_controls(ui, false);
+    }
+
+    fn music_tab_with_controls(&mut self, ui: &mut egui::Ui, full: bool) {
         let ink = self.ink;
         let Some(Pane::Music(pane)) = self.tabs.active_mut() else {
             return;
         };
-        let reaction = music::tab(ui, pane, &ink, true);
-        if reaction.reread {
+        let reaction = music::tab(ui, pane, &ink, full);
+        if full && reaction.reread {
             self.reread_music();
         }
-        if reaction.export {
+        if full && reaction.export {
             self.export_music();
         }
     }
@@ -3086,75 +3340,75 @@ impl Editor {
                 .stick_to_right(true)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                let active = self.tabs.active_id();
-                let mut select: Option<TabId> = None;
-                let mut close: Option<TabId> = None;
-                let mut reorder: Option<(TabId, usize)> = None;
-                let mut settings = false;
-                let mut runs = false;
-                let mut actions = false;
-                let mut generation = false;
-                let mut music = false;
-                let mut tear: Option<TabId> = None;
-                let ids: Vec<TabId> = self.tabs.iter().map(|tab| tab.id).collect();
-                for (index, tab) in self.tabs.iter().enumerate() {
-                    let on = Some(tab.id) == active;
-                    // A short press is a click; a held/moved press becomes a
-                    // drag payload and is accepted by the other tab zones.
-                    let dropped = ui
-                        .dnd_drop_zone::<usize, ()>(egui::Frame::none(), |ui| {
-                            let response = ui
-                                .selectable_label(on, &tab.title)
-                                .interact(Sense::click_and_drag());
-                            response.dnd_set_drag_payload(index);
-                            if response.clicked() {
-                                select = Some(tab.id);
+                        let active = self.tabs.active_id();
+                        let mut select: Option<TabId> = None;
+                        let mut close: Option<TabId> = None;
+                        let mut reorder: Option<(TabId, usize)> = None;
+                        let mut settings = false;
+                        let mut runs = false;
+                        let mut actions = false;
+                        let mut generation = false;
+                        let mut music = false;
+                        let mut tear: Option<TabId> = None;
+                        let ids: Vec<TabId> = self.tabs.iter().map(|tab| tab.id).collect();
+                        for (index, tab) in self.tabs.iter().enumerate() {
+                            let on = Some(tab.id) == active;
+                            // A short press is a click; a held/moved press becomes a
+                            // drag payload and is accepted by the other tab zones.
+                            let dropped = ui
+                                .dnd_drop_zone::<usize, ()>(egui::Frame::none(), |ui| {
+                                    let response = ui
+                                        .selectable_label(on, &tab.title)
+                                        .interact(Sense::click_and_drag());
+                                    response.dnd_set_drag_payload(index);
+                                    if response.clicked() {
+                                        select = Some(tab.id);
+                                    }
+                                })
+                                .1;
+                            if let Some(from) = dropped {
+                                if let Some(&from_id) = ids.get(*from) {
+                                    reorder = Some((from_id, index));
+                                }
                             }
-                        })
-                        .1;
-                    if let Some(from) = dropped {
-                        if let Some(&from_id) = ids.get(*from) {
-                            reorder = Some((from_id, index));
+                            // Only the active tab offers its close button, so the bar
+                            // stays quiet and a stray click cannot shut the wrong one.
+                            // The tear-off action is available for every tab kind: the
+                            // detached window carries a private editor state for it.
+                            if on
+                                && can_tear(&tab.content)
+                                && ui
+                                    .small_button("⇱")
+                                    .on_hover_text("open this tab in a window of its own")
+                                    .clicked()
+                            {
+                                tear = Some(tab.id);
+                            }
+                            if on && self.tabs.len() > 1 && ui.small_button("×").clicked() {
+                                close = Some(tab.id);
+                            }
+                            ui.separator();
                         }
-                    }
-                    // Only the active tab offers its close button, so the bar
-                    // stays quiet and a stray click cannot shut the wrong one.
-                    // The same rule for tearing off, and only where the tab is
-                    // one that can stand alone — see [`torn`].
-                    if on && can_tear(&tab.content) && ui
-                        .small_button("⇱")
-                        .on_hover_text(
-                            "open this tab in a window of its own, which repaints on its own                              clock — so a generation steps or a piece plays while you work here",
-                        )
-                        .clicked()
-                    {
-                        tear = Some(tab.id);
-                    }
-                    if on && self.tabs.len() > 1 && ui.small_button("×").clicked() {
-                        close = Some(tab.id);
-                    }
-                    ui.separator();
-                }
-                if ui.small_button("+ mandala").clicked() {
-                    let n = self.tabs.len() + 1;
-                    self.tabs
-                        .open(format!("mandala {n}"), Pane::Mandala(Doc::default()));
-                }
-                if ui.small_button("+ chat").clicked() {
-                    self.tabs.open("chat", Pane::Chat(ChatPane::default()));
-                }
-                if ui.small_button("+ source").clicked() {
-                    self.tabs
-                        .open("source", Pane::Source(SourcePane::default()));
-                }
-                if ui.small_button("+ sigils").clicked() {
-                    self.tabs.open("sigils", Pane::Sigils(SigilPane::default()));
-                }
-                if ui.button("sigils · drawn").clicked() {
-                    self.tabs
-                        .open("sigils · drawn", Pane::Ink(InkPane::default()));
-                }
-                if ui
+                        if ui.small_button("+ mandala").clicked() {
+                            let n = self.tabs.len() + 1;
+                            self.tabs
+                                .open(format!("mandala {n}"), Pane::Mandala(Doc::default()));
+                        }
+                        if ui.small_button("+ chat").clicked() {
+                            self.tabs.open("chat", Pane::Chat(ChatPane::default()));
+                        }
+                        if ui.small_button("+ source").clicked() {
+                            self.tabs
+                                .open("source", Pane::Source(SourcePane::default()));
+                        }
+                        if ui.small_button("+ sigils").clicked() {
+                            self.tabs.open("sigils", Pane::Sigils(SigilPane::default()));
+                        }
+                        if ui.button("sigils · drawn").clicked() {
+                            self.tabs
+                                .open("sigils · drawn", Pane::Ink(InkPane::default()));
+                        }
+                        if ui
                     .small_button("+ generation")
                     .on_hover_text(
                         "run the selected run as a cellular automaton: its geometry is the \
@@ -3164,62 +3418,62 @@ impl Editor {
                 {
                     generation = true;
                 }
-                if ui
-                    .small_button("+ sound")
-                    .on_hover_text(
-                        "hear the program: time is indentation, every word is a Fibonacci \
+                        if ui
+                            .small_button("+ sound")
+                            .on_hover_text(
+                                "hear the program: time is indentation, every word is a Fibonacci \
                          number, and its decomposition is the tone",
-                    )
-                    .clicked()
-                {
-                    music = true;
-                }
-                if ui.small_button("settings").clicked() {
-                    settings = true;
-                }
-                let run_label = if self.runs.active_count() == 0 {
-                    "runs".to_string()
-                } else {
-                    format!("runs {}", self.runs.active_count())
-                };
-                if ui.small_button(run_label).clicked() {
-                    runs = true;
-                }
-                let action_label = if self.actions.active_count() == 0 {
-                    "actions".to_string()
-                } else {
-                    format!("actions {}", self.actions.active_count())
-                };
-                if ui.small_button(action_label).clicked() {
-                    actions = true;
-                }
-                if let Some(id) = select {
-                    self.tabs.select(id);
-                }
-                if let Some((id, to)) = reorder {
-                    self.tabs.reorder(id, to);
-                }
-                if let Some(id) = close {
-                    self.tabs.close(id);
-                }
-                if let Some(id) = tear {
-                    self.tear_off(id);
-                }
-                if generation {
-                    self.open_generation();
-                }
-                if music {
-                    self.open_music();
-                }
-                if settings {
-                    self.open_settings();
-                }
-                if runs {
-                    self.open_runs();
-                }
-                if actions {
-                    self.open_actions();
-                }
+                            )
+                            .clicked()
+                        {
+                            music = true;
+                        }
+                        if ui.small_button("settings").clicked() {
+                            settings = true;
+                        }
+                        let run_label = if self.runs.active_count() == 0 {
+                            "runs".to_string()
+                        } else {
+                            format!("runs {}", self.runs.active_count())
+                        };
+                        if ui.small_button(run_label).clicked() {
+                            runs = true;
+                        }
+                        let action_label = if self.actions.active_count() == 0 {
+                            "actions".to_string()
+                        } else {
+                            format!("actions {}", self.actions.active_count())
+                        };
+                        if ui.small_button(action_label).clicked() {
+                            actions = true;
+                        }
+                        if let Some(id) = select {
+                            self.tabs.select(id);
+                        }
+                        if let Some((id, to)) = reorder {
+                            self.tabs.reorder(id, to);
+                        }
+                        if let Some(id) = close {
+                            self.tabs.close(id);
+                        }
+                        if let Some(id) = tear {
+                            self.tear_off(id);
+                        }
+                        if generation {
+                            self.open_generation();
+                        }
+                        if music {
+                            self.open_music();
+                        }
+                        if settings {
+                            self.open_settings();
+                        }
+                        if runs {
+                            self.open_runs();
+                        }
+                        if actions {
+                            self.open_actions();
+                        }
                     });
                 });
         });
@@ -3234,17 +3488,13 @@ impl Editor {
         let Some(pane) = self.tabs.close(id) else {
             return;
         };
-        let torn = match pane {
-            Pane::Music(pane) => torn::TornPane::Music(pane),
-            Pane::Automata(pane) => torn::TornPane::Generation(Box::new(pane.machine), pane.origin),
-            // `can_tear` gates the button, so this is a pane that grew the
-            // ability between the two — put it back rather than lose it.
-            other => {
-                let title = pane_title(&other);
-                self.tabs.open(title, other);
-                return;
-            }
-        };
+        let torn = torn::TornPane::Editor(Box::new(Self::detached(
+            pane,
+            self.ink,
+            self.cwd.clone(),
+            &self.runs,
+            &self.actions,
+        )));
         self.torn_sequence += 1;
         self.torn.push(torn::Torn::new(torn, self.torn_sequence));
         self.notice =
@@ -3273,16 +3523,11 @@ impl Editor {
                 continue;
             };
             match pane {
-                torn::TornPane::Music(pane) => {
-                    let title = format!("sound · {}", pane.origin);
-                    self.tabs.open(title, Pane::Music(pane));
-                }
-                torn::TornPane::Generation(machine, origin) => {
-                    let pane = AutomataPane::from_machine(*machine, origin.clone());
-                    self.tabs.open(
-                        format!("generation · {origin}"),
-                        Pane::Automata(Box::new(pane)),
-                    );
+                torn::TornPane::Editor(editor) => {
+                    for pane in (*editor).reclaim_detached() {
+                        let title = pane_title(&pane);
+                        self.tabs.open(title, pane);
+                    }
                 }
             }
         }
@@ -3719,6 +3964,7 @@ impl Editor {
     fn chat(&mut self, ui: &mut egui::Ui) {
         let k = self.ink;
         let mut submission: Option<ChatSubmission> = None;
+        let mut stop_chat = false;
         let session_id = match self.tabs.active() {
             Some(Pane::Chat(chat)) => Some(chat.session.id.clone()),
             _ => None,
@@ -3749,6 +3995,14 @@ impl Editor {
             let mut forget = None;
             ui.add_space(8.0);
             ui.colored_label(k.faint, "SESSIONS");
+            if chat_busy
+                && ui
+                    .button(egui::RichText::new("stop model").color(k.danger))
+                    .on_hover_text("cancel this conversation's active model turn")
+                    .clicked()
+            {
+                stop_chat = true;
+            }
             if let Some(notice) = &chat.notice {
                 ui.colored_label(k.faint, notice);
             }
@@ -3830,6 +4084,13 @@ impl Editor {
                 if chat_busy {
                     ui.colored_label(k.secondary, "◇ model working");
                     ui.colored_label(k.faint, "· keep typing, it goes out next");
+                    if ui
+                        .button(egui::RichText::new("stop model").color(k.danger))
+                        .on_hover_text("cancel this conversation's active model turn")
+                        .clicked()
+                    {
+                        stop_chat = true;
+                    }
                 }
                 if ui.small_button("sessions").clicked() {
                     chat.browsing = true;
@@ -3895,9 +4156,12 @@ impl Editor {
                                         format!("… {hidden} older retained output lines hidden"),
                                     );
                                 }
-                                for line in run.output.iter().skip(hidden) {
-                                    paint_stream_line(ui, line, k);
-                                }
+                                paint_stream_sections(
+                                    ui,
+                                    &run.output.as_slice()[hidden..],
+                                    k,
+                                    &format!("chat-run-output-{}", run.id),
+                                );
                             });
                         ui.add_space(7.0);
                     }
@@ -3917,9 +4181,7 @@ impl Editor {
                         if lines.is_empty() {
                             ui.colored_label(k.faint, "…");
                         }
-                        for line in lines {
-                            paint_stream_line(ui, line, k);
-                        }
+                        paint_stream_sections(ui, lines, k, "chat-live-stream");
                     }
                     for waiting in &chat.queued {
                         ui.add_space(5.0);
@@ -3983,6 +4245,24 @@ impl Editor {
         });
         let _ = chat;
         self.chaos = chaos;
+        if stop_chat {
+            if let Some(session) = session_id.as_deref() {
+                let cancelled = self.actions.cancel_session(session, &self.cwd);
+                if let Some(Pane::Chat(chat)) = self.tabs.active_mut() {
+                    let queued = chat.queued.len();
+                    chat.queued.clear();
+                    chat.notice = Some(if cancelled {
+                        if queued == 0 {
+                            "model turn stopped".to_string()
+                        } else {
+                            format!("model turn stopped · {queued} queued message(s) cleared")
+                        }
+                    } else {
+                        "queued chat messages cleared".to_string()
+                    });
+                }
+            }
+        }
         if let Some(ChatSubmission {
             said,
             session,
@@ -5864,9 +6144,12 @@ impl Editor {
                                     format!("… {hidden} older retained lines hidden in this view"),
                                 );
                             }
-                            for line in run.output.iter().skip(hidden) {
-                                paint_stream_line(ui, line, k);
-                            }
+                            paint_stream_sections(
+                                ui,
+                                &run.output.as_slice()[hidden..],
+                                k,
+                                &format!("run-output-{id}"),
+                            );
                         });
                     ui.separator();
                 }
@@ -10148,6 +10431,52 @@ mod tests {
             narrow > wide,
             "header must reflow when narrow: narrow={narrow} wide={wide}"
         );
+    }
+
+    #[test]
+    fn every_tab_kind_has_a_detached_window_action() {
+        let panes = vec![
+            Pane::Mandala(Doc::default()),
+            Pane::Chat(ChatPane::default()),
+            Pane::Ink(InkPane::default()),
+            Pane::Sigils(SigilPane::default()),
+            Pane::Source(SourcePane::default()),
+            Pane::Settings(settings::SettingsPane::default()),
+            Pane::Automata(Box::new(
+                AutomataPane::from_source("([m] \"one\" \"two\")", "test")
+                    .expect("test source should build a generation"),
+            )),
+            Pane::Music(Box::new(music::MusicPane {
+                desk: kaos_core::music::Desk::default(),
+                origin: "test".to_string(),
+                from: None,
+                reading: None,
+                looping: false,
+            })),
+            Pane::Runs,
+            Pane::Actions,
+        ];
+        assert!(panes.iter().all(can_tear));
+    }
+
+    #[test]
+    fn model_work_stream_becomes_collapsible_sections() {
+        let lines = vec![
+            "\u{1e}FOLD_OPEN\u{1f}model turn 1 · working".to_string(),
+            "model    reading the task".to_string(),
+            "\u{1e}FOLD_OPEN\u{1f}step 1 in full · read file".to_string(),
+            "  contents".to_string(),
+            "\u{1e}FOLD_CLOSE".to_string(),
+            "\u{1e}FOLD_CLOSE".to_string(),
+            "chat    final answer".to_string(),
+            "done".to_string(),
+        ];
+        let sections = stream_sections(&lines);
+        assert!(matches!(sections[0], StreamSection::Fold { .. }));
+        assert!(
+            matches!(sections[1], StreamSection::Line(ref line) if line == "chat    final answer")
+        );
+        assert!(matches!(sections[2], StreamSection::Line(ref line) if line == "done"));
     }
 
     #[test]

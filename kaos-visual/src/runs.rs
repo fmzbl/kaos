@@ -197,6 +197,39 @@ impl Drop for Desk {
 }
 
 impl Desk {
+    /// Copy the visible run state for a detached viewport.
+    ///
+    /// Child processes stay owned by the main editor; duplicating a `Job` would
+    /// either be impossible or give two frontends authority over one process.
+    /// The detached Runs tab still opens with the retained history and controls
+    /// as they stood when it was pulled out, while new work launched there gets
+    /// its own local desk.
+    pub(crate) fn snapshot(&self) -> Self {
+        let mut runs = self.runs.clone();
+        for run in &mut runs {
+            // These sidecars belong to the live child in the main desk. A
+            // snapshot must not remove them when its temporary desk drops.
+            run.temp_source = None;
+            run.inlet_path = None;
+            run.nest_path = None;
+        }
+        Self {
+            runs,
+            jobs: Vec::new(),
+            next_id: self.next_id,
+            selected: self.selected,
+            input: self.input.clone(),
+            draft_source: self.draft_source.clone(),
+            scope: self.scope,
+            mode: self.mode,
+            lane: self.lane,
+            authority: self.authority,
+            authority_remembered: self.authority_remembered,
+            notice: self.notice.clone(),
+            output_path: self.output_path.clone(),
+        }
+    }
+
     pub(crate) fn submit(
         &mut self,
         source: String,

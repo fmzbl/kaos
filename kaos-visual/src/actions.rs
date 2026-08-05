@@ -224,6 +224,32 @@ impl Drop for Desk {
 }
 
 impl Desk {
+    /// Copy the visible task state for a detached viewport.
+    ///
+    /// Process jobs remain owned by the main editor. The detached Actions tab
+    /// therefore starts with the retained task history and can launch its own
+    /// work without creating a second owner for an existing child.
+    pub(crate) fn snapshot(&self) -> Self {
+        Self {
+            tasks: self.tasks.clone(),
+            jobs: Vec::new(),
+            next_id: self.next_id,
+            selected: self.selected,
+            kind: self.kind,
+            intent: self.intent.clone(),
+            path: self.path.clone(),
+            quorum: self.quorum,
+            gate: self.gate.clone(),
+            lane: self.lane,
+            tools: self.tools,
+            notice: self.notice.clone(),
+            attachments: self.attachments.clone(),
+            attachment_path: self.attachment_path.clone(),
+            provider: self.provider.clone(),
+            secret: self.secret.clone(),
+        }
+    }
+
     pub(crate) fn submit_current(&mut self, cwd: &Path) -> Option<u64> {
         let kind = self.kind;
         if kind.needs_intent() && self.intent.trim().is_empty() {
@@ -255,6 +281,7 @@ impl Desk {
         let env = vec![
             ("KAOS_RAW_CHAT_TASK_STDIN".to_string(), "1".to_string()),
             ("KAOS_CHAT_OUTPUT".to_string(), "1".to_string()),
+            ("KAOS_CHAT_TRACE".to_string(), "1".to_string()),
             ("KAOS_REBIS_CONTEXT".to_string(), "1".to_string()),
             ("KAOS_SESSION".to_string(), session.clone()),
             (
@@ -361,6 +388,7 @@ impl Desk {
             kaos_core::config::value("KAOS_MODEL").unwrap_or_else(|| "sim".to_string()),
         ));
         env.push(("KAOS_CLAUDE_YOLO".to_string(), self.tools.env().to_string()));
+        env.push(("KAOS_FOLD".to_string(), "1".to_string()));
         let state = if needs_permission {
             State::AwaitingPermission
         } else {
@@ -686,6 +714,36 @@ impl Desk {
         self.start_ready(cwd);
     }
 
+    /// Stop the active chat turn for one session without disturbing unrelated
+    /// actions or conversations.
+    pub(crate) fn cancel_session(&mut self, session: &str, cwd: &Path) -> bool {
+        let Some(id) = self
+            .tasks
+            .iter()
+            .find(|task| task.session.as_deref() == Some(session) && !task.state.terminal())
+            .map(|task| task.id)
+        else {
+            return false;
+        };
+        self.selected = Some(id);
+        self.cancel_selected(cwd);
+        true
+    }
+
+    /// Stop every active model/tool action owned by this desk.
+    pub(crate) fn cancel_all(&mut self, cwd: &Path) {
+        let active = self
+            .tasks
+            .iter()
+            .filter(|task| !task.state.terminal())
+            .map(|task| task.id)
+            .collect::<Vec<_>>();
+        for id in active {
+            self.selected = Some(id);
+            self.cancel_selected(cwd);
+        }
+    }
+
     pub(crate) fn remove_selected(&mut self) {
         let Some(id) = self.selected else {
             return;
@@ -758,6 +816,12 @@ impl Desk {
                 continue;
             }
             task.delivered = true;
+            if task.state != State::Complete {
+                task.output.clear();
+                task.output
+                    .push("reply       not delivered · chat turn was stopped".to_string());
+                continue;
+            }
             let text = task
                 .output
                 .iter()
@@ -765,7 +829,7 @@ impl Desk {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n");
-            let text = kaos_core::chat::clean_chat_reply(&text);
+            let text = kaos_core::chat::extract_chat_reply(&text);
             task.output.clear();
             task.output
                 .push("reply       delivered to durable session".to_string());

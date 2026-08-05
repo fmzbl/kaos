@@ -23,6 +23,7 @@ pub mod chat;
 pub mod config;
 pub mod cost;
 pub mod dream;
+pub mod fold;
 pub mod ink;
 pub mod music;
 pub mod nest;

@@ -963,6 +963,10 @@ pub struct App {
     run_chat_sessions: BTreeMap<u64, String>,
     run_chat_history: BTreeMap<u64, Vec<RunChatTurn>>,
     run_chat_replies: BTreeMap<u64, String>,
+    /// Open fold entry and nesting depth for each parallel run conversation.
+    /// Run chats can stream beside one another, so the ordinary primary-fold
+    /// pointer cannot safely own their sections.
+    run_chat_folds: BTreeMap<u64, (usize, usize)>,
     /// Run ids whose retained snapshot has already been placed in the visible
     /// terminal chat transcript for this app session.
     run_chat_context_shown: std::collections::BTreeSet<u64>,
@@ -1109,6 +1113,7 @@ impl App {
             run_chat_sessions: BTreeMap::new(),
             run_chat_history: BTreeMap::new(),
             run_chat_replies: BTreeMap::new(),
+            run_chat_folds: BTreeMap::new(),
             run_chat_context_shown: std::collections::BTreeSet::new(),
             job_start: None,
             activity: String::new(),
@@ -1495,6 +1500,7 @@ impl App {
             self.run_chat_sessions.remove(&run.id);
             self.run_chat_history.remove(&run.id);
             self.run_chat_replies.remove(&run.id);
+            self.run_chat_folds.remove(&run.id);
             self.run_chat_context_shown.remove(&run.id);
         }
         self.clamp_rebis_run_choice();
@@ -1502,6 +1508,7 @@ impl App {
 
     fn has_active_jobs(&self) -> bool {
         self.job.is_some()
+            || self.sigil_chat_job.is_some()
             || !self.parallel_jobs.is_empty()
             || self.rebis_runs.iter().any(|run| {
                 !run.parallel
@@ -2379,10 +2386,15 @@ impl App {
         if let Some(poll) = sigil_chat_poll {
             for line in poll.lines {
                 let rendered = match crate::fold::classify(&line) {
-                    crate::fold::Marker::Open(summary) => {
-                        Some(format!("god     ▶ {}", strip_ansi(summary)))
-                    }
-                    crate::fold::Marker::Close => None,
+                    // Preserve the fold wire format in the source-bound chat
+                    // history. The renderer turns these into a collapsible
+                    // God-channel outline; flattening them here would make
+                    // Tab/Ctrl-E appear to work while leaving no fold to act on.
+                    crate::fold::Marker::Open(summary) => Some(format!(
+                        "\u{1e}FOLD_OPEN\u{1f}god     ▶ {}",
+                        strip_ansi(summary)
+                    )),
+                    crate::fold::Marker::Close => Some("\u{1e}FOLD_CLOSE".to_string()),
                     crate::fold::Marker::Line(content) => {
                         let content = strip_ansi(content);
                         (!content.trim().is_empty()).then(|| format!("god     {content}"))
@@ -2795,11 +2807,15 @@ impl App {
 
     fn record_run_chat_line(&mut self, id: u64, line: &str) {
         let text = match crate::fold::classify(line) {
-            crate::fold::Marker::Open(summary) => format!("▶ {}", strip_ansi(summary)),
-            crate::fold::Marker::Close => return,
+            // Keep the wire markers in the private reply buffer. The final
+            // answer extractor removes them, while the live transcript uses
+            // them to build a collapsible run-chat outline.
+            crate::fold::Marker::Open(_) | crate::fold::Marker::Close => line.to_string(),
             crate::fold::Marker::Line(content) => strip_ansi(content),
         };
-        if text.trim().is_empty() {
+        if matches!(crate::fold::classify(line), crate::fold::Marker::Line(_))
+            && text.trim().is_empty()
+        {
             return;
         }
         let reply = self.run_chat_replies.entry(id).or_default();
@@ -2819,33 +2835,83 @@ impl App {
     }
 
     fn push_run_chat_stream_line(&mut self, id: u64, line: &str) {
-        let text = match crate::fold::classify(line) {
-            crate::fold::Marker::Open(summary) => format!("▶ {}", strip_ansi(summary)),
-            crate::fold::Marker::Close => return,
-            crate::fold::Marker::Line(content) => strip_ansi(content),
-        };
-        if text.trim().is_empty() {
-            return;
-        }
-        self.push_line(Line::from(vec![
+        let prefix = || {
             Span::styled(
                 format!("chat #{id}  "),
                 Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(text, Style::new().fg(C_ASH())),
-        ]));
+            )
+        };
+        match crate::fold::classify(line) {
+            crate::fold::Marker::Open(summary) => {
+                if let Some((index, depth)) = self.run_chat_folds.get_mut(&id) {
+                    *depth += 1;
+                    if let Some(Entry::Fold(fold)) = self.transcript.get_mut(*index) {
+                        fold.body.push(Line::from(vec![
+                            Span::raw("  "),
+                            prefix(),
+                            Span::styled(
+                                format!("▶ {}", strip_ansi(summary)),
+                                Style::new().fg(C_ASH()),
+                            ),
+                        ]));
+                    }
+                } else {
+                    let summary =
+                        ansi_first_line(&format!("chat #{id}  ▶ {}", strip_ansi(summary)));
+                    self.transcript.push(Entry::Fold(Fold {
+                        summary,
+                        body: Vec::new(),
+                        collapsed: true,
+                    }));
+                    self.run_chat_folds
+                        .insert(id, (self.transcript.len() - 1, 1));
+                }
+            }
+            crate::fold::Marker::Close => {
+                let Some((_, depth)) = self.run_chat_folds.get_mut(&id) else {
+                    return;
+                };
+                *depth = depth.saturating_sub(1);
+                if *depth == 0 {
+                    self.run_chat_folds.remove(&id);
+                }
+            }
+            crate::fold::Marker::Line(content) => {
+                let text = strip_ansi(content);
+                if text.trim().is_empty() {
+                    return;
+                }
+                let rendered =
+                    Line::from(vec![prefix(), Span::styled(text, Style::new().fg(C_ASH()))]);
+                if let Some((index, _)) = self.run_chat_folds.get(&id).copied() {
+                    if let Some(Entry::Fold(fold)) = self.transcript.get_mut(index) {
+                        fold.body.push(rendered);
+                        return;
+                    }
+                    self.run_chat_folds.remove(&id);
+                }
+                // Keep a parallel run chat visible at top level when it has no
+                // active section; do not accidentally nest it in the primary
+                // serial job's fold.
+                self.transcript.push(Entry::Line(rendered));
+            }
+        }
     }
 
     fn finish_run_chat(&mut self, id: u64, code: i32) {
-        let answer = kaos_core::chat::clean_chat_reply(
-            &self.run_chat_replies.remove(&id).unwrap_or_default(),
-        );
+        self.run_chat_folds.remove(&id);
+        let stream = self.run_chat_replies.remove(&id).unwrap_or_default();
+        let answer = if code == 0 {
+            kaos_core::chat::extract_chat_reply(&stream)
+        } else {
+            String::new()
+        };
         if let Some(turn) = self
             .run_chat_history
             .get_mut(&id)
             .and_then(|turns| turns.last_mut())
         {
-            turn.answer = if answer.trim().is_empty() && code != 0 {
+            turn.answer = if code != 0 {
                 format!("chat subprocess exited with status {code}")
             } else {
                 answer
@@ -3474,6 +3540,8 @@ impl App {
                     workspace.message =
                         "source focus · /sigil chat returns to the channel".to_string();
                 }
+                KeyCode::Tab | KeyCode::BackTab => workspace.toggle_sigil_chat_fold(false),
+                KeyCode::Char('e') if ctrl => workspace.toggle_sigil_chat_fold(true),
                 KeyCode::Enter => {
                     if let Some(message) = workspace.take_sigil_chat_message() {
                         action = WorkspaceAction::SigilChat(message);
@@ -4337,7 +4405,7 @@ impl App {
         let source_label =
             workspace.map_or_else(|| "[unavailable]".to_string(), RebisWorkspace::path_label);
         let channel_history = workspace.map_or_else(String::new, |workspace| {
-            workspace.sigil_chat_lines().join("\n")
+            plain_sigil_chat_history(workspace.sigil_chat_lines())
         });
         let run_context = self.sigil_chat_run_context(turn.run_id);
         let context = format!(
@@ -4601,7 +4669,7 @@ impl App {
         let base_source = workspace.editor.source().to_string();
         let source_label = workspace.path_label();
         let run_id = workspace.sigil_chat_run_id();
-        let channel_history = workspace.sigil_chat_lines().join("\n");
+        let channel_history = plain_sigil_chat_history(workspace.sigil_chat_lines());
         let resume_after = run_id.is_some_and(|id| self.pause_run_for_sigil_chat(id));
 
         let bridge_dir = std::env::temp_dir().join(format!("kaos-sigil-chat-{}", self.session_id));
@@ -4804,7 +4872,7 @@ impl App {
 
     /// Fold whatever the running job streamed into one model turn.
     fn flush_reply(&mut self) {
-        let reply = kaos_core::chat::clean_chat_reply(&std::mem::take(&mut self.session_reply));
+        let reply = kaos_core::chat::extract_chat_reply(&std::mem::take(&mut self.session_reply));
         if reply.trim().is_empty() {
             return;
         }
@@ -4855,12 +4923,12 @@ impl App {
         ));
     }
 
-    /// Record a line of model output for the session (plain text; the styling
-    /// is presentation and is not persisted).
+    /// Record a line of model output for the session. The live transcript keeps
+    /// the raw fold markers; [`flush_reply`] removes visible work sections and
+    /// persists only the final answer.
     fn record_reply_line(&mut self, text: &str) {
-        let text = kaos_core::chat::clean_chat_reply(text);
         if !text.is_empty() && self.session_reply.len() < 200_000 {
-            self.session_reply.push_str(&text);
+            self.session_reply.push_str(text);
             self.session_reply.push('\n');
         }
     }
@@ -5631,6 +5699,9 @@ impl App {
             // Tell the child to emit fold markers so its detailed trace renders as
             // collapsible groups here instead of a flat wall of output.
             .env("KAOS_FOLD", "1")
+            // Chat history keeps only the final answer, while the live transcript
+            // receives the model/tool work as collapsible sections.
+            .env("KAOS_CHAT_TRACE", "1")
             .stdin(if transport.stdin.is_some() {
                 Stdio::piped()
             } else {
@@ -5883,6 +5954,10 @@ impl App {
             drop(child);
             self.job_start = None;
             self.activity.clear();
+            // A stopped chat may have streamed model work but never reached its
+            // final-answer delimiter. Do not turn that partial trace into a
+            // durable assistant message on the next save.
+            self.session_reply.clear();
             // A cancel can land mid-stream with a fold still open; close it (as the
             // Done path does) or every later line vanishes into the dead fold's body.
             self.open_fold = None;
@@ -6538,6 +6613,152 @@ fn rebis_run_browser_layout(
     Some((panel, start, visible))
 }
 
+enum SigilChatItem {
+    Line(String),
+    Fold {
+        line: usize,
+        title: String,
+        body: Vec<SigilChatItem>,
+    },
+}
+
+fn sigil_chat_items(lines: &[String]) -> Vec<SigilChatItem> {
+    let mut roots = Vec::new();
+    let mut stack: Vec<(usize, String, Vec<SigilChatItem>)> = Vec::new();
+    for (line, raw) in lines.iter().enumerate() {
+        match crate::fold::classify(raw) {
+            crate::fold::Marker::Open(title) => {
+                stack.push((line, strip_ansi(title), Vec::new()));
+            }
+            crate::fold::Marker::Close => {
+                let Some((line, title, body)) = stack.pop() else {
+                    continue;
+                };
+                let item = SigilChatItem::Fold { line, title, body };
+                if let Some((_, _, parent)) = stack.last_mut() {
+                    parent.push(item);
+                } else {
+                    roots.push(item);
+                }
+            }
+            crate::fold::Marker::Line(text) => {
+                let text = strip_ansi(text);
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if let Some((_, _, body)) = stack.last_mut() {
+                    body.push(SigilChatItem::Line(text));
+                } else {
+                    roots.push(SigilChatItem::Line(text));
+                }
+            }
+        }
+    }
+    while let Some((line, title, body)) = stack.pop() {
+        let item = SigilChatItem::Fold { line, title, body };
+        if let Some((_, _, parent)) = stack.last_mut() {
+            parent.push(item);
+        } else {
+            roots.push(item);
+        }
+    }
+    roots
+}
+
+fn sigil_chat_line(line: &str) -> Line<'static> {
+    let style = if line.starts_with("you     ") {
+        Style::new().fg(C_ACCENT()).add_modifier(Modifier::BOLD)
+    } else if line.starts_with("system  ") || line == "GOD CHANNEL" {
+        Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(C_BONE())
+    };
+    Line::from(Span::styled(line.to_string(), style))
+}
+
+fn sigil_chat_body_rows(items: &[SigilChatItem], workspace: &RebisWorkspace) -> usize {
+    items
+        .iter()
+        .map(|item| match item {
+            SigilChatItem::Line(_) => 1,
+            SigilChatItem::Fold { line, body, .. } => {
+                1 + if workspace.sigil_chat_fold_expanded(*line) {
+                    sigil_chat_body_rows(body, workspace)
+                } else {
+                    0
+                }
+            }
+        })
+        .sum()
+}
+
+fn render_sigil_chat_items(
+    items: &[SigilChatItem],
+    workspace: &RebisWorkspace,
+    output: &mut Vec<Line<'static>>,
+    indent: usize,
+) {
+    for item in items {
+        match item {
+            SigilChatItem::Line(line) => {
+                let mut rendered = vec![Span::raw("  ".repeat(indent))];
+                rendered.extend(sigil_chat_line(line).spans);
+                output.push(Line::from(rendered));
+            }
+            SigilChatItem::Fold { line, title, body } => {
+                let expanded = workspace.sigil_chat_fold_expanded(*line);
+                let caret = if expanded { "▾" } else { "▸" };
+                let count = sigil_chat_body_rows(body, workspace);
+                output.push(Line::from(vec![
+                    Span::raw("  ".repeat(indent)),
+                    Span::styled(
+                        format!("{caret} "),
+                        Style::new().fg(C_OX()).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        title.clone(),
+                        Style::new().fg(C_OX()).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(
+                            "   ({} line{} · Tab toggles)",
+                            count,
+                            if count == 1 { "" } else { "s" }
+                        ),
+                        Style::new().fg(C_ASH()),
+                    ),
+                ]));
+                if expanded {
+                    render_sigil_chat_items(body, workspace, output, indent + 1);
+                }
+            }
+        }
+    }
+}
+
+fn rendered_sigil_chat_lines(workspace: &RebisWorkspace) -> Vec<Line<'static>> {
+    let items = sigil_chat_items(workspace.sigil_chat_lines());
+    let mut output = Vec::new();
+    render_sigil_chat_items(&items, workspace, &mut output, 0);
+    output
+}
+
+/// Remove UI-only fold framing before the source-bound God agent receives the
+/// conversation again. The live panel keeps the markers so it can collapse the
+/// work, but model context should contain readable channel text rather than
+/// control characters from the renderer protocol.
+fn plain_sigil_chat_history(lines: &[String]) -> String {
+    lines
+        .iter()
+        .filter_map(|line| match crate::fold::classify(line) {
+            crate::fold::Marker::Open(title) => Some(strip_ansi(title).to_string()),
+            crate::fold::Marker::Close => None,
+            crate::fold::Marker::Line(line) => Some(strip_ansi(line)),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Draw the dedicated Rebis source/graph workspace. Both panes are views over a
 /// single parsed `rebis_lang::Expr`; the right pane never reparses text.
 fn draw_rebis_workspace(
@@ -6665,19 +6886,8 @@ fn draw_rebis_workspace(
             let chat_areas =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(graph_inner);
             let history_width = chat_areas[0].width.saturating_sub(1) as usize;
-            let history = workspace
-                .sigil_chat_lines()
-                .iter()
-                .map(|line| {
-                    let style = if line.starts_with("you     ") {
-                        Style::new().fg(C_ACCENT()).add_modifier(Modifier::BOLD)
-                    } else if line.starts_with("system  ") || line == "GOD CHANNEL" {
-                        Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::new().fg(C_BONE())
-                    };
-                    Line::from(Span::styled(line.clone(), style))
-                })
+            let history = rendered_sigil_chat_lines(workspace)
+                .into_iter()
                 .flat_map(|line| wrap_line(&line, history_width.max(1)))
                 .collect::<Vec<_>>();
             let visible = chat_areas[0].height as usize;

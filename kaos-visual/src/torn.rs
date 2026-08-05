@@ -1,9 +1,9 @@
 //! Tabs pulled out of the window into windows of their own.
 //!
 //! A tab is a view of something, and some of those things are worth watching
-//! *while* you work on the drawing that produced them — a generation stepping,
-//! a piece playing. Inside one window they are exclusive: looking at the
-//! automaton means not looking at the mandala. Torn off, they are not.
+//! *while* you work on the drawing that produced them. Inside one window they
+//! are exclusive: looking at the source means not looking at the mandala.
+//! Torn off, they are not.
 //!
 //! **They run on their own clock.** egui offers two kinds of extra window, and
 //! the difference decides the feature. An *immediate* viewport is drawn inside
@@ -15,14 +15,9 @@
 //!
 //! The cost of that independence is the whole shape of this module. A deferred
 //! viewport's paint callback must be `Send + Sync + 'static`: it cannot borrow
-//! the editor, because it does not run inside the editor's frame. So a torn
-//! pane's state moves behind an [`Arc<Mutex<…>>`] and the window draws from
-//! that alone — which in turn is why only panes that already draw as free
-//! functions of their own state can be torn off. That is not a limitation
-//! being worked around; it is the same condition stated twice. A pane that
-//! needs the editor to draw itself is a pane that is not independent, and
-//! putting it in a window of its own would only make the coupling harder to
-//! see.
+//! the main editor, because it does not run inside the main editor's frame. So
+//! a torn pane owns a detached editor behind an [`Arc<Mutex<…>>`], and that
+//! editor draws the pane from its own state.
 //!
 //! Minimal chrome by design: the torn window carries what that view needs and
 //! nothing else. No tab bar, no palette, no side panel — those belong to the
@@ -32,29 +27,20 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-use crate::automata;
-use crate::music::MusicPane;
 use crate::theme::Ink;
 
-/// A pane that can live in a window of its own.
-///
-/// One variant per tab kind that draws from its own state. Adding a kind is
-/// adding a variant and an arm in [`Torn::show`] — and finding that a kind
-/// cannot be added is finding that it was never self-contained.
+/// A detached editor owns the moved pane and all state needed by its renderer.
+/// Keeping one variant here means adding a tab kind does not require another
+/// special-case window implementation.
 pub(crate) enum TornPane {
-    /// A program as sound: score, samples, and the player, all in the desk.
-    Music(Box<MusicPane>),
-    /// A run as the automaton it computes. It carries its own lattice and
-    /// steps on wall-clock time, so it animates in its own window.
-    Generation(Box<automata::Automaton>, String),
+    Editor(Box<crate::Editor>),
 }
 
 impl TornPane {
     /// The window title — what the tab was called.
     pub(crate) fn title(&self) -> String {
         match self {
-            TornPane::Music(pane) => format!("sound · {}", pane.origin),
-            TornPane::Generation(_, origin) => format!("generation · {origin}"),
+            TornPane::Editor(editor) => editor.detached_title(),
         }
     }
 }
@@ -128,27 +114,7 @@ impl Torn {
                         Err(poisoned) => poisoned.into_inner(),
                     };
                     match &mut *pane {
-                        TornPane::Music(pane) => {
-                            // The reactions a torn window cannot honour are the
-                            // ones that need the editor — re-reading from
-                            // another tab, and the file dialog. The controls for
-                            // them are absent rather than dead: see
-                            // `music::tab`'s `full` flag.
-                            crate::music::tab(ui, pane, &ink, false);
-                        }
-                        TornPane::Generation(machine, origin) => {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(ink.mid, "GENERATION ·");
-                                ui.colored_label(ink.ink, origin.as_str());
-                                ui.separator();
-                                if ui.button("step").clicked() {
-                                    machine.step();
-                                }
-                                ui.colored_label(ink.faint, machine.generation.to_string());
-                            });
-                            ui.add_space(6.0);
-                            crate::draw_generation(ui, machine, ink);
-                        }
+                        TornPane::Editor(editor) => editor.show_detached(ui, ink),
                     }
                 });
             },
