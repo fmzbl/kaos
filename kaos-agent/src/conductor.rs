@@ -303,24 +303,69 @@ pub fn parse_actions(text: &str, limit: usize) -> Vec<Tool> {
 pub fn parse_action(text: &str) -> Option<Tool> {
     let start = text.find("<act")?;
     let open_end = text[start..].find('>')? + start;
-    let header = &text[start..open_end];
-    let tool = attr(header, "tool")?;
+    let header = &text[start..=open_end];
     let block_end = text[open_end..]
         .find("</act>")
         .map(|i| i + open_end)
         .unwrap_or(text.len());
-    let body = &text[open_end + 1..block_end];
-    let args = parse_args(body);
-    let get = |keys: &[&str]| -> String {
-        for k in keys {
-            if let Some(v) = args.get(*k) {
-                return v.clone();
+    let outer_body = &text[open_end + 1..block_end];
+    let mut args = tag_attrs(header);
+    let yaml_tool = parse_yaml_tool(outer_body);
+    let (tool, body) = if let Some(tool) = args.remove("tool").or_else(|| args.remove("name")) {
+        (tool, outer_body)
+    } else if let Some(tool) = yaml_tool.clone() {
+        // Some local models render the action as a small YAML record inside
+        // the act block rather than as XML attributes.
+        (tool, outer_body)
+    } else {
+        // Small local models often emit the same action as a compact XML
+        // element: `<act><read_file path="README.md" /></act>`. Accept that
+        // equivalent spelling as well as Kaos's verbose `<arg>` dialect.
+        let child_start = outer_body.find('<')?;
+        let child_end = outer_body[child_start..].find('>')? + child_start;
+        let child_header = &outer_body[child_start..=child_end];
+        let tool = tag_name(child_header)?;
+        if tool == "arg" || tool == "act" {
+            return None;
+        }
+        args.extend(tag_attrs(child_header));
+        let child_body = if is_self_closing(child_header) {
+            ""
+        } else {
+            let close = format!("</{tool}>");
+            let child_content_start = child_end + 1;
+            let child_close = outer_body[child_content_start..]
+                .find(&close)
+                .map(|i| child_content_start + i)?;
+            &outer_body[child_content_start..child_close]
+        };
+        (tool, child_body)
+    };
+    for (name, value) in parse_args(body) {
+        args.insert(name, value);
+    }
+    for (name, value) in parse_named_elements(body) {
+        args.entry(name).or_insert(value);
+    }
+    for (name, value) in parse_json_object(body) {
+        args.entry(name).or_insert(value);
+    }
+    if yaml_tool.is_some() {
+        for (name, value) in parse_yaml_fields(body) {
+            if !matches!(name.as_str(), "name" | "tool" | "arguments") {
+                args.entry(name).or_insert(value);
             }
         }
-        String::new()
+    }
+    let inline = inline_text(body);
+    let get = |keys: &[&str]| -> String {
+        keys.iter()
+            .find_map(|key| args.get(*key).filter(|value| !value.is_empty()))
+            .cloned()
+            .unwrap_or_else(|| inline.clone())
     };
     match tool.as_str() {
-        "read_file" | "read" => Some(Tool::ReadFile {
+        "read_file" | "read" | "open_file" => Some(Tool::ReadFile {
             path: get(&["path", "file"]),
         }),
         "write_file" | "write" => Some(Tool::WriteFile {
@@ -356,11 +401,270 @@ pub fn parse_action(text: &str) -> Option<Tool> {
     }
 }
 
-fn attr(header: &str, name: &str) -> Option<String> {
-    let pat = format!("{name}=\"");
-    let a = header.find(&pat)? + pat.len();
-    let b = header[a..].find('"')? + a;
-    Some(header[a..b].to_string())
+fn tag_name(header: &str) -> Option<String> {
+    let inner = header.strip_prefix('<')?;
+    let inner = inner.strip_suffix('>')?.trim();
+    let name = inner
+        .split(|character: char| character.is_whitespace() || character == '/')
+        .next()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn is_self_closing(header: &str) -> bool {
+    header
+        .strip_suffix('>')
+        .is_some_and(|value| value.trim_end().ends_with('/'))
+}
+
+fn tag_attrs(header: &str) -> BTreeMap<String, String> {
+    let mut attrs = BTreeMap::new();
+    let Some(name) = tag_name(header) else {
+        return attrs;
+    };
+    let Some(mut rest) = header
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+    else {
+        return attrs;
+    };
+    rest = rest.trim_start().strip_prefix(&name).unwrap_or_default();
+    while !rest.trim().is_empty() {
+        rest = rest.trim_start();
+        if rest.starts_with('/') {
+            break;
+        }
+        let key_end = rest
+            .find(|character: char| character.is_whitespace() || character == '=')
+            .unwrap_or(rest.len());
+        if key_end == 0 {
+            break;
+        }
+        let key = &rest[..key_end];
+        rest = rest[key_end..].trim_start();
+        if !rest.starts_with('=') {
+            break;
+        }
+        rest = rest[1..].trim_start();
+        let Some(quote) = rest.chars().next() else {
+            break;
+        };
+        if quote != '"' && quote != '\'' {
+            break;
+        }
+        rest = &rest[quote.len_utf8()..];
+        let Some(value_end) = rest.find(quote) else {
+            break;
+        };
+        attrs.insert(key.to_string(), decode_xml(&rest[..value_end]));
+        rest = &rest[value_end + quote.len_utf8()..];
+    }
+    attrs
+}
+
+fn decode_xml(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn parse_yaml_tool(body: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        let (key, value) = line.trim().split_once(':')?;
+        if !matches!(key.trim(), "name" | "tool") {
+            return None;
+        }
+        let value = clean_scalar(value);
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+fn parse_yaml_fields(body: &str) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    for line in body.lines() {
+        let Some((key, value)) = line.trim().split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty()
+            || !key.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '_' || character == '-'
+            })
+        {
+            continue;
+        }
+        let value = clean_scalar(value);
+        if !value.is_empty() {
+            fields.insert(key.to_string(), value);
+        }
+    }
+    fields
+}
+
+fn clean_scalar(value: &str) -> String {
+    let value = value.trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(value);
+    decode_xml(value)
+}
+
+/// Parse the flat JSON objects emitted by some local models inside an act
+/// block, for example `{"path":"README.md","limit":1}`. Values are kept
+/// as strings because the executor's tool arguments are textual.
+fn parse_json_object(body: &str) -> BTreeMap<String, String> {
+    let text = body.trim();
+    let mut fields = BTreeMap::new();
+    if !text.starts_with('{') || !text.ends_with('}') {
+        return fields;
+    }
+    let mut index = 1;
+    while index < text.len() - 1 {
+        while index < text.len() - 1 && text.as_bytes()[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= text.len() - 1 || text.as_bytes()[index] == b'}' {
+            break;
+        }
+        if text.as_bytes()[index] == b',' {
+            index += 1;
+            continue;
+        }
+        let Some((key, next)) = parse_json_string(text, index) else {
+            break;
+        };
+        index = next;
+        while index < text.len() - 1 && text.as_bytes()[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= text.len() - 1 || text.as_bytes()[index] != b':' {
+            break;
+        }
+        index += 1;
+        while index < text.len() - 1 && text.as_bytes()[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= text.len() - 1 {
+            break;
+        }
+        if text.as_bytes()[index] == b'"' {
+            let Some((value, next)) = parse_json_string(text, index) else {
+                break;
+            };
+            fields.insert(key, value);
+            index = next;
+        } else {
+            let value_start = index;
+            while index < text.len() - 1 && !matches!(text.as_bytes()[index], b',' | b'}') {
+                index += 1;
+            }
+            let value = text[value_start..index].trim();
+            if !value.is_empty() {
+                fields.insert(key, clean_scalar(value));
+            }
+        }
+    }
+    fields
+}
+
+fn parse_json_string(text: &str, start: usize) -> Option<(String, usize)> {
+    if text.as_bytes().get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut value = String::new();
+    let mut index = start + 1;
+    while index < text.len() {
+        let character = text[index..].chars().next()?;
+        if character == '"' {
+            return Some((value, index + character.len_utf8()));
+        }
+        if character != '\\' {
+            value.push(character);
+            index += character.len_utf8();
+            continue;
+        }
+        index += 1;
+        let escaped = text[index..].chars().next()?;
+        match escaped {
+            '"' => value.push('"'),
+            '\\' => value.push('\\'),
+            '/' => value.push('/'),
+            'b' => value.push('\u{0008}'),
+            'f' => value.push('\u{000c}'),
+            'n' => value.push('\n'),
+            'r' => value.push('\r'),
+            't' => value.push('\t'),
+            'u' => {
+                let hex_start = index + 1;
+                let hex_end = hex_start + 4;
+                let hex = text.get(hex_start..hex_end)?;
+                let code = u16::from_str_radix(hex, 16).ok()?;
+                value.push(char::from_u32(code as u32)?);
+                index = hex_end;
+                continue;
+            }
+            _ => value.push(escaped),
+        }
+        index += escaped.len_utf8();
+    }
+    None
+}
+
+fn inline_text(body: &str) -> String {
+    let body = body.trim();
+    if body.contains('<') {
+        String::new()
+    } else {
+        decode_xml(body)
+    }
+}
+
+/// Read simple named child elements such as `<message>done</message>` and
+/// `<parameter name="message">done</parameter>` in addition to the canonical
+/// `<arg name="message">done</arg>` spelling.
+fn parse_named_elements(body: &str) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    let mut rest = body;
+    while let Some(start) = rest.find('<') {
+        let candidate = &rest[start..];
+        let Some(open_end) = candidate.find('>') else {
+            break;
+        };
+        let header = &candidate[..=open_end];
+        let Some(name) = tag_name(header) else {
+            break;
+        };
+        if name == "arg" || is_self_closing(header) {
+            rest = &candidate[open_end + 1..];
+            continue;
+        }
+        let content_start = open_end + 1;
+        let close = format!("</{name}>");
+        let Some(content_end) = candidate[content_start..]
+            .find(&close)
+            .map(|i| content_start + i)
+        else {
+            break;
+        };
+        let value = decode_xml(candidate[content_start..content_end].trim());
+        let child_attrs = tag_attrs(header);
+        let key = if matches!(name.as_str(), "parameter" | "param") {
+            child_attrs.get("name").cloned().unwrap_or(name)
+        } else {
+            name
+        };
+        map.insert(key, value);
+        rest = &candidate[content_end + close.len()..];
+    }
+    map
 }
 
 fn parse_args(body: &str) -> BTreeMap<String, String> {
@@ -2219,6 +2523,60 @@ mod tests {
     fn parse_rejects_garbage() {
         assert!(parse_action("no action here").is_none());
         assert!(parse_action("<act tool=\"nonsense\"></act>").is_none());
+    }
+
+    #[test]
+    fn parse_accepts_compact_xml_actions_from_local_models() {
+        assert_eq!(
+            parse_action("<act><read_file path=\"README.md\" /></act>"),
+            Some(Tool::ReadFile {
+                path: "README.md".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_action("<act tool=\"finish\">The answer.</act>"),
+            Some(Tool::Finish {
+                message: "The answer.".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_action("<act><bash><cmd>cargo test</cmd></bash></act>"),
+            Some(Tool::Bash {
+                cmd: "cargo test".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_action(
+                "<act name=\"read_file\"><parameter name=\"path\">README.md</parameter></act>"
+            ),
+            Some(Tool::ReadFile {
+                path: "README.md".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_action("<act>\nname: read_file\narguments:\n  path: \"README.md\"\n</act>"),
+            Some(Tool::ReadFile {
+                path: "README.md".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_action("<act>\nname: open_file\narguments:\n  path: \"README.md\"\n</act>"),
+            Some(Tool::ReadFile {
+                path: "README.md".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_action("<act tool=\"read\">{\"path\": \"README.md\", \"limit\": 1}</act>"),
+            Some(Tool::ReadFile {
+                path: "README.md".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_action("<act tool=\"finish\">{\"message\": \"Done.\"}</act>"),
+            Some(Tool::Finish {
+                message: "Done.".to_string(),
+            })
+        );
     }
 
     #[test]
