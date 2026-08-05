@@ -1,4 +1,17 @@
-//! The myth — a composition LAYER over kaos, written as an S-expression graph
+//! The myth syntax, and the Rebis it becomes.
+//!
+//! Kaos used to have two orchestration languages. `myth` was 518 lines with five
+//! forms and four gates; Rebis is the model-interface language the rest of the
+//! harness is written against, with 22 frozen operators and a tested cost model.
+//! Two languages was the shape of an accident rather than a design.
+//!
+//! **The evaluator is gone.** What is left is a reader and a translator, so a
+//! `KAOS_MYTH` a user wrote a year ago still runs — as the Rebis program it
+//! always meant — and says what to write instead. `to_rebis` is the whole
+//! remaining point of this file, and the file goes with the syntax a release
+//! from now.
+//!
+//! The grammar it still reads:
 //!
 //! ```lisp
 //! fire                 ; a model call
@@ -9,21 +22,24 @@
 //! ; G ::= vote | first | (check "shell-cmd") | (mirror P)
 //! ```
 //!
-//! `spread`/`gather` diverge and converge; `pipe`/`ask` sequence and role — so a
-//! myth is a real agent-workflow language, not just a voter:
-//!   conclave         (gather vote (spread 8 fire))
-//!   mirror gate      (gather (mirror 40) (spread 5 fire))   ; answers must round-trip
-//!   gated best-of-k  (gather (check "lake build") (spread 8 fire))
-//!   a pipeline       (pipe (gather vote (spread 5 (ask "Propose a fix")))
-//!                          (ask "Critique it; list the flaws")
-//!                          (gather (check "pytest -q") (spread 3 (ask "Write the final code"))))
+//! # What survived, and where it went
 //!
-//! A node evaluates to a LIST of candidates; `spread` grows the list
-//! (concurrently), `gather` shrinks it to one, `pipe` threads one stage's answer
-//! into the next. Minimal surface — five forms, three gates, one `run`.
-use crate::scry::majority;
-use rebis_lang as mirror;
-use std::sync::atomic::{AtomicUsize, Ordering};
+//! - The **gates** are `kaos_agent::gate`: `[vote]`, `[first]` and `[check]` are
+//!   host mediators Rebis resolves by name. Getting them there is what made
+//!   retiring the evaluator possible — `tests/myth_equivalence.rs` found that
+//!   three of the four had no Rebis spelling at all, not the one the plan
+//!   predicted.
+//! - The **[`Cast`] trait survived as the model seam.** It is what a leaf IS —
+//!   one completion, or a whole tool session in an isolated copy of the tree —
+//!   and `solve::RebisConclave` is generic over it. So the graph is Rebis and
+//!   the leaf is still a trait, which is the split that was worth keeping.
+//!
+//! # What did not translate
+//!
+//! Recorded in `tests/myth_equivalence.rs` rather than here, because they are
+//! assertions rather than prose: the bowtie (a nested square's mediator is shown
+//! every leaf firing, not the collapsed inner results), `first`'s determinism,
+//! and a vote with no majority.
 
 /// The seam to the chat: "a chat you can fire". `Sync` so a `spread` fans out
 /// concurrently. `check` gates a single candidate through a shell verifier.
@@ -52,52 +68,6 @@ pub enum Gate {
     Mirror(u8),
 }
 
-impl Gate {
-    // `ctr` numbers gate-issued model calls; since the mirror gate went
-    // deterministic no gate fires the cast, but the seam stays for gates
-    // that may need it (the check gate takes the shell instead).
-    fn pick<C: Cast>(
-        &self,
-        task: &str,
-        cands: &[Option<String>],
-        cast: &C,
-        _ctr: &AtomicUsize,
-    ) -> Option<String> {
-        match self {
-            Gate::Vote => {
-                let votes: Vec<String> = cands.iter().flatten().cloned().collect();
-                majority(&votes)
-            }
-            Gate::First => cands.iter().flatten().next().cloned(),
-            Gate::Check(cmd) => cands
-                .iter()
-                .flatten()
-                .find(|c| cast.check(task, c, cmd))
-                .cloned(),
-            Gate::Mirror(percent) => {
-                // Reflect every candidate deterministically — Rebis's own
-                // tokenizer is the compressor, no model and no prompt — and
-                // score its holonomy against the task. Evaluation follows the
-                // abraxas collider semantics: the candidates' own lines are the
-                // record; atoms resolve to evidence there and broaden one hop
-                // through its co-occurrence graph. An answer with no content
-                // scores as maximal holonomy (it cannot round-trip).
-                let threshold = f32::from(*percent) / 100.0;
-                let texts: Vec<&String> = cands.iter().flatten().collect();
-                let record = mirror::Record::from_texts(&texts);
-                let mut best: Option<(f32, String)> = None;
-                for cand in cands.iter().flatten() {
-                    let h = mirror::holonomy_reflected(task, cand, &record);
-                    if h <= threshold && best.as_ref().is_none_or(|(b, _)| h < *b) {
-                        best = Some((h, cand.clone()));
-                    }
-                }
-                best.map(|(_, cand)| cand)
-            }
-        }
-    }
-}
-
 /// The myth graph.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Node {
@@ -113,51 +83,6 @@ pub enum Node {
     /// Sequence: run each stage in turn; the collapsed answer of one stage feeds
     /// the next as context. This is what makes a myth an agent *pipeline*.
     Pipe(Vec<Node>),
-}
-
-impl Node {
-    /// Evaluate to a list of candidates. `ctr` hands each `fire` a unique index.
-    fn eval<C: Cast>(&self, task: &str, cast: &C, ctr: &AtomicUsize) -> Vec<Option<String>> {
-        match self {
-            Node::Fire => vec![cast.fire(task, ctr.fetch_add(1, Ordering::Relaxed))],
-            Node::Ask(instr) => {
-                let prompt = format!("{instr}\n\n{task}");
-                vec![cast.fire(&prompt, ctr.fetch_add(1, Ordering::Relaxed))]
-            }
-            Node::Spread(n, child) => std::thread::scope(|s| {
-                let handles: Vec<_> = (0..*n)
-                    .map(|_| s.spawn(|| child.eval(task, cast, ctr)))
-                    .collect();
-                handles
-                    .into_iter()
-                    .flat_map(|h| h.join().unwrap_or_default())
-                    .collect()
-            }),
-            Node::Gather(gate, child) => {
-                let cands = child.eval(task, cast, ctr);
-                vec![gate.pick(task, &cands, cast, ctr)]
-            }
-            Node::Pipe(stages) => {
-                let mut t = task.to_string();
-                let mut cands = vec![None];
-                for (i, stage) in stages.iter().enumerate() {
-                    cands = stage.eval(&t, cast, ctr);
-                    if i + 1 < stages.len() {
-                        // collapse this stage to one answer; feed it to the next
-                        let one = if cands.len() == 1 {
-                            cands[0].clone()
-                        } else {
-                            Gate::Vote.pick(&t, &cands, cast, ctr)
-                        };
-                        if let Some(answer) = one {
-                            t = format!("{task}\n\nWork so far:\n{answer}");
-                        }
-                    }
-                }
-                cands
-            }
-        }
-    }
 }
 
 impl Node {
@@ -258,6 +183,14 @@ fn write_node(node: &Node, losses: &mut Losses) -> Result<String, String> {
             if stages.is_empty() {
                 return Err("a pipe with no stages has no Rebis form".to_string());
             }
+            // A pipe of one stage IS that stage. Rebis refuses a one-operand
+            // arrow — an arrow routes an answer from somewhere to somewhere, and
+            // there is nowhere — so emitting `(-> X)` would produce a program
+            // that does not parse. `myth` allowed the form and meant nothing by
+            // it, which is how this was missed until a test ran the output.
+            if let [only] = stages.as_slice() {
+                return write_node(only, losses);
+            }
             let written: Result<Vec<String>, String> = stages
                 .iter()
                 .map(|stage| write_node(stage, losses))
@@ -306,18 +239,6 @@ fn gate_name(gate: &Gate, losses: &mut Losses) -> &'static str {
 /// A myth instruction as the body of a Rebis prompt.
 fn escape_prompt(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// Run a myth on a task; the single collapsed answer (an implicit final
-/// vote if the top node left more than one candidate).
-pub fn run<C: Cast>(node: &Node, task: &str, cast: &C) -> Option<String> {
-    let ctr = AtomicUsize::new(0);
-    let cands = node.eval(task, cast, &ctr);
-    if cands.len() == 1 {
-        cands.into_iter().next().flatten()
-    } else {
-        Gate::Vote.pick(task, &cands, cast, &ctr)
-    }
 }
 
 // ── the reader: a tiny S-expression parser ──
@@ -489,40 +410,24 @@ fn expect(toks: &[String], pos: &mut usize, want: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    struct Mock(Vec<Option<String>>);
-    impl Cast for Mock {
-        fn fire(&self, _t: &str, i: usize) -> Option<String> {
-            self.0.get(i).cloned().flatten()
-        }
-        fn check(&self, _t: &str, c: &str, cmd: &str) -> bool {
-            c == cmd // "passes" iff the candidate equals the gate string (test stub)
-        }
-    }
+    // ── the reader ──────────────────────────────────────────────────────────
 
     #[test]
-    fn parses_and_runs_the_conclave() {
-        let n = parse("(gather vote (spread 5 fire))").unwrap();
+    fn the_grammar_is_still_read() {
         assert_eq!(
-            n,
+            parse("(gather vote (spread 5 fire))").unwrap(),
             Node::Gather(Gate::Vote, Box::new(Node::Spread(5, Box::new(Node::Fire))))
         );
-        let m = Mock(vec![s("42"), s("42"), s("7"), s("42"), s("7")]);
-        assert_eq!(run(&n, "q", &m).as_deref(), Some("42"));
-    }
-
-    #[test]
-    fn parses_the_bowtie() {
-        let n = parse("(gather vote (spread 2 (gather (check \"x\") (spread 3 fire))))").unwrap();
-        // inner gather keeps the candidate equal to "x"; outer votes
-        let m = Mock(vec![s("x"), s("a"), s("b"), s("x"), s("c"), s("d")]);
-        assert_eq!(run(&n, "q", &m).as_deref(), Some("x"));
-    }
-
-    #[test]
-    fn gates_first_and_errors() {
         assert_eq!(
             parse("(gather first (spread 3 fire))").unwrap(),
             Node::Gather(Gate::First, Box::new(Node::Spread(3, Box::new(Node::Fire))))
+        );
+        assert_eq!(
+            parse(r#"(pipe (ask "Propose") (ask "Refine"))"#).unwrap(),
+            Node::Pipe(vec![
+                Node::Ask("Propose".into()),
+                Node::Ask("Refine".into()),
+            ])
         );
         assert!(parse("(bogus 3 fire)").is_err());
         assert!(parse("(spread x fire)").is_err());
@@ -530,57 +435,22 @@ mod tests {
     }
 
     #[test]
-    fn pipe_threads_stages_and_ask_prepends_role() {
-        let n = parse(r#"(pipe (ask "Propose") (ask "Refine"))"#).unwrap();
-        assert_eq!(
-            n,
-            Node::Pipe(vec![
-                Node::Ask("Propose".into()),
-                Node::Ask("Refine".into()),
-            ])
-        );
-        // stage 0 fires index 0 ("draft"), stage 1 fires index 1 ("final");
-        // the pipe returns the LAST stage's candidates.
-        let m = Mock(vec![s("draft"), s("final")]);
-        assert_eq!(run(&n, "q", &m).as_deref(), Some("final"));
-    }
-
-    #[test]
-    fn pipe_collapses_a_spread_before_feeding_forward() {
-        // first stage is a spread of 3; the pipe votes it to one before stage 2,
-        // and the whole myth ends on stage 2's single candidate.
-        let n = parse(r#"(pipe (spread 3 fire) (ask "Finish"))"#).unwrap();
-        let m = Mock(vec![s("a"), s("a"), s("b"), s("done")]);
-        assert_eq!(run(&n, "q", &m).as_deref(), Some("done"));
-    }
-
-    #[test]
-    fn leaves_counts_cost_exposure() {
-        assert_eq!(parse("fire").unwrap().leaves(), 1);
-        assert_eq!(parse("(gather vote (spread 8 fire))").unwrap().leaves(), 8);
-        // a pipe sums its stages; spreads inside multiply
-        let n = parse(
-            "(pipe (gather vote (spread 4 fire)) (ask \"x\") (gather first (spread 3 fire)))",
-        )
-        .unwrap();
-        assert_eq!(n.leaves(), 4 + 1 + 3);
-    }
-
-    #[test]
-    fn check_command_keeps_escaped_quotes() {
-        // the first recipe in docs/loop.md: a command that carries its own quotes.
-        let n = parse(r#"(gather (check "grep -qxF \"$CANDIDATE\" answers.txt") (spread 8 fire))"#)
-            .unwrap();
-        match n {
-            Node::Gather(Gate::Check(cmd), _) => {
-                assert_eq!(cmd, r#"grep -qxF "$CANDIDATE" answers.txt"#);
+    fn a_check_command_keeps_its_own_quotes() {
+        // A command that carries quotes must survive the reader, or the loss
+        // reported by `to_rebis` would name the wrong command.
+        let node =
+            parse(r#"(gather (check "grep -qxF \"$CANDIDATE\" answers.txt") (spread 8 fire))"#)
+                .unwrap();
+        match node {
+            Node::Gather(Gate::Check(command), _) => {
+                assert_eq!(command, r#"grep -qxF "$CANDIDATE" answers.txt"#);
             }
             other => panic!("expected a check gather, got {other:?}"),
         }
     }
 
     #[test]
-    fn parses_the_mirror_gate() {
+    fn the_mirror_gate_is_still_read_and_still_bounded() {
         assert_eq!(
             parse("(gather (mirror 40) (spread 5 fire))").unwrap(),
             Node::Gather(
@@ -593,59 +463,22 @@ mod tests {
     }
 
     #[test]
-    fn mirror_gate_keeps_the_answer_that_round_trips() {
-        // Deterministic reflection: the candidate's own content tokens are
-        // its echo — an answer about the task round-trips, an off-topic one
-        // cannot. No reflection calls are scripted; the Mock stays empty.
-        let gate = Gate::Mirror(60);
-        let candidates = vec![
-            s("Paris is the capital of France."),
-            s("Bananas are yellow."),
-        ];
-        let m = Mock(vec![]);
-        let counter = AtomicUsize::new(0);
-        assert_eq!(
-            gate.pick("capital of France?", &candidates, &m, &counter)
-                .as_deref(),
-            Some("Paris is the capital of France.")
-        );
-    }
-
-    #[test]
-    fn mirror_gate_picks_the_lowest_holonomy_survivor() {
-        // Candidate order must not matter: the off-topic answer comes first
-        // and still loses to the answer that round-trips onto the task.
-        let gate = Gate::Mirror(80);
-        let candidates = vec![s("bananas are yellow"), s("sleep against commits tonight")];
-        let m = Mock(vec![]);
-        let counter = AtomicUsize::new(0);
-        assert_eq!(
-            gate.pick("sleep versus commits", &candidates, &m, &counter)
-                .as_deref(),
-            Some("sleep against commits tonight")
-        );
-    }
-
-    #[test]
-    fn mirror_gate_refuses_when_nothing_round_trips() {
-        let n = parse("(gather (mirror 20) (spread 2 fire))").unwrap();
-        let m = Mock(vec![s("the weather is nice"), s("bananas are yellow")]);
-        assert_eq!(run(&n, "sleep versus commits", &m), None);
-    }
-
-    #[test]
-    fn mirror_gate_adds_no_leaf_exposure() {
+    fn leaves_counts_cost_exposure() {
+        // The surviving cost model, and the oracle the translation is checked
+        // against: a myth's price and its Rebis translation's price must agree.
+        assert_eq!(parse("fire").unwrap().leaves(), 1);
+        assert_eq!(parse("(gather vote (spread 8 fire))").unwrap().leaves(), 8);
         assert_eq!(
             parse("(gather (mirror 40) (spread 5 fire))")
                 .unwrap()
                 .leaves(),
             5
         );
-        assert_eq!(parse("(gather vote (spread 5 fire))").unwrap().leaves(), 5);
-    }
-
-    fn s(x: &str) -> Option<String> {
-        Some(x.to_string())
+        let piped = parse(
+            r#"(pipe (gather vote (spread 4 fire)) (ask "x") (gather first (spread 3 fire)))"#,
+        )
+        .unwrap();
+        assert_eq!(piped.leaves(), 4 + 1 + 3);
     }
 
     // ── the translation ─────────────────────────────────────────────────────
@@ -680,6 +513,15 @@ mod tests {
             written,
             "(= task (&) (-> (+ \"Draft\" ($ task)) (+ \"Refine\" ($ task))))"
         );
+    }
+
+    #[test]
+    fn a_pipe_of_one_stage_is_that_stage_not_a_one_armed_arrow() {
+        // Rebis refuses `(-> X)`, so this is a correctness fix rather than a
+        // tidying: the naive translation produced a program that did not parse.
+        let (written, _) = rebis_of(r#"(pipe (ask "Summarise"))"#);
+        assert_eq!(written, "(= task (&) (+ \"Summarise\" ($ task)))");
+        assert!(!written.contains("->"));
     }
 
     #[test]

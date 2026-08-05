@@ -473,21 +473,25 @@ fn decode_patchset(s: &str) -> Option<BTreeMap<String, Option<String>>> {
 /// are and what happens to the answers.
 ///
 /// The gates come from [`crate::gate`]: `[vote]`, `[first]`, `[check]`.
-pub struct RebisConclave<'a> {
-    /// How a leaf fires.
-    pub cast: ChatCast<'a>,
+pub struct RebisConclave<'a, C: Cast> {
+    /// How a leaf fires. [`ChatCast`] answers; [`AgentCast`] acts.
+    ///
+    /// Borrowed, so an agentic `[check]` can hold the SAME cast the leaves
+    /// fired through. A gate re-applying a diff into a different world than the
+    /// one that produced it would prove nothing.
+    pub cast: &'a C,
     /// The mediator names this run claims.
-    pub mediators: crate::gate::Mediators,
+    pub mediators: crate::gate::Mediators<'a>,
     /// Leaf index, for the per-branch sampling seed. Rebis has its own stable
     /// scope identity, but the seed only has to be *distinct* per branch, and a
     /// counter is the same thing `myth`'s atomic was.
     fired: std::sync::atomic::AtomicUsize,
 }
 
-impl<'a> RebisConclave<'a> {
+impl<'a, C: Cast> RebisConclave<'a, C> {
     /// A conclave firing through `cast`, gated by `mediators`.
     #[must_use]
-    pub fn new(cast: ChatCast<'a>, mediators: crate::gate::Mediators) -> Self {
+    pub fn new(cast: &'a C, mediators: crate::gate::Mediators<'a>) -> Self {
         Self {
             cast,
             mediators,
@@ -502,7 +506,7 @@ impl<'a> RebisConclave<'a> {
     }
 }
 
-impl rebis_lang::Oracle for RebisConclave<'_> {
+impl<C: Cast> rebis_lang::Oracle for RebisConclave<'_, C> {
     fn fire(&self, prompt: &str) -> Option<String> {
         let index = self
             .fired
@@ -512,6 +516,63 @@ impl rebis_lang::Oracle for RebisConclave<'_> {
 
     fn mediate(&self, mediator: &str, branches: &[String]) -> rebis_lang::Mediation {
         self.mediators.judge(mediator, branches)
+    }
+}
+
+/// `[check]` for a conclave whose leaves *act*.
+///
+/// [`crate::gate::Check`] shells the candidate out as text, which is right when
+/// a branch answered. An agentic branch does not answer text — it returns the
+/// patchset it produced — so verifying it means re-applying that diff to a fresh
+/// copy of the tree and running the gate *there*. That is [`Cast::check`]'s job
+/// and [`AgentCast`] already implements it; this is the seam that reaches it.
+///
+/// Registered in place of the plain gate whenever the leaves act, so `[check]`
+/// means "the branch whose changes actually pass" rather than "the branch whose
+/// text a grep liked".
+pub struct CastCheck<'a, C: Cast> {
+    /// The cast whose verifier is used. Borrowed, not owned, because it is the
+    /// same cast the leaves fired through — a gate re-applying a diff into a
+    /// different world than the one that produced it would prove nothing.
+    pub cast: &'a C,
+    /// What runs inside the re-applied copy. `KAOS_GATE`.
+    pub command: String,
+    /// Whether this run may start a subprocess at all.
+    pub authorised: bool,
+}
+
+impl<C: Cast> crate::gate::HostMediator for CastCheck<'_, C> {
+    fn name(&self) -> &str {
+        "check"
+    }
+
+    fn pick(&self, branches: &[String]) -> crate::gate::Verdict {
+        use crate::gate::Verdict;
+        if !self.authorised {
+            return Verdict::Failed(
+                "`[check]` runs a verifier and this run holds no command authority; \
+                 re-run with `--allow-tools`"
+                    .to_string(),
+            );
+        }
+        if self.command.trim().is_empty() {
+            return Verdict::Failed(
+                "`[check]` has no verifier configured; set `KAOS_GATE`".to_string(),
+            );
+        }
+        branches
+            .iter()
+            .position(|branch| self.cast.check("", branch, &self.command))
+            .map_or_else(
+                || {
+                    Verdict::Refused(format!(
+                        "none of {} attempts passed `{}`",
+                        branches.len(),
+                        self.command
+                    ))
+                },
+                Verdict::Chose,
+            )
     }
 }
 

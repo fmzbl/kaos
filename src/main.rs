@@ -708,26 +708,12 @@ fn conclave(session: &Session, task: &str) {
 /// which is a Rebis operator — translated on read, and the replacement is
 /// printed so the value in a user's config can be updated once and forgotten.
 fn run_myth(session: &Session, sexpr: &str, task: &str) {
-    // `KAOS_AGENTIC` makes every leaf a full read/edit/bash session in an
-    // isolated copy of the tree. The Rebis conclave does not do that — its
-    // leaves answer, they do not act — so the myth evaluator stays reachable
-    // for exactly this, and stays honest about why. `kaos rebis run --chaos`
-    // is the Rebis path that acts.
-    let agentic = kaos::config::enabled("KAOS_AGENTIC");
-
     // Myth first, because its grammar is the closed one: `fire`, `ask`,
     // `spread`, `gather`, `pipe` and nothing else. Anything it refuses is
     // Rebis's, which is the right way round — Rebis would happily PARSE
     // `(gather vote …)` as a call to an undefined macro and only fail at
     // runtime, so it cannot be the discriminator.
     if let Ok(node) = kaos::myth::parse(sexpr) {
-        if agentic {
-            println!(
-                "  {}",
-                ash("agentic leaves act, which only the myth evaluator does \u{2014} running it")
-            );
-            return run_myth_natively(session, node, sexpr, task);
-        }
         match kaos::myth::to_rebis(&node) {
             Ok((replacement, losses)) => {
                 println!(
@@ -748,15 +734,6 @@ fn run_myth(session: &Session, sexpr: &str, task: &str) {
                 return;
             }
         }
-    }
-    if agentic {
-        // Silently answering instead of acting would be the worst outcome: the
-        // run looks the same and does a fraction of the work.
-        println!(
-            "  {} {}",
-            fg(RED(), "\u{2734} KAOS_AGENTIC does nothing here \u{2014}"),
-            ash("a Rebis conclave's leaves answer rather than act; use `kaos rebis run --chaos`")
-        );
     }
     run_rebis_composition(session, sexpr, task);
 }
@@ -788,26 +765,83 @@ fn run_rebis_composition(session: &Session, source: &str, task: &str) {
     let task = format!("{}{}", attachment_block(session), task);
 
     let allow_tools = kaos::config::enabled("KAOS_CLAUDE_YOLO");
-    let conclave = kaos::solve::RebisConclave::new(
-        kaos::solve::ChatCast {
+    let gate = setting("KAOS_GATE").unwrap_or_default();
+    let gate_timeout = std::time::Duration::from_secs(
+        setting("KAOS_GATE_TIMEOUT_S")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300),
+    );
+
+    // `KAOS_AGENTIC` decides what a leaf IS. Answering and acting are the same
+    // program with a different seam under it — which is the point of the graph
+    // being a language and the leaf being a trait, and the reason this dispatch
+    // is four lines rather than a second evaluator.
+    if kaos::config::enabled("KAOS_AGENTIC") {
+        let root = std::env::var("KAOS_ARENA").unwrap_or_else(|_| ".".to_string());
+        let cast = kaos::solve::AgentCast {
             spec: &session.model,
             timeout: std::time::Duration::from_secs(call_timeout_s()),
-        },
-        kaos_agent::gate::Mediators::standard(
-            setting("KAOS_GATE").unwrap_or_default(),
-            std::time::Duration::from_secs(
-                setting("KAOS_GATE_TIMEOUT_S")
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(300),
-            ),
-            allow_tools,
-        ),
+            root: root.clone().into(),
+            max_steps: max_steps(),
+            bash_timeout_s: setting("KAOS_BASH_TIMEOUT_S")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(600),
+            gate_timeout_s: gate_timeout.as_secs(),
+        };
+        println!(
+            "  {}  {}",
+            dim(ASH(), "agentic"),
+            dim(ASH(), &format!("leaves act in copies of {root}"))
+        );
+        // Cost exposure up front — an agentic leaf is a whole session, not one
+        // call, and the branch count is the one number a reader can get off the
+        // page. Multiplying it by the step budget is the honest upper bound.
+        let leaves = kaos::cost::firings(&expr);
+        let steps = max_steps();
+        println!(
+            "  {}  {}",
+            fg(RED(), "\u{26a0} cost"),
+            ash(&format!(
+                "up to {leaves} sessions \u{00d7} {steps} steps = ~{} model calls on {}. ^C to abort.",
+                leaves * steps,
+                session.model.label(),
+            )),
+        );
+        // An agentic branch returns the patchset it produced, not text, so the
+        // gate has to re-apply it rather than grep it.
+        let mut mediators =
+            kaos_agent::gate::Mediators::standard(gate.clone(), gate_timeout, allow_tools);
+        mediators.claim(Box::new(kaos::solve::CastCheck {
+            cast: &cast,
+            command: gate,
+            authorised: allow_tools,
+        }));
+        let conclave = kaos::solve::RebisConclave::new(&cast, mediators);
+        return finish_conclave(&expr, &conclave, task);
+    }
+
+    let cast = kaos::solve::ChatCast {
+        spec: &session.model,
+        timeout: std::time::Duration::from_secs(call_timeout_s()),
+    };
+    let conclave = kaos::solve::RebisConclave::new(
+        &cast,
+        kaos_agent::gate::Mediators::standard(gate, gate_timeout, allow_tools),
     );
+    finish_conclave(&expr, &conclave, task);
+}
+
+/// Run a prepared conclave and report its one outcome of three.
+fn finish_conclave<C: kaos::myth::Cast>(
+    expr: &rebis_lang::Expr,
+    conclave: &kaos::solve::RebisConclave<'_, C>,
+    task: String,
+) {
     let mut record = rebis_lang::Record::from_texts::<&str>(&[]);
     let result = rebis_lang::orchestrate_with_inlet(
-        &expr,
+        expr,
         &mut record,
-        &conclave,
+        conclave,
         &HypersigilModules::user(
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         ),
@@ -843,86 +877,6 @@ fn run_rebis_composition(session: &Session, source: &str, task: &str) {
         ),
     }
     println!("{}", rule(64));
-}
-
-/// The myth evaluator, kept for the one thing Rebis cannot express here:
-/// agentic leaves, which run a whole tool session per branch in an isolated
-/// copy of the tree. See `kaos-agent/tests/myth_equivalence.rs` for the rest of
-/// what did and did not translate.
-fn run_myth_natively(session: &Session, node: kaos::myth::Node, sexpr: &str, task: &str) {
-    if let Err(e) = session.model.readiness() {
-        println!(
-            "  {} {}",
-            fg(RED(), "\u{2734} the mind is unreachable \u{2014}"),
-            ash(&e)
-        );
-        return;
-    }
-    println!("{}", rule(64));
-    println!("  {}  {}", bold(GREEN(), "myth"), dim(ASH(), sexpr));
-    let task = format!("{}{}", attachment_block(session), task);
-    // KAOS_AGENTIC turns every leaf into a real Conductor session (read/edit/bash in
-    // an isolated copy) instead of a single completion — the myth *acts*. Its verdict
-    // is the winning patchset; without it, leaves are plain answers.
-    let timeout = std::time::Duration::from_secs(call_timeout_s());
-    let verdict = if kaos::config::enabled("KAOS_AGENTIC") {
-        let root = std::env::var("KAOS_ARENA").unwrap_or_else(|_| ".".to_string());
-        let steps = max_steps();
-        let leaves = node.leaves();
-        let conc = std::env::var("KAOS_MAX_CONCURRENCY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(3usize)
-            .max(1);
-        println!(
-            "  {}  {}",
-            dim(ASH(), "agentic"),
-            dim(ASH(), &format!("leaves act in copies of {root}"))
-        );
-        // Cost exposure up front — an agentic leaf is a whole session, not one call.
-        println!(
-            "  {}  {}",
-            fg(RED(), "\u{26a0} cost"),
-            ash(&format!(
-                "up to {leaves} sessions \u{00d7} {steps} steps = ~{} model calls on {} ({} at a time). ^C to abort.",
-                leaves * steps,
-                session.model.label(),
-                conc,
-            )),
-        );
-        let cast = kaos::solve::AgentCast {
-            spec: &session.model,
-            timeout,
-            root: root.into(),
-            max_steps: max_steps(),
-            bash_timeout_s: std::env::var("KAOS_BASH_TIMEOUT_S")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(600),
-            gate_timeout_s: std::env::var("KAOS_GATE_TIMEOUT_S")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(300),
-        };
-        kaos::myth::run(&node, &task, &cast)
-    } else {
-        let cast = kaos::solve::ChatCast {
-            spec: &session.model,
-            timeout,
-        };
-        kaos::myth::run(&node, &task, &cast)
-    };
-    match verdict {
-        Some(a) => println!(
-            "  {} {}",
-            bold(GREEN(), "\u{25c9} verdict"),
-            bone(&kaos::solve::render_verdict(&a))
-        ),
-        None => println!(
-            "  {}",
-            fg(RED(), "\u{2734} no answer \u{2014} every branch fizzled")
-        ),
-    }
 }
 
 /// Open KAOS's Rebis model-interface workspace. In a terminal this is the native
@@ -1333,7 +1287,7 @@ struct RebisOracle<'a> {
     /// Built once per run because `[check]`'s authority is the run's, not the
     /// square's: a program cannot acquire a verifier partway through by writing
     /// one, and it cannot say what the verifier is at all.
-    mediators: kaos_agent::gate::Mediators,
+    mediators: kaos_agent::gate::Mediators<'a>,
 }
 
 impl RebisOracle<'_> {

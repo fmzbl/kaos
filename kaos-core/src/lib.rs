@@ -21,6 +21,7 @@
 pub mod chaos;
 pub mod chat;
 pub mod config;
+pub mod cost;
 pub mod dream;
 pub mod ink;
 pub mod music;

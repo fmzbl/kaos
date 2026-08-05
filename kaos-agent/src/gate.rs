@@ -240,9 +240,12 @@ impl HostMediator for Check {
 ///
 /// A short, closed list on purpose. A host that claimed every name it was handed
 /// would silently redefine `[merger]` and `[judge]` for every program it ran.
-pub struct Mediators(Vec<Box<dyn HostMediator>>);
+/// The lifetime is what lets a mediator borrow the run it belongs to — an
+/// agentic gate holds the [`crate::myth::Cast`] whose workspaces it re-applies
+/// candidates into, and that cast borrows the session's model.
+pub struct Mediators<'a>(Vec<Box<dyn HostMediator + 'a>>);
 
-impl Mediators {
+impl<'a> Mediators<'a> {
     /// The three Kaos supplies.
     ///
     /// `gate` is the verifier `[check]` runs and `authorised` is whether this
@@ -270,7 +273,7 @@ impl Mediators {
 
     /// Add a mediator. A second registration of a name shadows the first, so a
     /// frontend can replace `[check]` without rebuilding the list.
-    pub fn claim(&mut self, mediator: Box<dyn HostMediator>) {
+    pub fn claim(&mut self, mediator: Box<dyn HostMediator + 'a>) {
         self.0.insert(0, mediator);
     }
 
@@ -295,7 +298,7 @@ impl Mediators {
     }
 }
 
-impl Default for Mediators {
+impl Default for Mediators<'_> {
     fn default() -> Self {
         Self::none()
     }

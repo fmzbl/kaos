@@ -35,7 +35,7 @@
 // The front-end-agnostic core lives in its own crate. Re-exported so the app's
 // `crate::config` / `crate::theme` / `crate::sessions` / `crate::visual` paths
 // keep meaning what they always did.
-pub use kaos_core::{config, runs, sessions, sigils, tabs, theme, visual};
+pub use kaos_core::{config, cost, runs, sessions, sigils, tabs, theme, visual};
 // The Pact — offline and deterministic, in its own crate.
 // The agent runtime — everything that fires a prompt or spawns a child.
 #[cfg(feature = "api")]
