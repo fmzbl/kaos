@@ -1,0 +1,12 @@
+; A condition answering neither 0 nor 1 runs NEITHER branch and says so.
+;
+; The diagnostic names the form that refused, not the argument position: it
+; reads `binary gate must return 0 or 1, received "…"`. Matching on the word
+; "condition" matched the docs rather than the runtime.
+; expect: calls 1
+; expect: diagnostic binary gate
+; expect: absent taken
+; expect: absent fallback
+(% "Answer with a full sentence about the weather."
+   "Answer with exactly the word: taken"
+   "Answer with exactly the word: fallback")

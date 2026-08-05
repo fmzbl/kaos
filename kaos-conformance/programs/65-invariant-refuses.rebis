@@ -1,0 +1,14 @@
+; A refused arrow stops the scope: the stage after it never fires.
+;
+; The call count is the proof, and `absent` cannot be — the deterministic
+; calculus dumps the terms of the un-run expression, so an unfired prompt's own
+; words still appear in the log. Counting is what distinguishes them.
+;
+; Three stages, two arrows. Unbroken that is 5 calls: three prompts and two
+; checks. Refused at the first arrow it is 3: two prompts and the check that
+; said no.
+; expect: calls 3
+(@ "Answer with exactly the single character: 0"
+   (-> "Answer with exactly the word: alpha"
+       "Repeat the word you were given, exactly."
+       "Answer with exactly the word: unreachable"))

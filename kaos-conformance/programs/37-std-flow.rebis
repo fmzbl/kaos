@@ -1,0 +1,10 @@
+; std/flow: independent branches that see nothing of each other.
+; expect: calls >=3
+; expect: clean
+; expect: answers
+((# std/flow)
+ (std-fan-three
+   "Reply with the three answers, separated by ' | ', nothing else."
+   "Answer with exactly the word: north"
+   "Answer with exactly the word: south"
+   "Answer with exactly the word: east"))

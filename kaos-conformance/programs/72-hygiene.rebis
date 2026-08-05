@@ -1,0 +1,20 @@
+; A macro's private bindings cannot swallow the caller's.
+;
+; `std-cheaper-than` binds `before` in its own body and then substitutes the
+; caller's expressions inside that scope. Before macro hygiene this program
+; asked the model `caller kept: 1` — the run's private count of model calls,
+; leaked into a prompt in place of a binding the caller wrote and could see.
+;
+; The count is the structural half and the text is the semantic half: two
+; firings for the arrow inside the space, one for the accepted branch, and the
+; branch must carry the CALLER's value. A model cannot fake either.
+; expect: calls 3
+; expect: clean
+; expect: contains caller kept: KEPT
+; expect: answers
+((# std/measure)
+ (= before "Reply with exactly the word: KEPT"
+    (std-cheaper-than 99
+                      ("Reply with exactly the word: work")
+                      ($ "caller kept: " before)
+                      ("Reply with exactly the word: rejected"))))

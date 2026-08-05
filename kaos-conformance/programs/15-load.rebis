@@ -1,0 +1,6 @@
+; `&:` obtains a source the program named. Text becomes the value.
+; expect: calls 1
+; expect: clean
+; expect: answers
+; expect: contains pomegranate
+(-> (&: "programs/fixture.txt") "Repeat the text you were given, exactly.")

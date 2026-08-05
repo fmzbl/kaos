@@ -1,0 +1,25 @@
+event    module std/sample loaded · 33 definition(s)
+event    macro std-mean expanded · 255 remaining
+event    macro std-divide expanded · 254 remaining
+event    macro std-percent expanded · 253 remaining
+event    macro std-coarse expanded · 252 remaining
+event    macro std-scaled expanded · 251 remaining
+event    macro std-divide expanded · 250 remaining
+event    prompt started · abstraction 1 · Reply with exactly the three values below, separated by single spaces, and nothing else.
+prompt   5 33 1/2
+Rebis agent 1 · Reply with exactly the three values below, separated by single spaces, and nothing else.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    5 33 1/2
+answer   5 33 1/2
+o-[]-o
+RESULT
+result   5 33 1/2
+TRACE
+firing   1 · ○ prompt Reply with exactly the three values below, separated by single spaces, and nothing else.
+5 33 1/2 · abstraction 1
+answer   5 33 1/2
+score    1.000
+terms      Reply with exactly the three values below, separated by single spaces, and nothing else.
+
+evidence 0 line(s)

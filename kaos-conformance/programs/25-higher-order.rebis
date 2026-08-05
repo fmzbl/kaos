@@ -1,0 +1,7 @@
+; A macro receiving another macro's NAME as an argument.
+; expect: calls 2
+; expect: clean
+; expect: answers
+(~ shout (work) (-> work "Repeat what you were given in capitals."))
+(~ apply-twice (f work) (f work))
+(apply-twice shout "Answer with exactly the word: applied")

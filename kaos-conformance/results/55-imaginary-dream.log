@@ -1,0 +1,18 @@
+event    prompt started · abstraction 1 · Answer with exactly the word: unkept
+Rebis agent 1 · Answer with exactly the word: unkept
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    unkept
+answer   unkept
+answer   unkept
+o-[]-o
+RESULT
+result   unkept
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: unkept · abstraction 1
+answer   unkept
+firing   2 · ! dream · abstraction 1
+answer   unkept
+score    1.000
+terms    Answer with exactly the word: unkept
+evidence 0 line(s)

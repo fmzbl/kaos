@@ -1,0 +1,6 @@
+; `?` reads the record — what the run has already learned — and fires nothing.
+; expect: calls 2
+; expect: clean
+; expect: answers
+("Answer with exactly the sentence: The beacon is green."
+ (-> (? beacon) "Repeat the sentence you were given, exactly."))

@@ -1,0 +1,8 @@
+; A space is isolated from the outside, not from itself: a flashback inside one
+; reaches what that space's own earlier stages answered. `?` fires nothing, so
+; the recall costs no call.
+; expect: calls 2
+; expect: clean
+; expect: answers
+{"Answer with exactly the sentence: The beacon is green."
+ (-> (? beacon) "Repeat the sentence you were given, exactly.")}

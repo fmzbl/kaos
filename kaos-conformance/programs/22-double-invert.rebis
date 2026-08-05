@@ -1,0 +1,6 @@
+; `^` is an involution: inverting twice is the original expression.
+; expect: calls 2
+; expect: clean
+; expect: answers
+(^ (^ (-> "Answer with exactly the word: identity"
+          "Repeat what you were given, exactly.")))

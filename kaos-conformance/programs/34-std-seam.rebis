@@ -1,0 +1,6 @@
+; std/seam: the host decides. Unwired, the obtain is diagnosed and the work
+; still runs — a program that asks the host is not a program that requires one.
+; expect: calls >=1
+; expect: diagnostic input
+((# std/seam)
+ (std-await (-> seam "Repeat what you were given, exactly.")))

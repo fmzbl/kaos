@@ -1,0 +1,48 @@
+event    prompt started · abstraction 0 · Answer with exactly the word: one
+Rebis agent 1 · Answer with exactly the word: one
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    one
+answer   one
+event    forward value routed
+event    prompt started · abstraction 0 · Repeat what you were given and add the word two. Nothing else.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   one
+Rebis agent 2 · Repeat what you were given and add the word two. Nothing else.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    RESULT 1: one two
+answer   RESULT 1: one two
+event    forward value routed
+event    prompt started · abstraction 0 · Repeat what you were given and add the word three. Nothing else.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   one
+prompt   
+prompt   RESULT 2:
+prompt   RESULT 1: one two
+Rebis agent 3 · Repeat what you were given and add the word three. Nothing else.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    RESULT 1: one three  
+model    RESULT 2: RESULT 1: one two three
+answer   RESULT 1: one three  
+answer   RESULT 2: RESULT 1: one two three
+o-[]-o
+RESULT
+result   RESULT 1: one three  
+result   RESULT 2: RESULT 1: one two three
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: one · abstraction 0
+answer   one
+firing   2 · ○ prompt Repeat what you were given and add the word two. Nothing else. · abstraction 0
+answer   RESULT 1: one two
+firing   3 · ○ prompt Repeat what you were given and add the word three. Nothing else. · abstraction 0
+answer   RESULT 1: one three  
+RESULT 2: RESULT 1: one two three
+score    1.000
+terms    Repeat what you were given and add the word three. Nothing else.
+evidence 0 line(s)

@@ -1,0 +1,10 @@
+diagnostic undefined macro `never-defined`
+o-[]-o
+RESULT
+result   nothing
+TRACE
+score    1.000
+terms    some argument
+evidence 0 line(s)
+DIAGNOSTICS
+diagnostic undefined macro `never-defined`

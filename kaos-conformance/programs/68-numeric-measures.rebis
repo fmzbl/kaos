@@ -1,0 +1,8 @@
+; The reflective pole: a program reading how much it has spent. One prompt
+; fires, then the plane counts it — so the answer is the count of the run's own
+; calls, and the counting itself adds none.
+; expect: calls 1
+; expect: clean
+; expect: answers
+("Answer with exactly the word: worked"
+ |([calls] <>)|)

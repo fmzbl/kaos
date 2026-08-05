@@ -1,0 +1,21 @@
+answer   nothing
+event    forward value routed
+event    prompt started · abstraction 0 · Answer with exactly the word: degraded
+prompt   
+prompt   INPUT:
+Rebis agent 1 · Answer with exactly the word: degraded
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    degraded
+answer   degraded
+o-[]-o
+RESULT
+result   degraded
+TRACE
+firing   1 · ? flashback nothing-was-ever-said-about-this · abstraction 0
+answer   nothing
+firing   2 · ○ prompt Answer with exactly the word: degraded · abstraction 0
+answer   degraded
+score    1.000
+terms    Answer with exactly the word: degraded
+evidence 0 line(s)

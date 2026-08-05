@@ -1,0 +1,20 @@
+; `+` in the numeric plane, and the crossing back out.
+;
+; Two claims at once. The framing reaches every quantity WRITTEN inside it, so
+; the sum is 11 + 12 + 13 rather than 10 + 6 — and the answer reaches the model
+; as text, which is the only way a computed number gets into what is asked.
+;
+; A name is not written, so it is not shifted: the 5 takes the framing once
+; where it stands, and both uses of `n` read what it settled to. If either rule
+; slipped, the arithmetic in the prompt would be wrong and the model would be
+; asked something else — so the claim is pinned to the PROMPT, which is the
+; deterministic half. A small model is unreliable at echoing, and that is not a
+; property of the language.
+; expect: calls 1
+; expect: clean
+; expect: contains 36 30
+; expect: answers
+($ "Reply with exactly the two numbers below, separated by one space, and nothing else.\n"
+   |(+ 10 ([sum] 1 2 3))|
+   " "
+   |(+ 10 (= n 5 ($ n n)))|)

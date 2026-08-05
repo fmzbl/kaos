@@ -1,0 +1,3 @@
+; An undefined macro is reported and the program continues.
+; expect: diagnostic undefined
+(never-defined "some argument")

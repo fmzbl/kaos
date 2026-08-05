@@ -1,0 +1,33 @@
+event    macro wrap expanded · 255 remaining
+event    prompt started · abstraction 1 · Answer with exactly the word: spliced
+Rebis agent 1 · Answer with exactly the word: spliced
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    spliced
+answer   spliced
+event    forward value routed
+event    prompt started · abstraction 1 · Repeat what you were given, exactly.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   spliced
+Rebis agent 2 · Repeat what you were given, exactly.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    RESULT 1:
+model    spliced
+answer   RESULT 1:
+answer   spliced
+o-[]-o
+RESULT
+result   RESULT 1:
+result   spliced
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: spliced · abstraction 1
+answer   spliced
+firing   2 · ○ prompt Repeat what you were given, exactly. · abstraction 1
+answer   RESULT 1:
+spliced
+score    1.000
+terms    Repeat what you were given, exactly.
+evidence 0 line(s)

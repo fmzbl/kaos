@@ -1,0 +1,44 @@
+event    prompt started · abstraction 0 · Answer with exactly the word: alpha
+Rebis agent 1 · Answer with exactly the word: alpha
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    alpha
+answer   alpha
+event    forward value routed
+event    prompt started · abstraction 0 · Repeat the word you were given, exactly.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   alpha
+Rebis agent 2 · Repeat the word you were given, exactly.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    alpha
+answer   alpha
+event    prompt started · abstraction 1 · Answer with exactly the single character: 1
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   RESULT 1:
+prompt   alpha
+prompt   
+prompt   RESULT 2:
+prompt   alpha
+Rebis agent 3 · Answer with exactly the single character: 1
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    1
+answer   1
+o-[]-o
+RESULT
+result   alpha
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: alpha · abstraction 0
+answer   alpha
+firing   2 · ○ prompt Repeat the word you were given, exactly. · abstraction 0
+answer   alpha
+firing   3 · ○ prompt Answer with exactly the single character: 1 · abstraction 1
+answer   1
+score    1.000
+terms    Repeat the word you were given, exactly.
+evidence 0 line(s)

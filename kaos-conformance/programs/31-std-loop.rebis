@@ -1,0 +1,9 @@
+; std/loops: a macro calling itself through a lazy gate. One step per round,
+; and the value the stop rule judged is the value returned.
+; expect: calls >=3
+; expect: clean
+; expect: answers
+((# std/loops)
+ (~ tighten (v) (-> v "Shorten this by one word. Return only the result."))
+ (~ short-enough (v) (-> v "Is this three words or fewer? Answer exactly 1 or 0."))
+ (std-loop "A rather long and quite verbose sentence" tighten short-enough))

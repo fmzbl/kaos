@@ -1,0 +1,30 @@
+event    module std/canon loaded · 7 definition(s)
+event    macro std-binary expanded · 255 remaining
+event    prompt started · abstraction 1 · Is the number seven greater than three?
+Rebis agent 1 · Is the number seven greater than three?
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    Yes
+answer   Yes
+event    forward value routed
+event    prompt started · abstraction 1 · Return exactly one token: 0 or 1. Use 1 for true or accepted and 0 for false or rejected; do not add an explanation.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   Yes
+Rebis agent 2 · Return exactly one token: 0 or 1. Use 1 for true or accepted and 0 for false or rejected; do not add an explanation.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    1
+answer   1
+o-[]-o
+RESULT
+result   1
+TRACE
+firing   1 · ○ prompt Is the number seven greater than three? · abstraction 1
+answer   Yes
+firing   2 · ○ prompt Return exactly one token: 0 or 1. Use 1 for true or accepted and 0 for false or rejected; do not add an explanation. · abstraction 1
+answer   1
+score    1.000
+terms    Return exactly one token: 0 or 1.  Use 1 for true or accepted and 0 for false or rejected;  do not add an explanation.
+evidence 0 line(s)

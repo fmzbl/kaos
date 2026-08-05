@@ -1,0 +1,15 @@
+; A mediator of pure SYMBOLS judges deterministically — no model fires for it.
+;
+; The mediator's tokens must appear in the ANSWERS, directly or one
+; co-occurrence hop away: resolve_mediation scores each answer by round-trip
+; holonomy against the mediator's own words, through a record built from the
+; answers themselves. A mediator sharing no vocabulary with them scores every
+; answer 1.0, refuses all of them, and the square yields nothing — which is
+; correct behaviour and a useless test. Hence branches that answer in
+; sentences, both containing the word the mediator judges on.
+; expect: calls 2
+; expect: clean
+; expect: answers
+([failure]
+  "Answer with exactly: the failure is reproducible on every run"
+  "Answer with exactly: the failure appears at random")

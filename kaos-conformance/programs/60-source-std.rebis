@@ -1,0 +1,10 @@
+; std/meta: the program hands itself to a worker, and reading it is free.
+; expect: calls 1
+; expect: clean
+; expect: answers
+; expect: contains std-reflected
+((# std/source)
+ (~ count-prompts (p)
+    ($ "Reply with the number of quoted strings in this Rebis program, and "
+       "nothing else. Program: " p))
+ (std-reflected count-prompts))

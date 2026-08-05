@@ -1,0 +1,7 @@
+; Each answer becomes the next stage's INPUT.
+; expect: calls 2
+; expect: clean
+; expect: answers
+; expect: contains INPUT:
+(-> "Answer with exactly the word: seed"
+    "Repeat the word you were given, exactly, and nothing else.")

@@ -1,0 +1,33 @@
+event    syntax orientation inverted
+event    prompt started · abstraction 0 · Answer with exactly the word: inverted
+Rebis agent 1 · Answer with exactly the word: inverted
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    inverted
+answer   inverted
+event    backflow value routed
+event    prompt started · abstraction 0 · Repeat what you were given, exactly, and nothing else.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   inverted
+Rebis agent 2 · Repeat what you were given, exactly, and nothing else.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    RESULT 1:
+model    inverted
+answer   RESULT 1:
+answer   inverted
+o-[]-o
+RESULT
+result   RESULT 1:
+result   inverted
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: inverted · abstraction 0
+answer   inverted
+firing   2 · ○ prompt Repeat what you were given, exactly, and nothing else. · abstraction 0
+answer   RESULT 1:
+inverted
+score    1.000
+terms    Repeat what you were given, exactly, and nothing else.
+evidence 0 line(s)

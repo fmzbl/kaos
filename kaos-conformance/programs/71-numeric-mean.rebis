@@ -1,0 +1,18 @@
+; The crossings a fold could not give you: a count, a magnitude, and a grid.
+;
+; `[count]` is the size of a sample without reading it — the piece a mean needs
+; and a fold cannot supply. `[round]` is the way back down from exactness:
+; Newton's method on nine converges to a value that IS three to eleven figures
+; and prints as a ratio of eleven-digit integers, and the caller names the grid
+; rather than the plane choosing one.
+;
+; Mean of 2, 4, 9 is 5; the rounded Newton value is 3. All of it free.
+; expect: calls 1
+; expect: clean
+; expect: contains 5 3
+; expect: answers
+((# std/measure)
+ ($ "Reply with exactly the two numbers below, separated by one space, and nothing else.\n"
+    |([product] ([sum] 2 4 9) ([reciprocal] ([count] 2 4 9)))|
+    " "
+    (std-coarse (std-divide 76293945313 25431315104) 100)))

@@ -1,0 +1,32 @@
+event    module std/measure loaded · 22 definition(s)
+event    macro std-at-least expanded · 255 remaining
+event    macro std-times expanded · 254 remaining
+event    macro std-fold-times expanded · 253 remaining
+event    macro std-add expanded · 252 remaining
+event    macro std-fold-times expanded · 251 remaining
+event    macro std-less-one expanded · 250 remaining
+event    macro std-add expanded · 249 remaining
+event    macro std-fold-times expanded · 248 remaining
+event    macro std-less-one expanded · 247 remaining
+event    macro std-less-one expanded · 246 remaining
+event    macro std-add expanded · 245 remaining
+event    macro std-fold-times expanded · 244 remaining
+event    macro std-less-one expanded · 243 remaining
+event    macro std-less-one expanded · 242 remaining
+event    macro std-less-one expanded · 241 remaining
+event    binary gate selected 1 branch
+event    prompt started · abstraction 2 · Answer with exactly the word: enough
+Rebis agent 1 · Answer with exactly the word: enough
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    enough
+answer   enough
+o-[]-o
+RESULT
+result   enough
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: enough · abstraction 2
+answer   enough
+score    1.000
+terms    Answer with exactly the word: enough
+evidence 0 line(s)

@@ -1,0 +1,12 @@
+; std/imaginary's shapes compose: two options weighed privately, one verdict
+; kept. A prompt mediator, deliberately — a symbol mediator judges by shared
+; vocabulary with the answers (see 23-symbol-mediator), and two deliberately
+; unrelated options share none, so it would refuse both and prove nothing here.
+; expect: calls 3
+; expect: clean
+; expect: answers
+((# std/imaginary)
+ (std-weighed
+   "Reply with the better of the two words you were given, and nothing else."
+   "Answer with exactly the word: phlogiston"
+   "Answer with exactly the word: cobalt"))

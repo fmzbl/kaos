@@ -1,0 +1,12 @@
+; `<>` in an executable position IS the program, so it runs: genuine self-
+; application, with no base case of its own. The gate is what bounds it — the
+; program re-enters itself only while the host keeps answering 0.
+;
+; Two calls minimum: the question, then the branch. A host that answers 1 first
+; stops immediately, which is why this asserts a floor rather than a count.
+; expect: calls >=2
+; expect: clean
+; expect: answers
+(% "Answer with exactly the single character: 1"
+   "Answer with exactly the word: done"
+   <>)

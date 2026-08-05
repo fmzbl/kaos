@@ -1,0 +1,10 @@
+; `*` corrects the record: a later recall returns the correction, not what it
+; replaced. Three calls — state it, correct it, then recall and repeat.
+;
+; The recall is free, so the count is what proves `*` fired nothing of its own.
+; expect: calls 3
+; expect: clean
+; expect: answers
+("Answer with exactly the sentence: The beacon is red."
+ (* beacon "Answer with exactly the sentence: The beacon is green.")
+ (-> (? beacon) "Repeat the sentence you were given, exactly."))

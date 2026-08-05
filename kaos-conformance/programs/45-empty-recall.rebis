@@ -1,0 +1,6 @@
+; A topic the record never saw recalls nothing — and nothing does not flow.
+; A program degrades to its memoryless form rather than asserting a false one.
+; expect: calls 1
+; expect: clean
+(-> (? nothing-was-ever-said-about-this)
+    "Answer with exactly the word: degraded")

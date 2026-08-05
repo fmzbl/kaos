@@ -1,0 +1,28 @@
+event    prompt started · abstraction 0 · Answer with exactly the word: seed
+Rebis agent 1 · Answer with exactly the word: seed
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    seed
+answer   seed
+event    forward value routed
+event    prompt started · abstraction 0 · Repeat the word you were given, exactly, and nothing else.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   seed
+Rebis agent 2 · Repeat the word you were given, exactly, and nothing else.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    seed
+answer   seed
+o-[]-o
+RESULT
+result   seed
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: seed · abstraction 0
+answer   seed
+firing   2 · ○ prompt Repeat the word you were given, exactly, and nothing else. · abstraction 0
+answer   seed
+score    1.000
+terms    Repeat the word you were given, exactly, and nothing else.
+evidence 0 line(s)

@@ -1,0 +1,6 @@
+; `^` exchanges arrow direction as a pure syntax transformation.
+; expect: calls 2
+; expect: clean
+; expect: answers
+(^ (-> "Repeat what you were given, exactly, and nothing else."
+       "Answer with exactly the word: inverted"))

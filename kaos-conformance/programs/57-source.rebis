@@ -1,0 +1,14 @@
+; `<>` is source: the program itself, as syntax. As a `$` operand it contributes its
+; canonical text, without firing and at no cost.
+;
+; The expectation matches the SOURCE, not the character: `contains <>` would also
+; match an unresolved `<>` sitting in the prompt, and did — it passed once
+; against a stale binary in which the feature did nothing at all. `($` can only
+; be there if the canonical program text actually arrived.
+; expect: calls 1
+; expect: clean
+; expect: answers
+; expect: contains Program: ($
+($ "Reply with the number of times the word oxygen appears in this program, "
+   "and nothing else. Program: " <> " The word oxygen appears twice here: "
+   "oxygen oxygen.")

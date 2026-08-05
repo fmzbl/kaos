@@ -1,0 +1,9 @@
+; Branches are independent; the mediator sees their ordered results.
+; expect: calls 3
+; expect: clean
+; expect: answers
+; expect: contains RESULT 1:
+; expect: contains RESULT 2:
+(["Reply with the two words you were given, separated by one space, nothing else."]
+  "Answer with exactly the word: left"
+  "Answer with exactly the word: right")

@@ -1,0 +1,16 @@
+; Every operator that can appear in one program, at once.
+;
+; Five calls: the dream, the gate's condition, one per branch of the square, and
+; the mediation. The subject is bound, so both branches read the same one — that
+; is the whole reason the count is five and not seven.
+; expect: calls 5
+; expect: clean
+; expect: answers
+((# std/shape)
+ (+ "Answer in as few words as possible."
+    (= subject (! "Answer with exactly: the retry queue")
+       (% "Answer with exactly the single character: 1"
+          (["Reply with both readings, separated by ' | ', nothing else."]
+            (-> subject "Name one failure mode of this.")
+            (^ (-> "Name one strength of this." subject)))
+          "Answer with exactly the word: unreachable"))))

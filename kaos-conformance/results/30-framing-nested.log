@@ -1,0 +1,29 @@
+event    prompt started · abstraction 2 · Always answer in lowercase.
+prompt   
+prompt   Answer with the word outer.
+Rebis agent 1 · Always answer in lowercase.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    outer
+answer   outer
+event    prompt started · abstraction 2 · Always answer in lowercase.
+prompt   
+prompt   Always end with a full stop.
+prompt   
+prompt   Answer with the word inner.
+Rebis agent 2 · Always answer in lowercase.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    inner.
+answer   inner.
+o-[]-o
+RESULT
+result   inner.
+TRACE
+firing   1 · ○ prompt Answer with the word outer. · abstraction 2
+answer   outer
+firing   2 · ○ prompt Answer with the word inner. · abstraction 2
+answer   inner.
+score    1.000
+terms    Answer with the word inner.
+evidence 0 line(s)

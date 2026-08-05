@@ -1,0 +1,24 @@
+event    prompt started · abstraction 0 · Write a Rebis program. In Rebis a quoted string is a prompt that fires a model, (-> a b) routes a's answer into b, and ([m] a b) runs branches and lets mediator m combine them. Write a program with exactly one quoted prompt, asking for the capital of France. Reply with ONLY the program — no explanation, no code fences.
+Rebis agent 1 · Write a Rebis program. In Rebis a quoted string is a prompt that fires a model, (-> a b) routes a's answer into b, and ([m] a b) runs branches and lets mediator m combine them. Write a program with exactly one quoted prompt, asking for the capital of France. Reply with ONLY the program — no explanation, no code fences.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    "Capital of France?"
+answer   "Capital of France?"
+event    macro >< expanded · 255 remaining
+event    prompt started · abstraction 0 · Capital of France?
+Rebis agent 2 · Capital of France?
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    Paris
+answer   Paris
+o-[]-o
+RESULT
+result   Paris
+TRACE
+firing   1 · ○ prompt Write a Rebis program. In Rebis a quoted string is a prompt that fires a model, (-> a b) routes a's answer into b, and ([m] a b) runs branches and lets mediator m combine them. Write a program with exactly one quoted prompt, asking for the capital of France. Reply with ONLY the program — no explanation, no code fences. · abstraction 0
+answer   "Capital of France?"
+firing   2 · ○ prompt Capital of France? · abstraction 0
+answer   Paris
+score    1.000
+terms    Capital of France?
+evidence 0 line(s)

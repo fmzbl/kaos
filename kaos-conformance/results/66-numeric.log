@@ -1,0 +1,15 @@
+event    prompt started · abstraction 0 · Answer with exactly the word: alpha 14
+Rebis agent 1 · Answer with exactly the word: alpha 14
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    alpha 14
+answer   alpha 14
+o-[]-o
+RESULT
+result   alpha 14
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: alpha 14 · abstraction 0
+answer   alpha 14
+score    1.000
+terms      Answer with exactly the word: alpha
+evidence 0 line(s)

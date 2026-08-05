@@ -1,0 +1,6 @@
+; A macro binds SYNTAX: the parameter is substituted structurally.
+; expect: calls 2
+; expect: clean
+; expect: answers
+(~ twice (work) (-> work "Repeat what you were given, exactly."))
+(twice "Answer with exactly the word: expanded")

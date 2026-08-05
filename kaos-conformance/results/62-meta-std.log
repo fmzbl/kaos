@@ -1,0 +1,18 @@
+event    module std/meta loaded · 32 definition(s)
+event    macro std-drafted expanded · 255 remaining
+event    prompt started · abstraction 2 · Reply with exactly this Rebis program and nothing else, no fences: "Answer with exactly the word: drafted"
+Rebis agent 1 · Reply with exactly this Rebis program and nothing else, no fences: "Answer with exactly the word: drafted"
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
+model turn 1 · complete response
+model    drafted
+answer   drafted
+event    macro >< expanded · 254 remaining
+o-[]-o
+RESULT
+result   nothing
+TRACE
+firing   1 · ○ prompt Reply with exactly this Rebis program and nothing else, no fences: "Answer with exactly the word: drafted" · abstraction 2
+answer   drafted
+score    1.000
+terms    drafted
+evidence 1 line(s)

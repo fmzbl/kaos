@@ -1,0 +1,38 @@
+event    plan bound · (-> "Answer with exactly the word: one" "Reply with exactly the word: two")
+event    macro plan expanded · 255 remaining
+event    prompt started · abstraction 1 · Answer with exactly the word: one
+Rebis agent 1 · Answer with exactly the word: one
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    one
+answer   one
+event    forward value routed
+event    prompt started · abstraction 1 · Reply with exactly the word: two
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   one
+Rebis agent 2 · Reply with exactly the word: two
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    two
+answer   two
+event    prompt started · abstraction 1 · Reply with exactly the word: done. This was held: (-> "Answer with exactly the word: one" "Reply with exactly the word: two")
+Rebis agent 3 · Reply with exactly the word: done. This was held: (-> "Answer with exactly the word: one" "Reply with exactly the word: two")
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    done
+answer   done
+o-[]-o
+RESULT
+result   done
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: one · abstraction 1
+answer   one
+firing   2 · ○ prompt Reply with exactly the word: two · abstraction 1
+answer   two
+firing   3 · ○ prompt Reply with exactly the word: done. This was held: (-> "Answer with exactly the word: one" "Reply with exactly the word: two") · abstraction 1
+answer   done
+score    1.000
+terms    Reply with exactly the word: done. This was held:  plan
+evidence 0 line(s)

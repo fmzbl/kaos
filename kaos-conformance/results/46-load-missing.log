@@ -1,0 +1,21 @@
+diagnostic no input available for port `programs/no-such-file.txt`
+event    forward value routed
+event    prompt started · abstraction 0 · Answer with exactly the word: continued
+prompt   
+prompt   INPUT:
+Rebis agent 1 · Answer with exactly the word: continued
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    continued
+answer   continued
+o-[]-o
+RESULT
+result   continued
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: continued · abstraction 0
+answer   continued
+score    1.000
+terms    Answer with exactly the word: continued
+evidence 0 line(s)
+DIAGNOSTICS
+diagnostic no input available for port `programs/no-such-file.txt`

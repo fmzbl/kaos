@@ -1,0 +1,31 @@
+event    prompt started · abstraction 1 · Answer with exactly the word: outer
+Rebis agent 1 · Answer with exactly the word: outer
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
+model turn 1 · complete response
+model    outer
+answer   outer
+event    prompt started · abstraction 1 · Answer with exactly the word: inner
+Rebis agent 2 · Answer with exactly the word: inner
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
+model turn 1 · complete response
+model    inner
+answer   inner
+event    prompt started · abstraction 1 · Answer with exactly the word: after
+Rebis agent 3 · Answer with exactly the word: after
+model    generating turn 1 · ollama:llama3.2:3b · NORMAL · limit 600s
+model turn 1 · complete response
+model    after
+answer   after
+o-[]-o
+RESULT
+result   after
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: outer · abstraction 1
+answer   outer
+firing   2 · ○ prompt Answer with exactly the word: inner · abstraction 1
+answer   inner
+firing   3 · ○ prompt Answer with exactly the word: after · abstraction 1
+answer   after
+score    1.000
+terms    Answer with exactly the word: after
+evidence 0 line(s)

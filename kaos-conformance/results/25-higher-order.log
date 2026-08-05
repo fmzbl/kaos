@@ -1,0 +1,30 @@
+event    macro apply-twice expanded · 255 remaining
+event    macro shout expanded · 254 remaining
+event    prompt started · abstraction 1 · Answer with exactly the word: applied
+Rebis agent 1 · Answer with exactly the word: applied
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    applied
+answer   applied
+event    forward value routed
+event    prompt started · abstraction 1 · Repeat what you were given in capitals.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   applied
+Rebis agent 2 · Repeat what you were given in capitals.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    APPLIED
+answer   APPLIED
+o-[]-o
+RESULT
+result   APPLIED
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: applied · abstraction 1
+answer   applied
+firing   2 · ○ prompt Repeat what you were given in capitals. · abstraction 1
+answer   APPLIED
+score    1.000
+terms    Repeat what you were given in capitals.
+evidence 0 line(s)

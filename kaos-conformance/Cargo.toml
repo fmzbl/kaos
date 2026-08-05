@@ -1,0 +1,11 @@
+[package]
+name = "kaos-conformance"
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "End-to-end conformance for the Rebis language: every operator, run against a real model."
+
+[dependencies]
+rebis-lang.workspace = true
+kaos-agent = { path = "../kaos-agent", features = ["api"] }
+kaos-core = { path = "../kaos-core" }

@@ -1,0 +1,9 @@
+; A long arrow chain: every stage is one call, and the count is exact.
+; expect: calls 5
+; expect: clean
+; expect: answers
+(-> "Answer with exactly the digit: 1"
+    "Add one to the number you were given. Answer with only the digit."
+    "Add one to the number you were given. Answer with only the digit."
+    "Add one to the number you were given. Answer with only the digit."
+    "Add one to the number you were given. Answer with only the digit.")

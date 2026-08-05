@@ -1,0 +1,5 @@
+; `&` obtains a value from outside. Under a host that wires nothing it is
+; diagnosed and the program continues.
+; expect: calls 1
+; expect: diagnostic input
+(-> (&) "Repeat what you were given, exactly.")

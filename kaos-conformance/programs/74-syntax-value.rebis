@@ -1,0 +1,17 @@
+; Syntax is a value, and `eval` needed no operator.
+;
+; `'A` answers with A as syntax. A name holds it, `$` interpolates it, and
+; calling that name RUNS it — which is eval, spelled with two operators the
+; language already had.
+;
+; Three calls: the two stages of the evaluated arrow, and the report that says
+; what was held. The count is the proof that holding a program costs nothing and
+; running it costs exactly what the program costs.
+; expect: calls 3
+; expect: clean
+; expect: contains held: (-> "Answer with exactly the word: one"
+; expect: answers
+(= plan '(-> "Answer with exactly the word: one"
+             "Reply with exactly the word: two")
+   ((plan)
+    ($ "Reply with exactly the word: done. This was held: " plan)))

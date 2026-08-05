@@ -1,0 +1,7 @@
+; A dream inside a square branch still marks its answer.
+; expect: calls 3
+; expect: clean
+; expect: answers
+(["Reply with both words, separated by one space, nothing else."]
+  (! "Answer with exactly the word: kept")
+  "Answer with exactly the word: plain")

@@ -1,0 +1,8 @@
+; The other branch: a condition answering 0 takes the second arm.
+; expect: calls 2
+; expect: clean
+; expect: answers
+; expect: absent taken
+(% "Answer with exactly the single character: 0"
+   "Answer with exactly the word: taken"
+   "Answer with exactly the word: fallback")

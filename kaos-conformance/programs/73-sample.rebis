@@ -1,0 +1,18 @@
+; std/sample: statistics, and all of it free.
+;
+; The mean of 2, 4 and 9 is 5; 1 in 3 is 33 percent; 7 sits halfway through the
+; range 5 to 9. Three quantities computed, none of them fired, and all three
+; written into the single prompt the program pays for.
+;
+; The sample is written at the mediator, which takes as many branches as you
+; give it — so no macro here had to know how many there were, and none of them
+; is arity-locked.
+; expect: calls 1
+; expect: clean
+; expect: contains 5 33 1/2
+; expect: answers
+((# std/sample)
+ ($ "Reply with exactly the three values below, separated by single spaces, and nothing else.\n"
+    |(std-mean ([sum] 2 4 9) ([count] 2 4 9))| " "
+    |(std-percent 1 3)| " "
+    |(std-scaled 7 5 9)|))

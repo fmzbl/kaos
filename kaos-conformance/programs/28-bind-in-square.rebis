@@ -1,0 +1,8 @@
+; A bound value visible to both branches of a square — one firing, two readers.
+; expect: calls 4
+; expect: clean
+; expect: answers
+(= subject "Answer with exactly the word: shared"
+  (["Reply with both readings, separated by ' | ', nothing else."]
+    (-> subject "Say the word you were given, then the word first.")
+    (-> subject "Say the word you were given, then the word second.")))

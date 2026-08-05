@@ -1,0 +1,6 @@
+; A path climbing out of the run's directory is REFUSED. A Rebis program is a
+; thing people share, so running one must not be an act of trust it does not
+; look like.
+; expect: diagnostic input
+(-> (&: "../../../etc/passwd")
+    "Answer with exactly the word: refused")

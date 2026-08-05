@@ -1,0 +1,7 @@
+; A chain of three: each stage sees only its predecessor's answer.
+; expect: calls 3
+; expect: clean
+; expect: answers
+(-> "Answer with exactly the word: one"
+    "Repeat what you were given and add the word two. Nothing else."
+    "Repeat what you were given and add the word three. Nothing else.")

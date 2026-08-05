@@ -1,0 +1,30 @@
+event    module std/shape loaded · 4 definition(s)
+event    macro std-one-word expanded · 255 remaining
+event    prompt started · abstraction 1 · Name one primary colour.
+Rebis agent 1 · Name one primary colour.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    Red
+answer   Red
+event    forward value routed
+event    prompt started · abstraction 1 · Answer with exactly one word.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   Red
+Rebis agent 2 · Answer with exactly one word.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    Red
+answer   Red
+o-[]-o
+RESULT
+result   Red
+TRACE
+firing   1 · ○ prompt Name one primary colour. · abstraction 1
+answer   Red
+firing   2 · ○ prompt Answer with exactly one word. · abstraction 1
+answer   Red
+score    1.000
+terms    Answer with exactly one word.
+evidence 0 line(s)

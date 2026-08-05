@@ -1,0 +1,52 @@
+event    module std/flow loaded · 6 definition(s)
+event    macro std-fan-three expanded · 255 remaining
+Rebis agent 1 · Answer with exactly the word: north
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+Rebis agent 2 · Answer with exactly the word: south
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+Rebis agent 3 · Answer with exactly the word: east
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    east
+model turn 1 · complete response
+model    north
+model turn 1 · complete response
+model    south
+event    prompt started · abstraction 2 · Answer with exactly the word: north
+answer   north
+event    prompt started · abstraction 2 · Answer with exactly the word: south
+answer   south
+event    prompt started · abstraction 2 · Answer with exactly the word: east
+answer   east
+event    mediator started · 3 branch(es)
+event    prompt started · abstraction 2 · Reply with the three answers, separated by ' | ', nothing else.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   north
+prompt   
+prompt   RESULT 2:
+prompt   south
+prompt   
+prompt   RESULT 3:
+prompt   east
+Rebis agent 4 · Reply with the three answers, separated by ' | ', nothing else.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    north | south | east
+answer   north | south | east
+o-[]-o
+RESULT
+result   north | south | east
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: north · abstraction 2
+answer   north
+firing   2 · ○ prompt Answer with exactly the word: south · abstraction 2
+answer   south
+firing   3 · ○ prompt Answer with exactly the word: east · abstraction 2
+answer   east
+firing   4 · ○ prompt Reply with the three answers, separated by ' | ', nothing else. · abstraction 2
+answer   north | south | east
+score    1.000
+terms    Reply with the three answers, separated by ' | ', nothing else.
+evidence 0 line(s)

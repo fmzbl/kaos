@@ -1,0 +1,92 @@
+event    module std/shape loaded · 4 definition(s)
+event    prompt started · abstraction 1 · Answer in as few words as possible.
+prompt   
+prompt   Answer with exactly: the retry queue
+Rebis agent 1 · Answer in as few words as possible.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    the retry queue
+answer   the retry queue
+answer   the retry queue
+event    subject bound · the retry queue
+event    prompt started · abstraction 2 · Answer in as few words as possible.
+prompt   
+prompt   Answer with exactly the single character: 1
+Rebis agent 2 · Answer in as few words as possible.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    1
+answer   1
+event    binary gate selected 1 branch
+Rebis agent 3 · Answer in as few words as possible.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+Rebis agent 4 · Answer in as few words as possible.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    infinite retry loop
+model turn 1 · complete response
+model    reliability
+event    forward value routed
+event    prompt started · abstraction 3 · Answer in as few words as possible.
+prompt   
+prompt   Name one failure mode of this.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   the retry queue
+answer   infinite retry loop
+event    syntax orientation inverted
+event    backflow value routed
+event    prompt started · abstraction 3 · Answer in as few words as possible.
+prompt   
+prompt   Name one strength of this.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   the retry queue
+answer   reliability
+event    mediator started · 2 branch(es)
+event    prompt started · abstraction 3 · Answer in as few words as possible.
+prompt   
+prompt   Reply with both readings, separated by ' | ', nothing else.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   the retry queue
+prompt   
+prompt   RESULT 2:
+prompt   infinite retry loop
+prompt   
+prompt   RESULT 3:
+prompt   the retry queue
+prompt   
+prompt   RESULT 4:
+prompt   reliability
+Rebis agent 5 · Answer in as few words as possible.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    the retry queue | infinite retry loop
+answer   the retry queue | infinite retry loop
+o-[]-o
+RESULT
+result   the retry queue | infinite retry loop
+TRACE
+firing   1 · ○ prompt Answer with exactly: the retry queue · abstraction 1
+answer   the retry queue
+firing   2 · ! dream · abstraction 1
+answer   the retry queue
+firing   3 · ○ prompt Answer with exactly the single character: 1 · abstraction 2
+answer   1
+firing   4 · & input subject · abstraction 3
+answer   the retry queue
+firing   5 · ○ prompt Name one failure mode of this. · abstraction 3
+answer   infinite retry loop
+firing   6 · & input subject · abstraction 3
+answer   the retry queue
+firing   7 · ○ prompt Name one strength of this. · abstraction 3
+answer   reliability
+firing   8 · ○ prompt Reply with both readings, separated by ' | ', nothing else. · abstraction 3
+answer   the retry queue | infinite retry loop
+score    1.000
+terms    Reply with both readings, separated by ' | ', nothing else.
+evidence 0 line(s)

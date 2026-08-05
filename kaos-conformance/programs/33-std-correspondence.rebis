@@ -1,0 +1,19 @@
+; std/correspondence: one answer shown to three readers. Four calls, not six —
+; the subject is bound before the readers, so all three read the same one.
+;
+; The mediator symbol is a TOPIC, not a meta-word, and that is the part worth
+; getting right. A symbol mediator picks by holonomy — `1 - score` of the answer
+; flowed back onto the mediator's own content tokens — so `[consensus]` asks
+; which answer best explains the word "consensus", which no answer about a
+; scheduler ever will. Every answer scores 1.0, every answer is refused, and the
+; square yields nothing. `[scheduler-risk-cost-gain]` shares vocabulary with what
+; the readers were asked, which is what makes the choice mean something. The
+; reference guide's own example is `[verified-root-cause]` for this reason.
+; expect: calls 4
+; expect: clean
+; expect: answers
+((# std/correspondence)
+ (~ risk (v) (-> v "Name one risk in this and say why it matters, in one sentence."))
+ (~ cost (v) (-> v "Name one cost of doing this and who bears it, in one sentence."))
+ (~ gain (v) (-> v "Name one gain from this and who sees it, in one sentence."))
+ (std-share scheduler-risk-cost-gain risk cost gain "Answer with exactly: rewrite the scheduler"))

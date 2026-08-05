@@ -1,0 +1,12 @@
+; std/canon: the 0/1 protocol every gate in the library rests on.
+;
+; Two firings, and the module's own cost note says so: the question runs, then
+; the protocol prompt reads its answer as INPUT and normalizes it to an exact
+; token. Asserting one call here asserted that `$` fires — it does not; it
+; assembles the instruction as text at expansion time, which is why the
+; WORDING is free and the reading is not.
+; expect: calls 2
+; expect: clean
+; expect: answers
+((# std/canon)
+ (std-binary "Is the number seven greater than three?"))

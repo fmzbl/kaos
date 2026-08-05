@@ -1,0 +1,27 @@
+event    prompt started · abstraction 1 · Reply with exactly this and nothing else: ("SHOULD-NOT-RUN")
+Rebis agent 1 · Reply with exactly this and nothing else: ("SHOULD-NOT-RUN")
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    SHOULD-NOT-RUN
+answer   SHOULD-NOT-RUN
+event    answer bound · SHOULD-NOT-RUN
+diagnostic undefined macro `answer`
+event    prompt started · abstraction 1 · Reply with exactly the word: bounded
+Rebis agent 2 · Reply with exactly the word: bounded
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    bounded
+answer   bounded
+o-[]-o
+RESULT
+result   bounded
+TRACE
+firing   1 · ○ prompt Reply with exactly this and nothing else: ("SHOULD-NOT-RUN") · abstraction 1
+answer   SHOULD-NOT-RUN
+firing   2 · ○ prompt Reply with exactly the word: bounded · abstraction 1
+answer   bounded
+score    1.000
+terms    Reply with exactly the word: bounded
+evidence 0 line(s)
+DIAGNOSTICS
+diagnostic undefined macro `answer`

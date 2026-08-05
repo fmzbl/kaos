@@ -1,0 +1,34 @@
+event    macro outer expanded · 255 remaining
+event    macro inner expanded · 254 remaining
+event    prompt started · abstraction 1 · Answer with exactly the word: nested
+Rebis agent 1 · Answer with exactly the word: nested
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    nested
+answer   nested
+event    forward value routed
+event    prompt started · abstraction 1 · Repeat what you were given, exactly.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   nested
+Rebis agent 2 · Repeat what you were given, exactly.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    RESULT 1:
+model    nested
+answer   RESULT 1:
+answer   nested
+o-[]-o
+RESULT
+result   RESULT 1:
+result   nested
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: nested · abstraction 1
+answer   nested
+firing   2 · ○ prompt Repeat what you were given, exactly. · abstraction 1
+answer   RESULT 1:
+nested
+score    1.000
+terms    Repeat what you were given, exactly.
+evidence 0 line(s)

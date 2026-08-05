@@ -1,0 +1,6 @@
+; Six levels of indentation: the runtime iterates tail positions rather than
+; recursing, so depth costs no stack.
+; expect: calls 1
+; expect: clean
+; expect: answers
+((((((("Answer with exactly the word: deep")))))))

@@ -1,0 +1,8 @@
+; The control for 52: the identical program in parentheses.
+; Same call count, same shapes — the difference is only in the record, which a
+; log cannot show. tests/operators.rs is where the two are compared.
+; expect: calls 2
+; expect: clean
+; expect: answers
+("Answer with exactly the word: phlogiston"
+ "Answer with exactly the word: oxygen")

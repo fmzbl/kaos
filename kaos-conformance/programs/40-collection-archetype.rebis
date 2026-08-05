@@ -1,0 +1,7 @@
+; The collection: a module outside the standard library.
+; expect: calls >=2
+; expect: answers
+((# archetypes/core)
+ (arch-name-pattern
+   "Name the pattern in one phrase."
+   "Answer with exactly: three retries then give up"))

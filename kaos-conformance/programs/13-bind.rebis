@@ -1,0 +1,7 @@
+; `=` fires its value ONCE however often the name is used. The whole point:
+; the value judged is the value returned.
+; expect: calls 2
+; expect: clean
+; expect: answers
+(= subject "Answer with exactly the word: bound"
+   ($ "Report this word twice: " subject " and " subject))

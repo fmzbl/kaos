@@ -1,0 +1,68 @@
+event    prompt started · abstraction 0 · Answer with exactly the word: shared
+Rebis agent 1 · Answer with exactly the word: shared
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    shared
+answer   shared
+event    subject bound · shared
+Rebis agent 3 · Say the word you were given, then the word second.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+Rebis agent 2 · Say the word you were given, then the word first.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    shared second
+model turn 1 · complete response
+model    shared first
+event    forward value routed
+event    prompt started · abstraction 1 · Say the word you were given, then the word first.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   shared
+answer   shared first
+event    forward value routed
+event    prompt started · abstraction 1 · Say the word you were given, then the word second.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   shared
+answer   shared second
+event    mediator started · 2 branch(es)
+event    prompt started · abstraction 1 · Reply with both readings, separated by ' | ', nothing else.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   shared
+prompt   
+prompt   RESULT 2:
+prompt   shared first
+prompt   
+prompt   RESULT 3:
+prompt   shared
+prompt   
+prompt   RESULT 4:
+prompt   shared second
+Rebis agent 4 · Reply with both readings, separated by ' | ', nothing else.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    shared first | shared second
+answer   shared first | shared second
+o-[]-o
+RESULT
+result   shared first | shared second
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: shared · abstraction 0
+answer   shared
+firing   2 · & input subject · abstraction 1
+answer   shared
+firing   3 · ○ prompt Say the word you were given, then the word first. · abstraction 1
+answer   shared first
+firing   4 · & input subject · abstraction 1
+answer   shared
+firing   5 · ○ prompt Say the word you were given, then the word second. · abstraction 1
+answer   shared second
+firing   6 · ○ prompt Reply with both readings, separated by ' | ', nothing else. · abstraction 1
+answer   shared first | shared second
+score    1.000
+terms    Reply with both readings, separated by ' | ', nothing else.
+evidence 0 line(s)

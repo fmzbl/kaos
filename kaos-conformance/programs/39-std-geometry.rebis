@@ -1,0 +1,16 @@
+; std/geometry: one hub reaching every spoke.
+;
+; Five calls: the hub once, each of the three spokes once, and the mediation.
+; Six would mean the hub was re-read per spoke — it is bound before them, which
+; is what makes it a hub rather than three separate readings, and the count is
+; the only thing that can prove it.
+; expect: calls 5
+; expect: clean
+; expect: answers
+((# std/geometry)
+ (std-radial
+   "Reply with the three assessments, separated by ' | ', nothing else."
+   "Answer with exactly: the payment queue stalled"
+   "Assess the blast radius of this in five words."
+   "Assess the detection of this in five words."
+   "Assess the rollback of this in five words."))

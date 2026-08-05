@@ -1,0 +1,6 @@
+; `!` answers exactly what its body answered, and marks it to outlive the run.
+; expect: calls 1
+; expect: clean
+; expect: answers
+; expect: contains dream
+(! "Answer with exactly the word: remembered")

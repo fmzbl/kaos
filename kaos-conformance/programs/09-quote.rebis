@@ -1,0 +1,6 @@
+; A macro template is quoted, and the caller's syntax is spliced in.
+; expect: calls 2
+; expect: clean
+; expect: answers
+(~ wrap (work) '(-> ,work "Repeat what you were given, exactly."))
+(wrap "Answer with exactly the word: spliced")

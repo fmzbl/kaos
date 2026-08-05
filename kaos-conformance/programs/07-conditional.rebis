@@ -1,0 +1,8 @@
+; Lazy: exactly one branch expands, and the other never fires.
+; expect: calls 2
+; expect: clean
+; expect: answers
+; expect: absent skipped
+(% "Answer with exactly the single character: 1"
+   "Answer with exactly the word: taken"
+   "Answer with exactly the word: skipped")

@@ -1,0 +1,8 @@
+; The control for 57: a program that never writes `<>` is unchanged. The
+; runtime authors no prompt text of its own, which is the property that lets
+; selfhood be a default rather than a cost.
+; expect: calls 1
+; expect: clean
+; expect: answers
+; expect: absent Program:
+"Answer with exactly the word: alpha"

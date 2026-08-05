@@ -1,0 +1,9 @@
+; std/dialectic: one edge converged from both orientations.
+; expect: calls >=3
+; expect: clean
+; expect: answers
+((# std/dialectic)
+ (std-diamond
+   "Reply with whichever reading is better supported, in one sentence."
+   "Answer with exactly: the cache should be write-through"
+   "Answer with exactly: the cache should be write-back"))

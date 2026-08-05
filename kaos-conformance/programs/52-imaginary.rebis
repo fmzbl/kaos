@@ -1,0 +1,7 @@
+; `{ }` runs its body and remembers only what crossed out.
+; The two prompts fire; the first answer is not evidence afterwards.
+; expect: calls 2
+; expect: clean
+; expect: answers
+{"Answer with exactly the word: phlogiston"
+ "Answer with exactly the word: oxygen"}

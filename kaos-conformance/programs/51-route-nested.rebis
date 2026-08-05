@@ -1,0 +1,9 @@
+; Routing nests: an inner route overrides for its subtree, and the outer one
+; resumes after it. This is the shape a drawing can now show.
+; expect: calls 3
+; expect: clean
+; expect: answers
+(/ ollama:llama3.2:3b
+   ("Answer with exactly the word: outer"
+    (/ ollama:llama3.2:3b "Answer with exactly the word: inner")
+    "Answer with exactly the word: after"))

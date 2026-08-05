@@ -1,0 +1,5 @@
+; `$` composes text and fires the result ONCE. The operands never run.
+; expect: calls 1
+; expect: clean
+; expect: answers
+($ "Answer with exactly the word: " "composed")

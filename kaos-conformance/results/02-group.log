@@ -1,0 +1,23 @@
+event    prompt started · abstraction 1 · Answer with exactly the word: first
+Rebis agent 1 · Answer with exactly the word: first
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    first
+answer   first
+event    prompt started · abstraction 1 · Answer with exactly the word: last
+Rebis agent 2 · Answer with exactly the word: last
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    last
+answer   last
+o-[]-o
+RESULT
+result   last
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: first · abstraction 1
+answer   first
+firing   2 · ○ prompt Answer with exactly the word: last · abstraction 1
+answer   last
+score    1.000
+terms    Answer with exactly the word: last
+evidence 0 line(s)

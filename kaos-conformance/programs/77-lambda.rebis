@@ -1,0 +1,18 @@
+; An anonymous `~` is a value: `=` names it, and a call site runs it.
+;
+; Lambda needed no operator either — `~` may omit its name, and what it produces
+; is the syntax value the language already had.
+;
+; Three calls: the arrow inside the lambda fires its subject and then its own
+; stage, and the report fires once. The numeric lambda beside it is applied
+; directly in operator position — how a Lisp writes a lambda call — and costs
+; nothing at all, which is why three and not four.
+; expect: calls 3
+; expect: clean
+; expect: contains 25
+; expect: answers
+(= describe (~ (subject) (-> ,subject "Name one failure mode of this, in four words."))
+   (= note (describe "a retry queue that drops messages on restart")
+      ($ "Reply with exactly: the square is "
+         |((~ (n) |([product] ,n ,n)|) 5)|
+         " and the note was: " note)))

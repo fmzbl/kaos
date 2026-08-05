@@ -1,0 +1,5 @@
+; One prompt, one firing. The floor everything else is measured against.
+; expect: calls 1
+; expect: clean
+; expect: answers
+"Answer with exactly the word: alpha"

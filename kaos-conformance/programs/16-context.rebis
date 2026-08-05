@@ -1,0 +1,7 @@
+; `+` frames every prompt inside it, ahead of the prompt's own words.
+; expect: calls 2
+; expect: clean
+; expect: answers
+(+ "Whenever you answer, end with the word: framed."
+   ("Answer with the word alpha.")
+   ("Answer with the word beta."))

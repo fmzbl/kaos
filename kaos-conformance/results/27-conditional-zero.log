@@ -1,0 +1,24 @@
+event    prompt started · abstraction 1 · Answer with exactly the single character: 0
+Rebis agent 1 · Answer with exactly the single character: 0
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    0
+answer   0
+event    binary gate selected 0 branch
+event    prompt started · abstraction 1 · Answer with exactly the word: fallback
+Rebis agent 2 · Answer with exactly the word: fallback
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    fallback
+answer   fallback
+o-[]-o
+RESULT
+result   fallback
+TRACE
+firing   1 · ○ prompt Answer with exactly the single character: 0 · abstraction 1
+answer   0
+firing   2 · ○ prompt Answer with exactly the word: fallback · abstraction 1
+answer   fallback
+score    1.000
+terms    Answer with exactly the word: fallback
+evidence 0 line(s)

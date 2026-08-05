@@ -1,0 +1,39 @@
+Rebis agent 1 · Answer with exactly the word: left
+Rebis agent 2 · Answer with exactly the word: right
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    left
+model turn 1 · complete response
+model    right
+event    prompt started · abstraction 1 · Answer with exactly the word: left
+answer   left
+event    prompt started · abstraction 1 · Answer with exactly the word: right
+answer   right
+event    mediator started · 2 branch(es)
+event    prompt started · abstraction 1 · Reply with the two words you were given, separated by one space, nothing else.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   left
+prompt   
+prompt   RESULT 2:
+prompt   right
+Rebis agent 3 · Reply with the two words you were given, separated by one space, nothing else.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    left right
+answer   left right
+o-[]-o
+RESULT
+result   left right
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: left · abstraction 1
+answer   left
+firing   2 · ○ prompt Answer with exactly the word: right · abstraction 1
+answer   right
+firing   3 · ○ prompt Reply with the two words you were given, separated by one space, nothing else. · abstraction 1
+answer   left right
+score    1.000
+terms    Reply with the two words you were given, separated by one space, nothing else.
+evidence 0 line(s)

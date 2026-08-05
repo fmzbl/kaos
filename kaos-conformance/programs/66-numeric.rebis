@@ -1,0 +1,13 @@
+; The numeric plane fires nothing. That is the claim, and the call count is the
+; whole proof: one prompt, and all the arithmetic beside it is free.
+;
+; `$` assembles and so adds, `^` is the inverse so subtraction needs no glyph,
+; and `[M]` folds. The quantity is interpolated INTO the prompt, which is the
+; crossing back out — the expectation names the arithmetic, so a plane that
+; silently contributed nothing here could not pass.
+; expect: calls 1
+; expect: clean
+; expect: contains alpha 14
+; expect: answers
+($ "Answer with exactly the word: alpha"
+   " " |([sum] ($ 2 3) ($ 10 (^ 3)) (/ 9 38))|)

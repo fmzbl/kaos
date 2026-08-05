@@ -1,0 +1,8 @@
+; `@` checks every arrow in its scope. One arrow here, so one check on top of
+; the two stages — that third call is the whole proof.
+; expect: calls 3
+; expect: clean
+; expect: answers
+(@ "Answer with exactly the single character: 1"
+   (-> "Answer with exactly the word: alpha"
+       "Repeat the word you were given, exactly."))

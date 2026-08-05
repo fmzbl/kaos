@@ -1,0 +1,6 @@
+; Calling a macro with the wrong number of arguments is diagnosed, not guessed.
+; The diagnostic names the macro and both counts rather than the word `arity`,
+; so the expectation quotes what a reader would actually see.
+; expect: diagnostic expected 2 argument
+(~ needs-two (a b) (-> a b))
+(needs-two "only one")

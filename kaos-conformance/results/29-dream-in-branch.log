@@ -1,0 +1,45 @@
+Rebis agent 1 · Answer with exactly the word: kept
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+Rebis agent 2 · Answer with exactly the word: plain
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    plain
+model turn 1 · complete response
+model    kept
+event    prompt started · abstraction 1 · Answer with exactly the word: kept
+answer   kept
+answer   kept
+event    prompt started · abstraction 1 · Answer with exactly the word: plain
+answer   plain
+event    mediator started · 2 branch(es)
+event    prompt started · abstraction 1 · Reply with both words, separated by one space, nothing else.
+prompt   
+prompt   INPUT:
+prompt   RESULT 1:
+prompt   kept
+prompt   
+prompt   RESULT 2:
+prompt   kept
+prompt   
+prompt   RESULT 3:
+prompt   plain
+Rebis agent 3 · Reply with both words, separated by one space, nothing else.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    kept kept
+answer   kept kept
+o-[]-o
+RESULT
+result   kept kept
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: kept · abstraction 1
+answer   kept
+firing   2 · ! dream · abstraction 1
+answer   kept
+firing   3 · ○ prompt Answer with exactly the word: plain · abstraction 1
+answer   plain
+firing   4 · ○ prompt Reply with both words, separated by one space, nothing else. · abstraction 1
+answer   kept kept
+score    1.000
+terms    Reply with both words, separated by one space, nothing else.
+evidence 0 line(s)

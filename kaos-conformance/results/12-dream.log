@@ -1,0 +1,18 @@
+event    prompt started · abstraction 0 · Answer with exactly the word: remembered
+Rebis agent 1 · Answer with exactly the word: remembered
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    remembered
+answer   remembered
+answer   remembered
+o-[]-o
+RESULT
+result   remembered
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: remembered · abstraction 0
+answer   remembered
+firing   2 · ! dream · abstraction 0
+answer   remembered
+score    1.000
+terms    Answer with exactly the word: remembered
+evidence 0 line(s)

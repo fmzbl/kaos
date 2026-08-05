@@ -1,0 +1,7 @@
+; The dual of the arrow: the RIGHT side runs first.
+; expect: calls 2
+; expect: clean
+; expect: answers
+; expect: contains INPUT:
+(<- "Repeat the word you were given, exactly, and nothing else."
+    "Answer with exactly the word: reversed")

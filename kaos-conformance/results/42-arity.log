@@ -1,0 +1,10 @@
+diagnostic macro `needs-two` expected 2 argument(s), received 1
+o-[]-o
+RESULT
+result   nothing
+TRACE
+score    1.000
+terms    only one
+evidence 0 line(s)
+DIAGNOSTICS
+diagnostic macro `needs-two` expected 2 argument(s), received 1

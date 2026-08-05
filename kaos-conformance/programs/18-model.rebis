@@ -1,0 +1,5 @@
+; A routing form: every model call in its body goes to the named model.
+; expect: calls 1
+; expect: clean
+; expect: answers
+(/ ollama:llama3.2:3b "Answer with exactly the word: routed")

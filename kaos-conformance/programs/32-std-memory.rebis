@@ -1,0 +1,8 @@
+; std/memory: a stage reads what the run already learned about its subject.
+; expect: calls 2
+; expect: clean
+; expect: answers
+((# std/memory)
+ (~ note (topic) "Answer with exactly the sentence: The kernel panics on boot.")
+ (~ diagnose (topic) "Name the subsystem at fault in one word.")
+ ((note the-kernel) (std-grounded the-kernel diagnose)))

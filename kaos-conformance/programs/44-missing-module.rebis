@@ -1,0 +1,4 @@
+; A module that does not exist is a diagnostic, not a crash.
+; expect: diagnostic module
+((# no/such/module)
+ "Answer with exactly the word: survived")

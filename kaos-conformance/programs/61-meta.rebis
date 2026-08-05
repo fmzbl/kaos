@@ -1,0 +1,31 @@
+; `><` — a prompt whose answer is a program, which then runs.
+;
+; The prompt carries a minimal language reference, and that is not padding. A
+; `><` fires an ORDINARY prompt: the runtime authors no text of its own, so
+; nothing tells the model what Rebis is unless the program does. Asked bare,
+; qwen3-32b wrote HCL — `"agent" { prompt = "…" }` — which GeneratedSyntax
+; caught and reported verbatim, exactly as it should.
+;
+; This is what the `wright` collection family is for: every one of its macros
+; carries a reference like this one. A bare `><` is for programs whose model
+; already knows the language.
+;
+; An earlier version asked for an ECHO of a literal program, and every model
+; tried — llama3.2:3b, qwen3:4b, qwen3-32b — answered the question embedded in
+; the literal instead of writing the program around it. Asking for an echo is
+; asking something ambiguous.
+;
+; At least two calls: the generator, then whatever it wrote.
+;
+; Measured: with this reference, qwen3-32b writes valid Rebis; llama3.2:3b does
+; not — it produced an unbalanced square. So this needs a capable model, and is
+; skipped by default rather than left permanently red.
+; requires: generation
+; expect: calls >=2
+; expect: clean
+; expect: answers
+(>< ($ "Write a Rebis program. In Rebis a quoted string is a prompt that fires "
+       "a model, (-> a b) routes a's answer into b, and ([m] a b) runs branches "
+       "and lets mediator m combine them. Write a program with exactly one "
+       "quoted prompt, asking for the capital of France. "
+       "Reply with ONLY the program — no explanation, no code fences."))

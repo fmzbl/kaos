@@ -1,0 +1,7 @@
+; A macro calling a macro: expansion is structural and composes.
+; expect: calls 2
+; expect: clean
+; expect: answers
+(~ inner (work) (-> work "Repeat what you were given, exactly."))
+(~ outer (work) (inner work))
+(outer "Answer with exactly the word: nested")

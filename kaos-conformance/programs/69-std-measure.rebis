@@ -1,0 +1,11 @@
+; std/measure: the ladder, and a threshold gate that costs nothing.
+;
+; std-times folds addition, std-at-least compares, and neither fires. The one
+; call is the prompt the gate selected.
+; expect: calls 1
+; expect: clean
+; expect: answers
+((# std/measure)
+ (% (std-at-least (std-times 3 4) 10)
+    "Answer with exactly the word: enough"
+    "Answer with exactly the word: short"))

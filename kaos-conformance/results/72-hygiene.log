@@ -1,0 +1,41 @@
+event    module std/measure loaded · 22 definition(s)
+event    prompt started · abstraction 1 · Reply with exactly the word: KEPT
+Rebis agent 1 · Reply with exactly the word: KEPT
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    KEPT
+answer   KEPT
+event    before bound · KEPT
+event    macro std-cheaper-than expanded · 255 remaining
+event    macro std-spent expanded · 254 remaining
+event    before bound · 1
+event    prompt started · abstraction 3 · Reply with exactly the word: work
+Rebis agent 2 · Reply with exactly the word: work
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    work
+answer   work
+event    macro std-add expanded · 253 remaining
+event    macro std-spent expanded · 252 remaining
+event    spent bound · 1
+event    macro std-under expanded · 251 remaining
+event    binary gate selected 1 branch
+event    prompt started · abstraction 2 · caller kept: KEPT
+Rebis agent 3 · caller kept: KEPT
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    KEPT
+answer   KEPT
+o-[]-o
+RESULT
+result   KEPT
+TRACE
+firing   1 · ○ prompt Reply with exactly the word: KEPT · abstraction 1
+answer   KEPT
+firing   2 · ○ prompt Reply with exactly the word: work · abstraction 3
+answer   work
+firing   3 · ○ prompt caller kept: KEPT · abstraction 2
+answer   KEPT
+score    1.000
+terms    before caller kept: 
+evidence 0 line(s)

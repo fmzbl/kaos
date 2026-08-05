@@ -1,0 +1,18 @@
+event    prompt started · abstraction 1 · Answer with a full sentence about the weather.
+Rebis agent 1 · Answer with a full sentence about the weather.
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    The weather today is sunny and warm with a gentle breeze.
+answer   The weather today is sunny and warm with a gentle breeze.
+diagnostic binary gate must return `0` or `1`, received "The weather today is sunny and warm with a gentle breeze."
+o-[]-o
+RESULT
+result   nothing
+TRACE
+firing   1 · ○ prompt Answer with a full sentence about the weather. · abstraction 1
+answer   The weather today is sunny and warm with a gentle breeze.
+score    1.000
+terms    Answer with a full sentence about the weather.
+evidence 0 line(s)
+DIAGNOSTICS
+diagnostic binary gate must return `0` or `1`, received "The weather today is sunny and warm with a gentle breeze."

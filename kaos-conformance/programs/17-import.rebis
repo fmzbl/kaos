@@ -1,0 +1,11 @@
+; `#` loads definitions without executing the module.
+;
+; Two calls, not one: `std-one-word` is an arrow — the working, then the
+; contract prompt that reshapes it — and `std/shape` documents that cost. What
+; this program tests is that importing a module fires NOTHING by itself, so the
+; count is the macro's own and the import adds none.
+; expect: calls 2
+; expect: clean
+; expect: answers
+((# std/shape)
+ (std-one-word "Name one primary colour."))

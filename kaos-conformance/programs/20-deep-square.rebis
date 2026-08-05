@@ -1,0 +1,9 @@
+; A square inside a square: branches of branches, mediated twice.
+; expect: calls 5
+; expect: clean
+; expect: answers
+(["Reply with the two phrases you were given, separated by ' | ', nothing else."]
+  (["Reply with both words, separated by one space, nothing else."]
+    "Answer with exactly the word: inner-a"
+    "Answer with exactly the word: inner-b")
+  "Answer with exactly the word: outer")

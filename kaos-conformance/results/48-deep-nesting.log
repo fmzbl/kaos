@@ -1,0 +1,15 @@
+event    prompt started · abstraction 7 · Answer with exactly the word: deep
+Rebis agent 1 · Answer with exactly the word: deep
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    deep
+answer   deep
+o-[]-o
+RESULT
+result   deep
+TRACE
+firing   1 · ○ prompt Answer with exactly the word: deep · abstraction 7
+answer   deep
+score    1.000
+terms    Answer with exactly the word: deep
+evidence 0 line(s)

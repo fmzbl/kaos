@@ -1,0 +1,4 @@
+; A file that is not there is diagnosed and the program continues.
+; expect: diagnostic input
+(-> (&: "programs/no-such-file.txt")
+    "Answer with exactly the word: continued")

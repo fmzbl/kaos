@@ -1,0 +1,20 @@
+; Text may fill a hole in syntax. Text may never become structure.
+;
+; The rule that lets `eval` exist without ending cost readability. A model is
+; asked for something that looks exactly like a Rebis program; the answer is
+; bound and then called. It does NOT run — it is text, and text is not
+; structure, so the call is an undefined macro and the run says so.
+;
+; The proof is the COUNT plus the diagnostic. If the answer had been executed
+; there would be a third call and no diagnostic; both hold, from two directions,
+; and a text-generating model can fake neither.
+;
+; (There is deliberately no `absent` check. The marker string has to be written
+; into the prompt in order to ask for it, so it appears in the log whatever
+; happens — an expectation that can never pass is worse than none.)
+; expect: calls 2
+; expect: diagnostic undefined macro
+; expect: answers
+(= answer ("Reply with exactly this and nothing else: (\"SHOULD-NOT-RUN\")")
+   ((answer)
+    "Reply with exactly the word: bounded"))

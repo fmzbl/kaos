@@ -1,0 +1,12 @@
+; A comparison answers 0 or 1, which is what `%` already reads — so a quantity
+; steers a text-plane program with no control flow added to either side.
+;
+; Two calls: the branch that was taken, and nothing else. `absent` proves the
+; other branch never ran.
+; expect: calls 1
+; expect: clean
+; expect: answers
+; expect: absent unreachable
+(% |([less] 2 3)|
+   "Answer with exactly the word: taken"
+   "Answer with exactly the word: unreachable")

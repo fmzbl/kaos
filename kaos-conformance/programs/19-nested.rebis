@@ -1,0 +1,10 @@
+; Every scoping operator at once, nested: load, frame, bind, gate, keep.
+; expect: calls 3
+; expect: clean
+; expect: answers
+; expect: absent unreachable
+(+ "Answer in one word only, always."
+   (= topic "Answer with exactly the word: kernel"
+      (% "Answer with exactly the single character: 1"
+         (! (-> topic "Repeat the word you were given, exactly."))
+         "Answer with exactly the word: unreachable")))

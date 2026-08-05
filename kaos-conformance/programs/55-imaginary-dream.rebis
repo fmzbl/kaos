@@ -1,0 +1,7 @@
+; A dream inside a space keeps nothing: you do not get to keep a promise you
+; made in a dream. Silent rather than fatal, so the run stays clean and still
+; answers its body.
+; expect: calls 1
+; expect: clean
+; expect: answers
+{(! "Answer with exactly the word: unkept")}

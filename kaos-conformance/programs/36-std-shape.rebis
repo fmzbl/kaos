@@ -1,0 +1,10 @@
+; std/shape: answer shaping, which adds no structure — only a second firing.
+;
+; `std-with-evidence` is an arrow: the working, then the contract prompt that
+; reshapes it. std/shape documents that cost as two firings, and the count here
+; is what holds the module to it.
+; expect: calls 2
+; expect: clean
+; expect: answers
+((# std/shape)
+ (std-with-evidence "Name the largest planet in the solar system."))

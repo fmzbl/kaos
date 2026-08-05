@@ -1,0 +1,24 @@
+event    prompt started · abstraction 1 · Answer with exactly the single character: 1
+Rebis agent 1 · Answer with exactly the single character: 1
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    1
+answer   1
+event    binary gate selected 1 branch
+event    prompt started · abstraction 1 · Answer with exactly the word: taken
+Rebis agent 2 · Answer with exactly the word: taken
+model    generating turn 1 · openrouter:qwen/qwen3-32b · NORMAL · limit 600s
+model turn 1 · complete response
+model    taken
+answer   taken
+o-[]-o
+RESULT
+result   taken
+TRACE
+firing   1 · ○ prompt Answer with exactly the single character: 1 · abstraction 1
+answer   1
+firing   2 · ○ prompt Answer with exactly the word: taken · abstraction 1
+answer   taken
+score    1.000
+terms    Answer with exactly the word: taken
+evidence 0 line(s)

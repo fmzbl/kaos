@@ -1,0 +1,6 @@
+; A group runs in source order and answers with its LAST form.
+; expect: calls 2
+; expect: clean
+; expect: answers
+("Answer with exactly the word: first"
+ "Answer with exactly the word: last")

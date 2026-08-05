@@ -1,0 +1,8 @@
+; Framings accumulate: the inner block sees both, the outer prompt only one.
+; expect: calls 2
+; expect: clean
+; expect: answers
+(+ "Always answer in lowercase."
+   ("Answer with the word outer.")
+   (+ "Always end with a full stop."
+      ("Answer with the word inner.")))
