@@ -44,7 +44,8 @@ use crate::rebis_workspace::{
 use crate::theme;
 
 // The terminal palette follows the configured mode (`/theme dark|light`).
-// Green marks active/success, blue marks flow/information, and red marks danger.
+// Black or white page, grey structure, and three voices: blue marks
+// active/success, teal marks flow/information, red marks danger.
 fn tone(rgb: (u8, u8, u8)) -> Color {
     Color::Rgb(rgb.0, rgb.1, rgb.2)
 }
@@ -55,9 +56,19 @@ fn c_ink() -> Color {
 fn C_PRIMARY() -> Color {
     tone(crate::theme::current().accent)
 }
+/// Frames, dividers, and hairlines. The dim grey — quieter than any text, so a
+/// screen of framed panes reads as panes with words in them rather than as a
+/// grid.
 #[allow(non_snake_case)]
 fn C_OX() -> Color {
-    tone(crate::theme::current().faint)
+    tone(crate::theme::current().rule)
+}
+/// Headings and pane titles. Silver: a second class of emphasis that is still
+/// text, so a title does not have to borrow one of the three state colours to
+/// stand out from the body under it.
+#[allow(non_snake_case)]
+fn C_SILVER() -> Color {
+    tone(crate::theme::current().mid)
 }
 #[allow(non_snake_case)]
 fn C_ASH() -> Color {
@@ -118,6 +129,10 @@ const MAIN_SLASH_COMMANDS: &[CommandSpec] = &[
     command("auth openrouter", "auth openrouter "),
     command("auth anthropic", "auth anthropic "),
     command("auth openai", "auth openai "),
+    // Search providers use the same credential store as the model providers.
+    command("auth brave", "auth brave "),
+    command("auth serper", "auth serper "),
+    command("auth tavily", "auth tavily "),
     command("auth forget", "auth forget "),
     command("config", "config"),
     command("config restore", "config restore"),
@@ -187,6 +202,17 @@ const REBIS_SLASH_COMMANDS: &[CommandSpec] = &[
     command("forget-session [N|id]", "forget-session "),
     command("tree", "tree"),
     command("graph", "graph"),
+    command("dream", "dream"),
+    command("dream forget [N|all]", "dream forget "),
+    command("music", "music"),
+    command("music play", "music play"),
+    command("music stop", "music stop"),
+    command("music export [FILE]", "music export "),
+    command("music root [HZ]", "music root "),
+    command("music pace [SECONDS]", "music pace "),
+    command("music partials [1-6]", "music partials "),
+    command("music octaves [1-6]", "music octaves "),
+    command("music timbre [sine|triangle|saw|square]", "music timbre "),
     command("source", "source"),
     command("panel", "panel"),
     command("panel toggle", "panel toggle"),
@@ -284,6 +310,15 @@ const SPIN: [&str; 10] = [
 
 /// Strip ANSI escape sequences so streamed, coloured output can be shown as plain
 /// text in the one-line status bar.
+/// Whether a panel line is a drawn wave rather than text.
+///
+/// Braille is only ever emitted by the sound projection, so the whole test is
+/// "is this line made of braille" — no marker to keep in step with the
+/// producer, and nothing else in the app can accidentally claim the style.
+fn is_braille(line: &str) -> bool {
+    !line.is_empty() && line.chars().all(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+}
+
 /// Clear an overlay's area and repaint it with the palette's ground.
 ///
 /// `Clear` resets cells to the *terminal's* default background, so on its own
@@ -719,6 +754,12 @@ struct RebisRunEntry {
     /// Values delivered to the child's `(& port …)` input ports. Written when
     /// the user answers a run that has stopped awaiting input.
     inlet_path: PathBuf,
+    /// Programs the child asks to have run beneath this one. Drained on each
+    /// poll; see [`kaos_core::nest`].
+    nest_path: PathBuf,
+    /// Where this run sits in the tree of runs, shared with the visual editor
+    /// so both draw the same shape.
+    lineage: kaos_core::run_model::Lineage,
     scope: RunScope,
     preview: String,
     state: RebisRunState,
@@ -747,6 +788,8 @@ struct RebisRunView<'a> {
     entry: &'a RebisRunEntry,
     /// One-based position in the shared FIFO, including queued chat work.
     queue_position: Option<usize>,
+    /// How many runs stand above this one. Zero is a run a person started.
+    nesting: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -939,10 +982,19 @@ pub struct App {
     parallel_gate_queue: Vec<PendingRebisRun>,
     /// Remembered authority for every later Rebis agent in this app session.
     rebis_authority: bool,
-    /// Direct mode runs one tool agent per Rebis prompt on any backend — a
-    /// native Claude agent on the Claude CLI, a node-scoped Conductor run
-    /// elsewhere. Chaos mode explicitly opts into the full Kaos pipeline.
-    rebis_chaos_mode: bool,
+    /// The chaos stance, for **everything this app launches** — not only Rebis
+    /// runs, which is all it used to reach.
+    ///
+    /// On a chat it means the turn is composed into a Rebis program and the
+    /// program is what runs. On a Rebis run it means each model node gets the
+    /// whole Kaos pipeline instead of one node-scoped agent (a native Claude
+    /// agent on the Claude CLI, a scoped Conductor run elsewhere). One toggle,
+    /// because it is one stance: the work is done by a program rather than by
+    /// an agent that was told what to do. See [`kaos_core::chaos`].
+    ///
+    /// It is exported to every child as `KAOS_CHAOS`, so a run that opens a
+    /// nested run keeps the stance without the parent restating it.
+    chaos_mode: bool,
     /// Messages, commands, and Rebis evaluations submitted while a working was
     /// already underway. They run in one shared FIFO, one per finished job.
     queue: Vec<QueuedWork>,
@@ -1069,10 +1121,15 @@ impl App {
             pending_rebis: None,
             parallel_gate_queue: Vec::new(),
             rebis_authority: false,
-            // One direct provider agent per prompt is the default. File/command
-            // authority is gated independently; `/chaos on` is a larger,
-            // explicit orchestration choice, not the way tools are enabled.
-            rebis_chaos_mode: false,
+            // Direct is the default: one provider agent per prompt, and a chat
+            // answered rather than composed. File/command authority is gated
+            // independently; `/chaos on` is a larger, explicit orchestration
+            // choice, not the way tools are enabled.
+            //
+            // The default is read from `KAOS_CHAOS`/config rather than hardcoded
+            // false, so an operator who works in chaos mode can say so once in
+            // `/config` instead of retyping `/chaos on` every launch.
+            chaos_mode: kaos_core::chaos::enabled(),
             queue: Vec::new(),
             rebis_runs: Vec::new(),
             rebis_run_choice: 0,
@@ -1301,6 +1358,25 @@ impl App {
         state: RebisRunState,
         parallel: bool,
     ) -> u64 {
+        self.register_rebis_run_under(
+            request,
+            state,
+            parallel,
+            kaos_core::run_model::Lineage::root(),
+        )
+    }
+
+    /// Register a run at a given place in the tree of runs.
+    ///
+    /// The two-argument forms above are this with a root lineage; a run a child
+    /// asked for comes through here with the asking run's lineage extended.
+    fn register_rebis_run_under(
+        &mut self,
+        request: &RunRequest,
+        state: RebisRunState,
+        parallel: bool,
+        lineage: kaos_core::run_model::Lineage,
+    ) -> u64 {
         self.prune_rebis_run_history();
         let id = self.next_rebis_run_id;
         self.next_rebis_run_id += 1;
@@ -1335,6 +1411,9 @@ impl App {
                 .join(format!("kaos-rebis-{}-{id}.directive", self.session_id)),
             inlet_path: std::env::temp_dir()
                 .join(format!("kaos-rebis-{}-{id}.inlet", self.session_id)),
+            nest_path: std::env::temp_dir()
+                .join(format!("kaos-rebis-{}-{id}.nest", self.session_id)),
+            lineage,
             scope: request.scope,
             preview: rebis_source_preview(&request.source),
             state,
@@ -1344,7 +1423,7 @@ impl App {
             started_at: already_started.then_some(now),
             elapsed: already_finished.then_some(Duration::ZERO),
             parallel,
-            chaos: self.rebis_chaos_mode,
+            chaos: self.chaos_mode,
             paused: false,
             pause_reason: None,
             paused_at: None,
@@ -1354,12 +1433,54 @@ impl App {
         id
     }
 
+    /// Open every run the children have asked for, beneath whichever asked.
+    ///
+    /// Drained on each pump rather than at completion, so a program that opens
+    /// a run early is visible while it is still going. The same channel and the
+    /// same shared ordering the visual editor uses — one protocol, two hosts.
+    fn open_requested_rebis_runs(&mut self) {
+        let asked = self
+            .rebis_runs
+            .iter()
+            .filter_map(|run| {
+                let requests = kaos_core::nest::drain(&run.nest_path);
+                (!requests.is_empty()).then_some((
+                    run.id,
+                    run.request.clone(),
+                    run.lineage,
+                    requests,
+                ))
+            })
+            .collect::<Vec<_>>();
+        for (parent, request, lineage, requests) in asked {
+            for asked in requests {
+                let child_request = RunRequest {
+                    source: asked.source.clone(),
+                    ..request.clone()
+                };
+                let child = self.register_rebis_run_under(
+                    &child_request,
+                    RebisRunState::Queued,
+                    false,
+                    kaos_core::run_model::Lineage::under(parent, lineage),
+                );
+                if let Some(run) = self.rebis_runs.iter_mut().find(|run| run.id == parent) {
+                    run.output.push(format!(
+                        "nested      \u{2325} run #{child} \u{2014} {}",
+                        kaos_core::nest::label(&asked, parent)
+                    ));
+                }
+            }
+        }
+    }
+
     fn prune_rebis_run_history(&mut self) {
         while self.rebis_runs.len() >= MAX_REBIS_RUN_HISTORY {
             let Some(index) = self.rebis_runs.iter().position(|run| run.state.terminal()) else {
                 break;
             };
             let run = self.rebis_runs.remove(index);
+            let _ = std::fs::remove_file(&run.nest_path);
             if run.saved_checkpoint_path.as_ref() != Some(&run.checkpoint_path) {
                 let _ = std::fs::remove_file(&run.checkpoint_path);
             }
@@ -2239,6 +2360,7 @@ impl App {
 
     fn pump(&mut self) {
         self.handle_workspace_events();
+        self.open_requested_rebis_runs();
         let mut live_run_changed = false;
         let sigil_chat_poll = self.sigil_chat_job.as_ref().map(|turn| poll_job(&turn.job));
         if let Some(poll) = sigil_chat_poll {
@@ -3904,11 +4026,12 @@ impl App {
                 if let Some(workspace) = &mut self.rebis {
                     // `set_model` already reports whether the selection persisted.
                     if command.starts_with("chaos") {
-                        workspace.message = if self.rebis_chaos_mode {
-                            "CHAOS mode · each Rebis prompt uses the Kaos Conductor pipeline"
+                        workspace.message = if self.chaos_mode {
+                            "CHAOS mode · chats compose a Rebis program first; each Rebis prompt uses the Kaos Conductor pipeline"
                                 .to_string()
                         } else {
-                            "DIRECT mode · one tool agent per Rebis prompt".to_string()
+                            "DIRECT mode · chats answer directly; one tool agent per Rebis prompt"
+                                .to_string()
                         };
                     } else if command.starts_with("config") {
                         // Opening the config sets a more useful editor-specific
@@ -4044,7 +4167,7 @@ impl App {
         };
         self.push_line(Line::from(Span::styled(
             format!("run chat  #{id} · retained run content"),
-            Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD),
+            Style::new().fg(C_SILVER()).add_modifier(Modifier::BOLD),
         )));
         for line in snapshot.lines() {
             self.push_line(Line::from(vec![
@@ -4660,9 +4783,54 @@ impl App {
     /// Fold whatever the running job streamed into one model turn.
     fn flush_reply(&mut self) {
         let reply = kaos_core::chat::clean_chat_reply(&std::mem::take(&mut self.session_reply));
-        if !reply.trim().is_empty() {
-            self.session.push(crate::sessions::Role::Model, reply);
+        if reply.trim().is_empty() {
+            return;
         }
+        self.session
+            .push(crate::sessions::Role::Model, reply.clone());
+        self.adopt_composed_program(&reply);
+    }
+
+    /// In chaos mode a chat answers with a program, so put the program where
+    /// programs live.
+    ///
+    /// It is registered **queued**, not started. Composing is half the loop —
+    /// without this the user reads a program in the transcript and has to
+    /// retype it into the editor to run it, which is exactly the friction the
+    /// stance exists to remove. But launching it outright would spend the
+    /// model's tokens, and possibly edit files, on a chat turn: the run browser
+    /// with its authority gate is where that decision belongs, and this puts
+    /// the program one keypress from it.
+    ///
+    /// Two guards, both necessary. The stance is checked because a direct chat
+    /// that happens to quote a program in a fence is answering a question about
+    /// Rebis, not proposing work. And the program is parsed because a composer
+    /// that half-followed the contract produces a fence full of prose, and a
+    /// run entry that cannot parse is worse than no entry.
+    fn adopt_composed_program(&mut self, reply: &str) {
+        if !self.chaos_mode {
+            return;
+        }
+        let Some(source) = kaos_core::chaos::extract_program(reply) else {
+            return;
+        };
+        if let Err(error) = rebis_lang::parse(&source) {
+            self.note(&format!(
+                "chaos mode composed a program that does not parse ({error}) — left in the transcript"
+            ));
+            return;
+        }
+        let request = RunRequest {
+            source,
+            input: String::new(),
+            scope: RunScope::Program,
+        };
+        let id = self.register_rebis_run(&request, RebisRunState::Queued);
+        self.queue.push(QueuedWork::Rebis { id, request });
+        self.focus_selected_rebis_run();
+        self.note(&format!(
+            "chaos mode composed run #{id} · queued, not started — inspect it in the run browser and launch it there"
+        ));
     }
 
     /// Record a line of model output for the session (plain text; the styling
@@ -4810,8 +4978,15 @@ impl App {
         // directory with real tools. Only slash-lines are commands. This is the
         // difference between "do the task" (code) and "cast a one-shot" (/cast).
         let Some(body) = line.strip_prefix('/') else {
-            let task = kaos_core::chat::DEFAULT_CONTEXT
-                .render_chat(&self.session_history_text(line), line);
+            // The stance is captured HERE, at submission, not read again when
+            // the job finally runs. A line typed under `/chaos on` and drained
+            // from the queue after `/chaos off` is still the work the user
+            // asked for, and the same rule already governs queued Rebis runs.
+            let task = kaos_core::chat::DEFAULT_CONTEXT.render_turn(
+                self.chaos_mode,
+                &self.session_history_text(line),
+                line,
+            );
             self.request_job(vec!["code".into(), RAW_CHAT_TASK_ARG.into(), task]);
             return;
         };
@@ -4883,15 +5058,15 @@ impl App {
                 _ => self.note("usage: /config or /config restore"),
             },
             "chaos" => {
-                self.rebis_chaos_mode = match args.get(1).map(String::as_str) {
+                self.chaos_mode = match args.get(1).map(String::as_str) {
                     Some("on" | "yes" | "1") => true,
                     Some("off" | "no" | "0") => false,
-                    _ => !self.rebis_chaos_mode,
+                    _ => !self.chaos_mode,
                 };
-                self.note(if self.rebis_chaos_mode {
-                    "CHAOS mode enabled · Rebis prompts use the Kaos Conductor pipeline"
+                self.note(if self.chaos_mode {
+                    "CHAOS mode enabled · every chat is composed into a Rebis program before it runs, and every Rebis prompt uses the Kaos Conductor pipeline"
                 } else {
-                    "DIRECT mode enabled · one tool agent per Rebis prompt"
+                    "DIRECT mode enabled · chats are answered directly, one tool agent per Rebis prompt"
                 });
             }
             "new" | "forget" => {
@@ -5423,6 +5598,14 @@ impl App {
             )
             .env("KAOS_SESSION", &session_id)
             .env("KAOS_RESUME", if resume { "1" } else { "0" })
+            // Exported unconditionally, including when off: this app may itself
+            // have been launched with `KAOS_CHAOS=1` in the environment, and a
+            // child that merely INHERITED that would be in chaos mode after
+            // `/chaos off`. Writing "0" is what makes the toggle authoritative.
+            .env(
+                kaos_core::chaos::ENABLE_ENV,
+                kaos_core::chaos::export(self.chaos_mode),
+            )
             // Tell the child to emit fold markers so its detailed trace renders as
             // collapsible groups here instead of a flat wall of output.
             .env("KAOS_FOLD", "1")
@@ -5461,6 +5644,19 @@ impl App {
                     .map(|run| run.directive_path.clone())
             }) {
                 cmd.env(crate::rebis_supervisor::DIRECTIVE_PATH_ENV, directive_path);
+            }
+            // The channel for runs the child asks to open beneath itself, given
+            // only while nesting is still allowed at this depth — the limit is
+            // enforced by withholding the channel, not by trusting the child.
+            if let Some(nest_path) = rebis_run_id.and_then(|id| {
+                self.rebis_runs
+                    .iter()
+                    .find(|run| run.id == id)
+                    .filter(|run| run.lineage.may_nest())
+                    .map(|run| run.nest_path.clone())
+            }) {
+                let _ = std::fs::remove_file(&nest_path);
+                cmd.env(kaos_core::nest::NEST_PATH_ENV, nest_path);
             }
             if let Some(inlet_path) = rebis_run_id.and_then(|id| {
                 self.rebis_runs
@@ -6125,8 +6321,18 @@ fn rebis_run_views_for<'a>(
     queue: &[QueuedWork],
     parallel_gate_queue: &[PendingRebisRun],
 ) -> Vec<RebisRunView<'a>> {
-    runs.iter()
-        .map(|entry| {
+    // As a tree, by the shared ordering the visual editor uses: a run an agent
+    // opened is listed under the run that opened it, indented one step.
+    let shape = kaos_core::run_model::tree_order(
+        &runs
+            .iter()
+            .map(|entry| (entry.id, entry.lineage.parent))
+            .collect::<Vec<_>>(),
+    );
+    shape
+        .into_iter()
+        .filter_map(|(depth, id)| Some((depth, runs.iter().find(|entry| entry.id == id)?)))
+        .map(|(nesting, entry)| {
             let queue_position = queue
                 .iter()
                 .enumerate()
@@ -6143,6 +6349,7 @@ fn rebis_run_views_for<'a>(
             RebisRunView {
                 entry,
                 queue_position,
+                nesting,
             }
         })
         .collect()
@@ -6384,6 +6591,7 @@ fn draw_rebis_workspace(
             Visualization::Mandala => " o-[M]-o · ~[f] MANDALA ",
             Visualization::Tree => " EXPRESSION TREE ",
             Visualization::Sigils => " SAVED SIGILS · SEARCH RESULTS ",
+            Visualization::Music => " ♒ SOUND · TIME IS INDENTATION ",
         }
     };
     workspace.panel_inner = None;
@@ -6398,7 +6606,7 @@ fn draw_rebis_workspace(
             }))
             .title(Span::styled(
                 visualization_title,
-                Style::new().fg(C_SECONDARY()),
+                Style::new().fg(C_SILVER()),
             ));
         let graph_inner = graph_block.inner(graph_area);
         selectable_panes.push(TextPaneRegion::full(TextPaneKind::RebisPanel, graph_inner));
@@ -6464,12 +6672,21 @@ fn draw_rebis_workspace(
                 });
             }
         } else if !workspace.runs_visible {
-            let graph_lines =
-                workspace.graph_lines(graph_inner.width as usize, graph_inner.height as usize);
+            // Sound draws its own projection: it needs the panel's width to
+            // size the wave and `&mut` to read the playhead off the player.
+            let graph_lines = if workspace.visualization == Visualization::Music {
+                workspace.music_lines(graph_inner.width as usize, graph_inner.height as usize)
+            } else {
+                workspace.graph_lines(graph_inner.width as usize, graph_inner.height as usize)
+            };
             let graph_text = graph_lines
                 .into_iter()
                 .map(|line| {
-                    let style = if line.starts_with("o-[]-o") {
+                    let style = if is_braille(&line) {
+                        // The wave itself, in the accent: it is the one thing
+                        // in the panel that is a picture rather than a reading.
+                        Style::new().fg(C_ACCENT())
+                    } else if line.starts_with("o-[]-o") {
                         Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD)
                     } else if matches!(line.as_str(), "REGION TREE" | "DIRECTED FLOW") {
                         Style::new().fg(C_ACCENT()).add_modifier(Modifier::BOLD)
@@ -6526,8 +6743,15 @@ fn draw_rebis_workspace(
                         let duration = timer
                             .split_once(' ')
                             .map_or(timer.as_str(), |(_, duration)| duration);
+                        // A run an agent opened is stepped in under whichever
+                        // opened it, so the tree is legible without reading ids.
+                        let nesting = if run.nesting > 0 {
+                            format!("{}\u{2514} ", "  ".repeat(run.nesting - 1))
+                        } else {
+                            String::new()
+                        };
                         let label = format!(
-                            "{marker}{caret}{lane} {state} {} {:<7} {}",
+                            "{marker}{caret}{lane} {nesting}{state} {} {:<7} {}",
                             duration,
                             run.entry.scope.label().to_ascii_uppercase(),
                             run.entry.preview
@@ -6660,7 +6884,7 @@ fn draw_rebis_workspace(
         Line::from(vec![
             Span::styled(
                 "⚙ CONFIG  ",
-                Style::new().fg(C_SECONDARY()).add_modifier(Modifier::BOLD),
+                Style::new().fg(C_SILVER()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "plain key/value file · provider credentials remain separate",
@@ -6832,22 +7056,38 @@ fn render_rebis_source(
             starts.push(index + 1);
         }
     }
+    // A long line wraps onto the next screen row instead of running off the right
+    // edge, so a screen row and a source line are no longer the same thing. The
+    // gutter is what keeps them distinguishable: the row that starts a line
+    // carries its number, a row continuing it carries blank space of the same
+    // width. Vertical scrolling stays in SOURCE lines, so `view_top` keeps its
+    // meaning and the wheel still moves by lines rather than by fragments.
+    let rows = rebis_workspace::wrapped_rows(source, code_width);
+    let first = rows
+        .iter()
+        .position(|row| row.line >= workspace.view_top)
+        .unwrap_or(rows.len());
     let mut rendered = Vec::new();
     for screen_row in 0..area.height as usize {
-        let row = workspace.view_top + screen_row;
-        if row >= starts.len() {
+        let Some(row) = rows.get(first + screen_row) else {
             rendered.push(Line::raw(""));
             continue;
-        }
-        let start = starts[row];
-        let end = chars[start..]
+        };
+        let line_start = starts.get(row.line).copied().unwrap_or(0);
+        let line_end = chars[line_start..]
             .iter()
             .position(|character| *character == '\n')
-            .map_or(chars.len(), |offset| start + offset);
+            .map_or(chars.len(), |offset| line_start + offset);
         let mut spans = vec![
             Span::styled(
-                format!("{:>number_width$} ", row + 1),
-                Style::new().fg(if row == cursor_row {
+                if row.continues {
+                    // Blank, not a repeat of the number: the eye reads "still the
+                    // same line" from the absence.
+                    " ".repeat(number_width + 1)
+                } else {
+                    format!("{:>number_width$} ", row.line + 1)
+                },
+                Style::new().fg(if row.line == cursor_row {
                     C_ACCENT()
                 } else {
                     C_OX()
@@ -6855,9 +7095,7 @@ fn render_rebis_source(
             ),
             Span::styled("│", Style::new().fg(C_OX())),
         ];
-        let visible_start = start + workspace.view_left.min(end - start);
-        let visible_end = (visible_start + code_width).min(end);
-        for index in visible_start..visible_end {
+        for index in row.start..row.end {
             let mut style = rebis_highlight_style(colours[index]);
             if matched.is_some_and(|(left, right)| index == left || index == right) {
                 style = style.bg(C_OX()).add_modifier(Modifier::BOLD);
@@ -6869,8 +7107,10 @@ fn render_rebis_source(
                 style = style.bg(C_SECONDARY()).add_modifier(Modifier::BOLD);
             }
             if block.is_some_and(|(top, bottom, left, right)| {
-                let column = index - start;
-                row >= top && row <= bottom && column >= left && column <= right
+                // Block selection is a rectangle over the SOURCE, so its columns
+                // are measured from the line's own start, not the screen row's.
+                let column = index - line_start;
+                row.line >= top && row.line <= bottom && column >= left && column <= right
             }) {
                 style = style.bg(C_SECONDARY()).add_modifier(Modifier::BOLD);
             }
@@ -6880,8 +7120,10 @@ fn render_rebis_source(
             spans.push(Span::styled(chars[index].to_string(), style));
         }
         // Give an insertion point at end-of-line (and a visible normal cursor on
-        // empty lines) without altering the source.
-        if row == cursor_row && cursor == end && cursor_column >= workspace.view_left {
+        // empty lines) without altering the source. Only on the row that actually
+        // ends the line — a wrapped line ends on its last fragment.
+        let ends_line = row.end == line_end;
+        if row.line == cursor_row && cursor == line_end && ends_line {
             let style = if workspace.mode == RebisMode::Normal {
                 Style::new().fg(C_BONE()).add_modifier(Modifier::REVERSED)
             } else {
@@ -6893,11 +7135,12 @@ fn render_rebis_source(
     }
     f.render_widget(Paragraph::new(Text::from(rendered)), area);
 
-    let visible_row = cursor_row.checked_sub(workspace.view_top)?;
-    let visible_column = cursor_column.checked_sub(workspace.view_left)?;
-    if visible_row >= area.height as usize || visible_column >= code_width {
+    let (cursor_visual_row, visible_column) = rebis_workspace::row_of_offset(&rows, cursor);
+    let visible_row = cursor_visual_row.checked_sub(first)?;
+    if visible_row >= area.height as usize || visible_column > code_width {
         return None;
     }
+    let _ = cursor_column;
     Some(Position {
         x: area.x + number_width as u16 + 2 + visible_column as u16,
         y: area.y + visible_row as u16,
@@ -7938,20 +8181,82 @@ mod tests {
     #[test]
     fn direct_tool_agent_mode_is_default_and_chaos_is_explicitly_toggleable() {
         let mut app = App::new();
-        assert!(!app.rebis_chaos_mode);
+        assert!(!app.chaos_mode);
         app.open_rebis(None);
 
         app.rebis.as_mut().unwrap().command = "chaos on".to_string();
         let action = app.rebis.as_mut().unwrap().execute_kaos_command();
         app.handle_rebis_action(action);
-        assert!(app.rebis_chaos_mode);
+        assert!(app.chaos_mode);
         assert!(app.rebis.as_ref().unwrap().message.contains("CHAOS mode"));
 
         app.rebis.as_mut().unwrap().command = "chaos off".to_string();
         let action = app.rebis.as_mut().unwrap().execute_kaos_command();
         app.handle_rebis_action(action);
-        assert!(!app.rebis_chaos_mode);
+        assert!(!app.chaos_mode);
         assert!(app.rebis.as_ref().unwrap().message.contains("DIRECT mode"));
+    }
+
+    /// The stance reaches CHATS, which is the whole point of moving it off the
+    /// Rebis run flag: in chaos mode a typed line asks for a program.
+    #[test]
+    fn a_chat_line_asks_for_a_program_only_in_chaos_mode() {
+        let direct = kaos_core::chat::DEFAULT_CONTEXT.render_turn(false, "", "add a --version flag");
+        let chaos = kaos_core::chat::DEFAULT_CONTEXT.render_turn(true, "", "add a --version flag");
+        assert!(!direct.contains(kaos_core::chaos::COMPOSE_CONTRACT));
+        assert!(chaos.contains(kaos_core::chaos::COMPOSE_CONTRACT));
+        assert!(chaos.contains("add a --version flag"));
+    }
+
+    /// A composed program lands in the run browser, QUEUED.
+    ///
+    /// Queued rather than running is the safety half of the design: composing
+    /// spends one call, and whatever the program itself spends stays a separate,
+    /// visible decision made at the authority gate.
+    #[test]
+    fn a_composed_answer_becomes_a_queued_run_that_was_not_started() {
+        let mut app = App::new();
+        app.chaos_mode = true;
+        app.session_reply =
+            "Here it is.\n\n```rebis\n(? \"inspect the parser\")\n```\n\nOne call.".to_string();
+        app.flush_reply();
+
+        assert_eq!(app.rebis_runs.len(), 1, "the program was not adopted");
+        assert_eq!(app.rebis_runs[0].state, RebisRunState::Queued);
+        assert!(app.queue.iter().any(|work| matches!(work, QueuedWork::Rebis { .. })));
+        // The prose stays in the conversation; only the fence became a run.
+        assert!(app
+            .session
+            .turns
+            .last()
+            .is_some_and(|turn| turn.text.contains("One call.")));
+    }
+
+    /// A DIRECT chat that quotes Rebis is answering a question about the
+    /// language, not proposing work — adopting it would open a run every time
+    /// someone asked what a macro does.
+    #[test]
+    fn a_direct_chat_quoting_rebis_does_not_open_a_run() {
+        let mut app = App::new();
+        app.chaos_mode = false;
+        app.session_reply = "For example:\n\n```rebis\n(? \"a prompt\")\n```".to_string();
+        app.flush_reply();
+        assert!(app.rebis_runs.is_empty());
+    }
+
+    /// A fence full of prose is not a program.
+    ///
+    /// The composer sometimes half-follows the contract, and a run entry that
+    /// cannot parse is worse than none: it looks launchable and fails at the
+    /// gate, after the user has approved authority for it.
+    #[test]
+    fn an_unparseable_composition_is_reported_rather_than_queued() {
+        let mut app = App::new();
+        app.chaos_mode = true;
+        app.session_reply = "```rebis\nthis is not (an s-expression\n```".to_string();
+        app.flush_reply();
+        assert!(app.rebis_runs.is_empty());
+        assert!(app.queue.is_empty());
     }
 
     #[test]
@@ -8496,7 +8801,7 @@ mod tests {
     #[test]
     fn parallel_chaos_runs_queue_only_their_authority_prompts() {
         let mut app = App::new();
-        app.rebis_chaos_mode = true;
+        app.chaos_mode = true;
         app.open_rebis(None);
         app.rebis.as_mut().unwrap().dismiss_chaos_star();
         for prompt in ["first", "second"] {
@@ -8614,7 +8919,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("( ) [ ] ~ # ' , $ % ^ & / -> <- ; \""));
+        assert!(screen.contains("( ) [ ] { } | ~ # ' , $ ? ! * = & &: + @ / % ^ <> >< -> <- ; \""));
 
         let operator_style = rebis_operator_style();
         for highlight in [
@@ -8742,7 +9047,7 @@ mod tests {
     fn rebis_agents_wait_for_authority_and_denial_launches_nothing() {
         let mut app = App::new();
         assert!(
-            !app.rebis_chaos_mode,
+            !app.chaos_mode,
             "one direct tool agent per prompt must be the editor default"
         );
         app.open_rebis(None);
@@ -9854,6 +10159,76 @@ mod tests {
         assert!(
             !app.follow,
             "a chat drag-selection must stop following the live tail"
+        );
+    }
+
+    #[test]
+    fn a_long_source_line_wraps_under_itself_with_a_blank_gutter() {
+        // Overflow goes UNDER rather than off the right edge, and the gutter says
+        // it is still the same line: the row that starts a line is numbered, the
+        // rows continuing it are blank.
+        let mut app = App::new();
+        app.open_rebis(None);
+        let workspace = app.rebis.as_mut().unwrap();
+        workspace.dismiss_chaos_star();
+        workspace.editor = kaos_workspace::rebis_workspace::Editor::new(
+            "(\"a prompt long enough to need more than one screen row to be read\")\nx",
+        );
+
+        let backend = ratatui::backend::TestBackend::new(46, 14);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row_text = |y: u16| {
+            (0..46)
+                .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+        };
+        let screen: Vec<String> = (0..14).map(row_text).collect();
+
+        // Find the row carrying line 1, then read the rows under it.
+        let first = screen
+            .iter()
+            .position(|line| line.contains(" 1 │("))
+            .unwrap_or_else(|| panic!("no numbered first line:\n{}", screen.join("\n")));
+        let under = &screen[first + 1];
+        // The pane's own frame is drawn with `│` too, so the gutter is the segment
+        // BETWEEN the frame and the gutter rule, and the text is what follows it.
+        let gutter = |line: &str| line.split('│').nth(1).unwrap_or("").to_string();
+        let body = |line: &str| line.split('│').nth(2).unwrap_or("").trim_end().to_string();
+        assert!(
+            under.matches('│').count() >= 2,
+            "the wrapped row kept no gutter: {under:?}"
+        );
+        assert!(
+            gutter(under).trim().is_empty(),
+            "a continuation row must not be numbered: {:?}",
+            gutter(under)
+        );
+        assert_eq!(
+            gutter(&screen[first]).trim(),
+            "1",
+            "the row that starts the line carries its number"
+        );
+        assert_eq!(
+            gutter(under).chars().count(),
+            gutter(&screen[first]).chars().count(),
+            "the blank gutter must be exactly as wide as a numbered one"
+        );
+        assert!(
+            !body(under).trim().is_empty(),
+            "nothing wrapped onto the next row: {under:?}"
+        );
+        let joined = format!("{}{}", body(&screen[first]), body(under));
+        assert!(
+            joined.contains("screen") || joined.contains("more than one"),
+            "the line did not continue under itself: {joined:?}"
+        );
+        // And the next SOURCE line is numbered 2, however many rows line 1 took.
+        assert!(
+            screen.iter().any(|line| line.contains(" 2 │x")),
+            "line 2 lost its number:\n{}",
+            screen.join("\n")
         );
     }
 

@@ -77,15 +77,32 @@ fn every_documented_example_calls_macros_that_exist() {
                     rebis_lang::RuntimeDiagnostic::ModuleNotFound { .. }
                 )
             });
+            // The same allowance for a file. An example showing `(&: "./x.md")`
+            // is showing the SHAPE of reading a file, and the reader does not
+            // have that file — nor does this test run under a host that would
+            // read one. A name bound to what the read did not return is the
+            // same cascade a missing module causes.
+            let absent_file = result.diagnostics.iter().any(|diagnostic| {
+                matches!(
+                    diagnostic,
+                    rebis_lang::RuntimeDiagnostic::InputUnavailable { .. }
+                )
+            });
             for diagnostic in &result.diagnostics {
                 let expected = matches!(
                     diagnostic,
                     rebis_lang::RuntimeDiagnostic::ModuleNotFound { .. }
+                        | rebis_lang::RuntimeDiagnostic::InputUnavailable { .. }
                 ) || (absent_module
                     && matches!(
                         diagnostic,
                         rebis_lang::RuntimeDiagnostic::UndefinedMacro { .. }
-                    ));
+                    ))
+                    || (absent_file
+                        && matches!(
+                            diagnostic,
+                            rebis_lang::RuntimeDiagnostic::UnboundValue { .. }
+                        ));
                 if expected {
                     continue;
                 }

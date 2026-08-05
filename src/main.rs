@@ -173,7 +173,43 @@ fn split_drop(line: &str) -> Vec<String> {
     toks
 }
 
+/// How deep a hosted Rebis run may nest.
+///
+/// Two orders of magnitude above the language's default, which is sized for the
+/// smallest stack a caller might have. Kaos knows its own stack because it makes
+/// it — see [`main`].
+const REBIS_NESTING: usize = 32_768;
+
+/// How much stack the interpreter gets.
+///
+/// Rebis trampolines tail positions, so a terminating loop of any length costs
+/// constant stack. An OPERAND position is genuine recursion and costs a frame —
+/// which is true of every Lisp, and the reason every Lisp implementation runs on
+/// a stack far larger than a thread's default.
+///
+/// This is virtual address space, not memory: pages are committed as they are
+/// touched, so a run that never recurses deeply never pays for it.
+const REBIS_STACK: usize = 256 * 1024 * 1024;
+
 fn main() {
+    // Everything runs on a stack sized for an interpreter rather than for a
+    // thread. Without this the language's own default nesting limit is the
+    // ceiling, and a recursive program stops far short of the expansion budget
+    // it was promised.
+    let worker = std::thread::Builder::new()
+        .name("kaos".to_string())
+        .stack_size(REBIS_STACK)
+        .spawn(run)
+        .expect("spawn the main worker");
+    match worker.join() {
+        Ok(()) => {}
+        // A panic has already printed its message; propagate the failure
+        // without wrapping it in a second one.
+        Err(_) => std::process::exit(101),
+    }
+}
+
+fn run() {
     if let Err(error) = kaos::config::load() {
         eprintln!("config: {error}");
     }
@@ -1173,29 +1209,140 @@ struct RebisInlet {
 }
 
 impl rebis_lang::Inlet for RebisInlet {
-    fn receive(&self, port: &str) -> Option<String> {
+    /// `(&)` — stop until the host hands over a value.
+    ///
+    /// `label` is what the value is about to be named by an enclosing `=`, so
+    /// the pause can say what it is waiting for rather than the bare word
+    /// "input". It is a courtesy: nothing routes on it, and two obtains with
+    /// the same label are still two separate waits.
+    fn ask(&self, label: Option<&str>) -> Option<rebis_lang::Received> {
         let path = self.path.as_deref()?;
+        let port = label.unwrap_or("input");
         // A value delivered before we blocked (or pre-seeded) is taken directly.
         if let Some(value) = kaos::rebis_inlet::take_input(path, port) {
-            return Some(value);
+            return Some(text(value));
         }
         // Otherwise stop until the host delivers a value and resumes us. A
         // resume with nothing delivered (a spurious SIGCONT) parks again.
         loop {
             if !kaos::pause::current_run(&kaos::rebis_inlet::await_reason(port)) {
-                // Pause is not enabled: we cannot block, so the port is unbound.
+                // Pause is not enabled: we cannot block, so nothing is obtained.
                 return None;
             }
             if let Some(value) = kaos::rebis_inlet::take_input(path, port) {
-                return Some(value);
+                return Some(text(value));
+            }
+        }
+    }
+
+    /// `(&: source)` — read what the program named, relative to the run's own
+    /// directory.
+    ///
+    /// The path is resolved under the working directory and refused if it
+    /// climbs out of it. A Rebis program is a thing people share — the std
+    /// library, the collection, a sigil someone sent you — so a program that
+    /// could name `../../.ssh/id_rsa` and have a host open it would make
+    /// running someone else's program an act of trust it does not look like.
+    /// Inside the project, a program may read what the person running it can
+    /// already read.
+    fn load(&self, source: &str) -> Option<rebis_lang::Received> {
+        let root = std::env::current_dir().ok()?;
+        let path = root.join(source);
+        let resolved = path.canonicalize().ok()?;
+        if !resolved.starts_with(root.canonicalize().ok()?) {
+            eprintln!("load     refused {source}: outside the run's directory");
+            return None;
+        }
+        let name = resolved
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| source.to_string());
+        match media_type(&resolved) {
+            // Text is text: the program can interpolate it, recall on it, route
+            // it — everything a value does.
+            None => std::fs::read_to_string(&resolved).ok().map(text),
+            // A picture has no useful text, so the value is its NAME. That way
+            // a prompt written around it still reads as a sentence, and the
+            // bytes travel beside the prompt rather than described into it.
+            Some(media_type) => {
+                let bytes = std::fs::read(&resolved).ok()?;
+                Some(rebis_lang::Received {
+                    text: name.clone(),
+                    attachments: vec![rebis_lang::Attachment {
+                        media_type,
+                        name,
+                        bytes,
+                    }],
+                })
             }
         }
     }
 }
 
+/// A received value with nothing attached.
+fn text(value: String) -> rebis_lang::Received {
+    rebis_lang::Received {
+        text: value,
+        attachments: Vec::new(),
+    }
+}
+
+/// The media type a file is handed to a model as, or `None` to read it as text.
+///
+/// By extension, because that is what a host can know without opening the file
+/// and guessing. Anything unrecognised is read as text: a source file, a log,
+/// a CSV are all things a model reads perfectly well, and a binary that is not
+/// a picture will simply fail to decode and be skipped by `read_to_string` —
+/// which is a better outcome than attaching bytes no provider will accept.
+fn media_type(path: &std::path::Path) -> Option<String> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let media = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        _ => return None,
+    };
+    Some(media.to_string())
+}
+
 impl rebis_lang::Oracle for RebisOracle<'_> {
     fn fire(&self, prompt: &str) -> Option<String> {
         self.try_fire(prompt).ok().flatten()
+    }
+
+    /// Which models a RUN may route itself to.
+    ///
+    /// Only ever asked about `(/ ,name …)` — a selector the program chose.
+    /// A written one is a person's decision and is never put to us.
+    ///
+    /// `KAOS_ROUTE_ALLOW` is a comma-separated list of prefixes; unset means
+    /// unrestricted, so nothing changes for anyone who has not asked for this.
+    /// Prefixes rather than exact names because a provider is the unit that
+    /// costs money — `ollama:` is the local machine and free, `openrouter:` is
+    /// billed — and pinning exact model names would need editing every time a
+    /// version moved.
+    fn permits_model(&self, model: &str) -> bool {
+        // Environment first, then the config file — the same precedence every
+        // other Kaos setting follows. Reading only the file meant `KAOS_ROUTE_ALLOW=…`
+        // on the command line silently did nothing, and a policy that silently
+        // does not apply is worse than no policy at all.
+        let Some(allowed) = std::env::var("KAOS_ROUTE_ALLOW")
+            .ok()
+            .or_else(|| kaos::config::value("KAOS_ROUTE_ALLOW"))
+        else {
+            return true;
+        };
+        let allowed = allowed.trim();
+        if allowed.is_empty() {
+            return true;
+        }
+        allowed
+            .split(',')
+            .map(str::trim)
+            .filter(|prefix| !prefix.is_empty())
+            .any(|prefix| model.starts_with(prefix))
     }
 
     fn try_fire(&self, prompt: &str) -> Result<Option<String>, String> {
@@ -1214,6 +1361,20 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
     fn try_fire_routed(
         &self,
         prompt: &str,
+        model_selector: Option<&str>,
+        scope: &rebis_lang::ExecutionScope,
+        call: usize,
+    ) -> Result<Option<String>, String> {
+        self.try_fire_attached(prompt, &[], model_selector, scope, call)
+    }
+
+    /// A prompt fired with files in scope — see `crate::attach` for how each
+    /// provider carries them, and `docs/SPEC.md`'s framing section for how they
+    /// got into scope.
+    fn try_fire_attached(
+        &self,
+        prompt: &str,
+        attached: &[rebis_lang::Attachment],
         model_selector: Option<&str>,
         scope: &rebis_lang::ExecutionScope,
         call: usize,
@@ -1287,12 +1448,21 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             let _ = std::io::stdout().flush();
             let system = kaos::conductor::rebis_agent_system_prompt();
             let response = loop {
-                match model.complete_sampled(
+                // Files in scope go on the wire; whatever this provider
+                // cannot carry is reported rather than dropped, so an answer
+                // about a picture the model never saw is never mistaken for
+                // one about a picture it did.
+                let (answer, refused) = model.complete_attached(
                     &system,
                     &effective_prompt,
+                    attached,
                     std::time::Duration::from_secs(timeout_s),
                     Some(sampling),
-                ) {
+                );
+                for refusal in &refused {
+                    println!("attach   not sent · {refusal}");
+                }
+                match answer {
                     Ok(response) if response.trim().is_empty() => {
                         if kaos::pause::current_run("model returned no answer") {
                             continue;
@@ -1625,7 +1795,12 @@ fn rebis_cmd(session: &Session, arg: &str) {
 fn rebis_run_cmd(session: &Session, arg: &str) {
     let mut dry = false;
     let mut allow_tools = false;
-    let mut chaos = false;
+    // `--chaos` is now one spelling of a stance that also has an environment
+    // variable and a config key, so a run launched from a chaos-mode host is in
+    // chaos mode without the host restating the flag. The flag can still turn it
+    // on for one invocation; it is a set, never a clear, so `--chaos` and
+    // `KAOS_CHAOS=1` cannot disagree.
+    let mut chaos = kaos_core::chaos::enabled();
     let mut source_arg = arg.trim();
     loop {
         let mut parts = source_arg.splitn(2, char::is_whitespace);
@@ -1666,6 +1841,13 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
         // every direct or chaos agent beneath it without duplicate prompts.
         std::env::set_var("KAOS_CLAUDE_YOLO", if allow_tools { "1" } else { "0" });
     }
+    // The resolved stance, not the flag: a run that reached chaos through the
+    // config still passes it down, and a run that did not is not put into chaos
+    // by a variable the launcher forgot to clear.
+    std::env::set_var(
+        kaos_core::chaos::ENABLE_ENV,
+        kaos_core::chaos::export(chaos),
+    );
     let source = if std::path::Path::new(source_arg).is_file() {
         match std::fs::read_to_string(source_arg) {
             Ok(source) => source,
@@ -1689,7 +1871,16 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
     if !std::io::stdin().is_terminal() {
         let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
     }
-    let mut record = rebis_lang::Record::from_texts(&[input]);
+    // The run starts knowing what earlier runs decided to keep. Every accepted
+    // answer enters the record as it is produced and is thrown away at the end;
+    // a `(! A)` dream is the mark that one of them should still be here, and
+    // this is where "still here" is cashed in. Piped input seeds the same
+    // record, so a flashback cannot tell where a memory came from — which is
+    // right: it is all just evidence.
+    let dream = kaos_core::dream::Dream::here();
+    let mut seed = dream.texts();
+    seed.push(input);
+    let mut record = rebis_lang::Record::from_texts(&seed);
     let mut stream = |event: &rebis_lang::ExecutionEvent| {
         use rebis_lang::{ExecutionEvent, FlowDirection};
         match event {
@@ -1712,6 +1903,20 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
                     println!("answer   {line}");
                 }
             }
+            // The one operation that makes evidence unreachable says what it
+            // took, and how much: a count alone would not let a reader tell a
+            // correction from an eviction.
+            ExecutionEvent::Superseded { topic, buried } => {
+                println!("event    superseded {topic} · {} line(s)", buried.len());
+                for line in buried {
+                    println!("buried   {line}");
+                }
+            }
+            ExecutionEvent::InvariantBroken { before, after } => println!(
+                "event    invariant refused an arrow\nbefore   {}\nafter    {}",
+                before.replace('\n', " "),
+                after.replace('\n', " ")
+            ),
             ExecutionEvent::FlowRouted { direction, .. } => println!(
                 "event    {} value routed",
                 match direction {
@@ -1732,10 +1937,36 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             ExecutionEvent::MacroExpanded { name, remaining } => {
                 println!("event    macro {name} expanded · {remaining} remaining");
             }
+            // The source no longer says which model ran this subtree — that is
+            // what a computed selector costs — so the trace is where the answer
+            // now lives.
+            ExecutionEvent::ModelRouted { name, selector } => {
+                println!("event    routed `{name}` → {selector}");
+            }
             ExecutionEvent::SyntaxInverted => println!("event    syntax orientation inverted"),
-            ExecutionEvent::InputReceived { port, value } => {
+            ExecutionEvent::InputReceived {
+                port,
+                value,
+                attachments,
+            } => {
                 let head = value.lines().next().unwrap_or_default();
-                println!("event    input received on {port} · {head}");
+                // Files are counted rather than shown: their bytes are not a
+                // thing to print, and how many are in scope is what a reader of
+                // the stream needs to know — every prompt inside this port's
+                // body carries them.
+                let files = match attachments {
+                    0 => String::new(),
+                    1 => " · 1 file attached".to_string(),
+                    many => format!(" · {many} files attached"),
+                };
+                println!("event    input received on {port} · {head}{files}");
+            }
+            // A binding fires nothing of its own; what it reports is that a
+            // name now stands for an answer, so every later mention of it is
+            // free. The value's own firing is already in the stream above.
+            ExecutionEvent::ValueBound { name, value } => {
+                let head = value.lines().next().unwrap_or_default();
+                println!("event    {name} bound · {head}");
             }
             ExecutionEvent::ModuleLoaded {
                 module,
@@ -1773,6 +2004,11 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
         } else {
             model_call_slice
         })
+        // Kaos runs the interpreter on a large stack (see `on_a_real_stack`),
+        // so it can afford far more nesting than the language's default, which
+        // is sized for the smallest stack a caller might have. Raising this
+        // WITHOUT the stack would trade a diagnostic for a crash.
+        .with_nesting(limit("KAOS_REBIS_MAX_NESTING", REBIS_NESTING))
         .with_max_concurrency(max_concurrency);
     let worktrees = if !dry
         && allow_tools
@@ -1849,6 +2085,19 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
             )
         }
     };
+    // What the run's dreams marked outlives it here, and nowhere else. The
+    // language reports; the host decides what keeping means.
+    if !result.kept.is_empty() {
+        match dream.keep(&result.kept) {
+            Ok(0) => {}
+            Ok(added) => println!(
+                "dream    kept {added} answer{} · {} remembered",
+                if added == 1 { "" } else { "s" },
+                dream.len()
+            ),
+            Err(error) => eprintln!("dream    {error}"),
+        }
+    }
     println!("{}", rebis_lang::REBIS_SIGIL);
     println!("RESULT");
     if let Some(output) = &result.output {
@@ -1943,6 +2192,27 @@ fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
         std::env::var("KAOS_CHAT_OUTPUT").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
     );
+
+    // Chaos mode is applied HERE rather than only at each frontend, so that
+    // `kaos chat "…"` from a shell, `kaos request chat`, and a scripted pipe
+    // all get the stance too — those callers pass a bare intent with no
+    // envelope, and there is no other place they pass through.
+    //
+    // The guard is what makes that safe: a frontend that already rendered the
+    // turn with `render_chaos_chat` has the contract in the text, and wrapping
+    // it again would tell the model to compose its own composer. Presence of
+    // the contract is the test, so the two paths cannot both fire.
+    let composed;
+    let task = if kaos_core::chaos::enabled() && !task.contains(kaos_core::chaos::COMPOSE_CONTRACT) {
+        composed = kaos_core::chat::DEFAULT_CONTEXT.render_chaos_chat("", task);
+        if stream {
+            println!("chat    chaos mode · composing the intent as a Rebis program first");
+            let _ = io::stdout().flush();
+        }
+        composed.as_str()
+    } else {
+        task
+    };
     let result = if spec.kind == Kind::ClaudeCli {
         if stream {
             let mut emit = |line: &str| {
@@ -2829,6 +3099,57 @@ fn render_step(n: usize, step: &Step) {
                 dim(ASH(), &one_line(&line, 88))
             );
         }
+        Tool::Search { query } => {
+            // What was asked, then how many places it found — the URLs
+            // themselves are in the fold, since one line of them is unreadable.
+            println!(
+                "  {} {} {}",
+                idx,
+                fg(PURPLE(), "\u{2315} search"),
+                bone(&one_line(query, 72))
+            );
+            let found = step
+                .observation
+                .lines()
+                .filter(|line| line.contains("http"))
+                .count();
+            println!(
+                "     {} {}",
+                dim(ASH(), "\u{2192}"),
+                dim(ASH(), &format!("{found} result(s)"))
+            );
+        }
+        Tool::Fetch { url } => {
+            println!(
+                "  {} {} {}",
+                idx,
+                fg(PURPLE(), "\u{2913} fetch"),
+                dim(ASH(), &one_line(url, 84))
+            );
+            println!(
+                "     {} {}",
+                dim(ASH(), "\u{2192}"),
+                dim(
+                    ASH(),
+                    &format!("{} characters read", step.observation.chars().count())
+                )
+            );
+        }
+        Tool::Rebis { note, source } => {
+            // A run about to appear beneath this one. Naming it here is what
+            // makes the child, when it shows up, obviously this run's doing.
+            println!(
+                "  {} {} {}",
+                idx,
+                fg(GREEN(), "\u{2325} rebis run"),
+                bone(&one_line(note, 70))
+            );
+            println!(
+                "     {} {}",
+                dim(ASH(), "\u{2192}"),
+                dim(ASH(), &format!("{} bytes of program", source.len()))
+            );
+        }
         Tool::Timer { after, note } => {
             // The run is about to go quiet, so the reason is the whole line:
             // otherwise the silence that follows looks like a stall.
@@ -2900,6 +3221,9 @@ fn render_step_detail(n: usize, step: &Step) {
         Tool::EditFile { path, .. } => format!("edit {path}"),
         Tool::WriteFile { path, .. } => format!("write {path}"),
         Tool::Bash { cmd } => format!("$ {}", one_line(cmd, 48)),
+        Tool::Search { query } => format!("search {}", one_line(query, 44)),
+        Tool::Fetch { url } => format!("fetch {}", one_line(url, 48)),
+        Tool::Rebis { note, .. } => format!("rebis run {}", one_line(note, 40)),
         Tool::Timer { after, .. } => format!("timer {after}"),
         Tool::Finish { .. } => "finish".to_string(),
     };
@@ -2944,6 +3268,28 @@ fn render_step_detail(n: usize, step: &Step) {
         Tool::ReadFile { .. } => {
             println!("  {}", ash("what it saw:"));
             for l in step.observation.lines() {
+                println!("    {}", dim(ASH(), l));
+            }
+        }
+        Tool::Search { .. } => {
+            // Every result in full, so the reader can see which page an
+            // assertion later in the run actually came from.
+            println!("  {}", ash("what it found:"));
+            for l in step.observation.lines() {
+                println!("    {}", dim(ASH(), l));
+            }
+        }
+        Tool::Fetch { url } => {
+            println!("  {}", ash(&format!("the page, as read \u{2014} {url}:")));
+            for l in step.observation.lines() {
+                println!("    {}", dim(ASH(), l));
+            }
+        }
+        Tool::Rebis { source, .. } => {
+            // The program in full: it is about to run, and this is the only
+            // place it is shown before it does.
+            println!("  {}", ash("the program it asked to run:"));
+            for l in source.lines() {
                 println!("    {}", dim(ASH(), l));
             }
         }
