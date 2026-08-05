@@ -5,10 +5,11 @@
 //! Every diagnostic and every graph shown by the workspace comes from
 //! [`rebis_lang::parse`].
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use kaos_core::music::{self, Desk, Timbre};
 use kaos_core::retained::RetainedLog;
 use rebis_lang::{Expr, ModuleName, ModuleResolver, Record};
 
@@ -69,10 +70,97 @@ pub enum Highlight {
     Invalid,
 }
 
+/// One screen row of a soft-wrapped source view.
+///
+/// A long line does not run off the right edge — it continues on the next screen
+/// row. Which means a screen row and a source line are no longer the same thing,
+/// and the gutter is what tells them apart: the row that STARTS a line carries its
+/// number, and every row continuing it carries blank space of the same width. So
+/// the eye reads "still line 42" from the absence of a number.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct VisualRow {
+    /// Zero-based source line this row belongs to.
+    pub line: usize,
+    /// Char offset in the source where this row begins.
+    pub start: usize,
+    /// Char offset just past this row's last character.
+    pub end: usize,
+    /// Whether this row continues the line above rather than starting a new one.
+    ///
+    /// The gutter shows a number exactly when this is false.
+    pub continues: bool,
+}
+
+/// Break source into the screen rows a viewport `columns` wide would show.
+///
+/// Wrapping is by character, not by word: this is code, and a break chosen to
+/// keep words whole would move a token away from the column its indentation put
+/// it at. An empty line still occupies one row — a blank line is a line.
+///
+/// Shared by both front ends so the same source wraps at the same places in the
+/// terminal and in the visual editor, and a line number means the same thing in
+/// either.
+#[must_use]
+pub fn wrapped_rows(source: &str, columns: usize) -> Vec<VisualRow> {
+    let columns = columns.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0usize;
+    for (line, text) in source.split('\n').enumerate() {
+        let length = text.chars().count();
+        let mut consumed = 0usize;
+        loop {
+            let taken = (length - consumed).min(columns);
+            rows.push(VisualRow {
+                line,
+                start: start + consumed,
+                end: start + consumed + taken,
+                continues: consumed > 0,
+            });
+            consumed += taken;
+            if consumed >= length {
+                break;
+            }
+        }
+        // Past the newline that ended this line.
+        start += length + 1;
+    }
+    rows
+}
+
+/// Width of the line-number gutter for a document of `lines` lines.
+///
+/// Two digits at least, so a short file's gutter does not visibly widen as it
+/// grows past nine lines.
+#[must_use]
+pub fn gutter_width(lines: usize) -> usize {
+    lines.to_string().len().max(2)
+}
+
+/// Which screen row holds the char at `offset`, and how far into it.
+///
+/// The cursor is a char offset in the source; a wrapped view has to place it on a
+/// row, and the last row of a line owns the position just past its end so the
+/// cursor can sit at end-of-line.
+#[must_use]
+pub fn row_of_offset(rows: &[VisualRow], offset: usize) -> (usize, usize) {
+    for (index, row) in rows.iter().enumerate() {
+        let last_of_line = rows
+            .get(index + 1)
+            .is_none_or(|next| next.line != row.line);
+        if offset < row.end || (last_of_line && offset <= row.end) {
+            return (index, offset.saturating_sub(row.start));
+        }
+    }
+    rows.last().map_or((0, 0), |row| {
+        (rows.len() - 1, offset.saturating_sub(row.start))
+    })
+}
+
 /// Complete punctuation token set accepted by Rebis, in reference-manual
 /// order. The editor renders this as a compact top-bar language legend.
 pub const REBIS_SYMBOLS: &[&str] = &[
-    "(", ")", "[", "]", "~", "#", "'", ",", "$", "%", "^", "&", "/", "->", "<-", ";", "\"",
+    "(", ")", "[", "]", "{", "}", "|", "~", "#", "'", ",", "$", "?", "!", "*", "=", "&", "&:", "+", "@",
+    "/", "%", "^", "<>", "><", "->", "<-", ";", "\"",
 ];
 
 /// The live state of a source buffer, for an editor's status line.
@@ -266,6 +354,52 @@ pub fn scoped_block_source(source: &str, block_source: &str) -> Result<String, S
     }
 }
 
+/// The `/dream` family: what this machine remembers, and how to forget it.
+///
+/// A read and a delete, and nothing else. Writing is `(! A)`'s job — a memory
+/// you can add to from the command line is a memory that stops being a record
+/// of what the programs actually decided.
+fn dream_command(cwd: &Path, rest: &str) -> String {
+    let dream = kaos_core::dream::Dream::for_project(cwd);
+    let (word, argument) = rest
+        .split_once(char::is_whitespace)
+        .map_or((rest, ""), |(word, argument)| (word, argument.trim()));
+    match word {
+        "" | "list" => {
+            let kept = dream.all();
+            if kept.is_empty() {
+                return format!(
+                    "dream · nothing kept yet · `(! A)` keeps an answer · {}",
+                    dream.path().display()
+                );
+            }
+            let recent = kept
+                .iter()
+                .enumerate()
+                .rev()
+                .take(3)
+                .map(|(index, entry)| {
+                    format!("{index}: {}", truncate(entry.text.lines().next().unwrap_or(""), 40))
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            format!("dream · {} kept · {recent}", kept.len())
+        }
+        "forget" if argument == "all" => match dream.forget(None) {
+            Ok(count) => format!("dream · forgot all {count}"),
+            Err(error) => error,
+        },
+        "forget" => match argument.parse::<usize>() {
+            Ok(index) => match dream.forget(Some(index)) {
+                Ok(_) => format!("dream · forgot {index} · {} left", dream.len()),
+                Err(error) => error,
+            },
+            Err(_) => "dream · forget wants a number, or `all`".to_string(),
+        },
+        other => format!("dream · unknown word `{other}` — list, forget N, forget all"),
+    }
+}
+
 /// Visual projection shown beside the source editor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Visualization {
@@ -273,6 +407,11 @@ pub enum Visualization {
     Mandala,
     /// Search results from the user's saved Rebis sigil library.
     Sigils,
+    /// The program as sound: its wave drawn in braille, and the score beneath.
+    /// Derived on the `/music` command rather than on every keystroke — a
+    /// piece is rendered in full before it can be drawn, and re-rendering
+    /// mid-word would be several megabytes a character.
+    Music,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -920,13 +1059,6 @@ impl Editor {
         self.pending_normal.clear();
     }
 
-    /// Move to the first character in the document.
-    pub fn document_start(&mut self) {
-        self.cursor = 0;
-        self.preferred_column = None;
-        self.pending_normal.clear();
-    }
-
     /// Move to the final insertion point in the document.
     pub fn document_end(&mut self) {
         self.cursor = self.char_len();
@@ -972,28 +1104,6 @@ impl Editor {
         self.cursor = cursor;
         self.preferred_column = None;
         self.pending_normal.clear();
-    }
-
-    /// Move to the start of the previous word.
-    pub fn previous_word(&mut self) {
-        let chars: Vec<char> = self.source.chars().collect();
-        let mut cursor = self.cursor.saturating_sub(1);
-        while cursor > 0 && !is_word(chars[cursor]) {
-            cursor -= 1;
-        }
-        while cursor > 0 && is_word(chars[cursor - 1]) {
-            cursor -= 1;
-        }
-        self.cursor = cursor;
-        self.preferred_column = None;
-        self.pending_normal.clear();
-    }
-
-    /// Whether normal mode is waiting for the rest of a count, operator,
-    /// multi-key motion, or text object.
-    #[must_use]
-    pub fn has_pending_normal(&self) -> bool {
-        !self.pending_normal.is_empty()
     }
 
     /// Feed a character into Vim's normal-mode operator/motion grammar.
@@ -1432,12 +1542,6 @@ impl Editor {
         self.yank_blockwise = false;
         self.source.replace_range(from..to, "");
         true
-    }
-
-    /// Implement Vim's `gg` document-start motion. Returns true on the second
-    /// `g`, when the motion has executed.
-    pub fn normal_g(&mut self) -> bool {
-        self.normal_key('g') == NormalAction::Moved
     }
 
     /// Cancel an unfinished normal-mode operator such as the first `d` in `dd`.
@@ -2528,10 +2632,21 @@ fn highlight_for(
         TokenKind::Paren => Highlight::Parenthesis,
         // Brackets and the prefix operators are all structural punctuation.
         TokenKind::Bracket
+        | TokenKind::Brace
+        | TokenKind::Source
+        | TokenKind::Meta
+        | TokenKind::Star
+        | TokenKind::At
+        | TokenKind::Bar
         | TokenKind::Tilde
         | TokenKind::Quote
         | TokenKind::Unquote
         | TokenKind::Dollar
+        | TokenKind::Question
+        | TokenKind::Bang
+        | TokenKind::Equals
+        | TokenKind::Load
+        | TokenKind::Plus
         | TokenKind::Amp
         | TokenKind::Percent => Highlight::Mediate,
         TokenKind::Invert => Highlight::Invert,
@@ -2643,6 +2758,10 @@ pub struct Workspace {
     /// detaches the source viewport until the next source action.
     source_follow_cursor: bool,
     pub visualization: Visualization,
+    /// The program as sound. Shares every rule with the visual editor's Sound
+    /// tab — same scale, same synth, same player — because both are this one
+    /// desk wearing a different face.
+    pub music: Desk,
     pub panel_visible: bool,
     /// The run browser is a panel projection, not ownership of execution.
     /// Switching this off never pauses or clears app-owned runs.
@@ -2693,6 +2812,14 @@ pub struct Workspace {
     sigil_chat_busy: bool,
     sigil_chat_run_id: Option<u64>,
     sigil_results: Vec<SigilEntry>,
+    /// Where a search matched inside a sigil, when it did: the one-based line
+    /// and the line itself. A name-only match has no entry here.
+    ///
+    /// Kept beside the results rather than inside [`SigilEntry`] because the
+    /// entry is an identity — it sorts, groups into folders, and is what
+    /// opening acts on — and where a query happened to match is not part of
+    /// that identity.
+    sigil_hits: BTreeMap<SigilEntry, (usize, String)>,
     temporary_sigils: Vec<TemporarySigil>,
     active_temporary_sigil: Option<u64>,
     current_sigil: Option<String>,
@@ -2739,6 +2866,7 @@ impl Workspace {
             view_left: 0,
             source_follow_cursor: true,
             visualization: Visualization::Mandala,
+            music: Desk::default(),
             panel_visible: true,
             runs_visible: false,
             graph_focus: false,
@@ -2769,6 +2897,7 @@ impl Workspace {
             sigil_chat_busy: false,
             sigil_chat_run_id: None,
             sigil_results: Vec::new(),
+            sigil_hits: BTreeMap::new(),
             temporary_sigils: Vec::new(),
             active_temporary_sigil: None,
             current_sigil: None,
@@ -3031,17 +3160,31 @@ impl Workspace {
 
     /// Keep the cursor in the editor viewport.
     pub fn ensure_visible(&mut self, rows: usize, columns: usize) {
-        let (row, column) = self.editor.row_col();
+        let rows = rows.max(1);
+        let (row, _) = self.editor.row_col();
         if row < self.view_top {
             self.view_top = row;
-        } else if row >= self.view_top + rows.max(1) {
-            self.view_top = row + 1 - rows.max(1);
+        } else if row >= self.view_top + rows {
+            self.view_top = row + 1 - rows;
         }
-        if column < self.view_left {
-            self.view_left = column;
-        } else if column >= self.view_left + columns.max(1) {
-            self.view_left = column + 1 - columns.max(1);
+        // The view scrolls in SOURCE lines but the pane is filled with SCREEN
+        // rows, and a wrapped line occupies several. Counting only lines would let
+        // the cursor sit below the pane whenever the lines above it wrap — the
+        // longer the file's lines, the further off-screen. So walk the wrapped rows
+        // and pull the top down until the cursor's own row fits.
+        let wrapped = wrapped_rows(self.editor.source(), columns);
+        let (cursor_row, _) = row_of_offset(&wrapped, self.editor.cursor());
+        while let Some(top) = wrapped.iter().position(|row| row.line >= self.view_top) {
+            if cursor_row < top + rows {
+                break;
+            }
+            // One source line at a time, so the top of the pane is always the
+            // start of a line rather than the middle of a wrapped one.
+            self.view_top += 1;
         }
+        // No horizontal scrolling: overflow goes under, so there is nothing to
+        // the right to reach.
+        self.view_left = 0;
     }
 
     /// Whether rendering should keep the source cursor inside the viewport.
@@ -3247,6 +3390,13 @@ impl Workspace {
                 let source = self.editor.source().trim().to_string();
                 self.open_visual_with(&source);
             }
+            _ if command == "dream" || command.starts_with("dream ") => {
+                let cwd = self.cwd.clone();
+                self.message = dream_command(&cwd, command.trim_start_matches("dream").trim());
+            }
+            _ if command == "music" || command.starts_with("music ") => {
+                self.music_command(command.trim_start_matches("music").trim());
+            }
             "tree" => {
                 self.sigil_chat_visible = false;
                 self.visualization = Visualization::Tree;
@@ -3398,7 +3548,7 @@ impl Workspace {
             }
             "help" | "" => {
                 self.message =
-                    "/chat [run ID QUESTION] /config [restore] /model [MODEL] /chaos [on|off] /new /clear /quit /run [block|parallel] /runs /save [FILE] /vim toggle|on|off|always|never /search [TEXT] /output [copy|write FILE] /theme dark|light /mandala /visual [open] /tree /sigils [QUERY] /sigil save|open NAME /sigil chat /panel toggle|hide|show /graph /source /format[!] /mouse [on|off] /record FILE"
+                    "/chat [run ID QUESTION] /config [restore] /model [MODEL] /chaos [on|off] /new /clear /quit /run [block|parallel] /runs /save [FILE] /vim toggle|on|off|always|never /search [TEXT] /output [copy|write FILE] /theme dark|light /mandala /visual [open] /tree /dream [forget N|all] /music [play|stop|export FILE|root HZ|pace S|partials N|octaves N|timbre NAME] /sigils [QUERY] /sigil save|open NAME /sigil chat /panel toggle|hide|show /graph /source /format[!] /mouse [on|off] /record FILE"
                         .to_string()
             }
             _ => self.message = format!("unknown Kaos command /{command}"),
@@ -3601,11 +3751,16 @@ impl Workspace {
             for entry in group {
                 if !rest(entry, prefix).contains('/') {
                     let embedded = matches!(entry, SigilEntry::Std(_));
-                    let label = if embedded {
+                    let mut label = if embedded {
                         format!("{head}  (embedded)")
                     } else {
                         head.to_string()
                     };
+                    // A content match says where and what, so the browser
+                    // answers the question without being opened first.
+                    if let Some((number, line)) = self.sigil_hits.get(entry) {
+                        label.push_str(&format!("  :{number}  {}", truncate(line, 52)));
+                    }
                     rows.push(VisibleRow::Leaf {
                         entry: (*entry).clone(),
                         depth,
@@ -3652,17 +3807,50 @@ impl Workspace {
         false
     }
 
+    /// Put the cursor on `line` (one-based) — where a content search matched.
+    ///
+    /// Clamped rather than refused: a sigil can change between the search and
+    /// the opening, and landing at the end of a file that shrank is better than
+    /// declining to open it.
+    fn go_to_line(&mut self, line: usize) {
+        let source = self.editor.source().to_string();
+        let offset = source
+            .split_inclusive('\n')
+            .take(line.saturating_sub(1))
+            .map(str::len)
+            .sum::<usize>()
+            .min(source.len());
+        self.editor.set_cursor(offset);
+        self.follow_source_cursor();
+        self.graph_focus = false;
+    }
+
     /// Open the leaf under the selection, or toggle it if it is a folder.
     pub fn open_selected_sigil(&mut self) {
         let rows = self.visible_sigil_rows();
+        // Where the search matched inside this sigil, if it did — read before
+        // opening, because opening replaces the results.
+        let hit = rows.get(self.sigil_choice).and_then(|row| match row {
+            VisibleRow::Leaf { entry, .. } => self.sigil_hits.get(entry).map(|(line, _)| *line),
+            VisibleRow::Folder { .. } => None,
+        });
         match rows.get(self.sigil_choice) {
             Some(VisibleRow::Folder { .. }) => {
                 self.toggle_selected_folder();
             }
-            Some(VisibleRow::Leaf { entry, .. }) => match entry.clone() {
-                SigilEntry::Temporary { id, .. } => self.open_temporary_sigil(id),
-                SigilEntry::Saved(name) | SigilEntry::Std(name) => self.open_sigil(&name),
-            },
+            Some(VisibleRow::Leaf { entry, .. }) => {
+                match entry.clone() {
+                    SigilEntry::Temporary { id, .. } => self.open_temporary_sigil(id),
+                    SigilEntry::Saved(name) | SigilEntry::Std(name) => self.open_sigil(&name),
+                }
+                // A search that found the line is a search that should land on
+                // it. Opening at the top and leaving the reader to find it
+                // again is the browser knowing something and not saying it.
+                if let Some(line) = hit {
+                    self.go_to_line(line);
+                    self.message = format!("{} · line {line}", self.message);
+                }
+            }
             None => self.message = "no sigil selected".to_string(),
         }
     }
@@ -4038,18 +4226,76 @@ impl Workspace {
         }
     }
 
+    /// Note where `query` first appears in `source`, and say whether it did.
+    ///
+    /// Case-insensitive, like the name match beside it, and comments count:
+    /// this library documents its macros above them, so the sentence that
+    /// explains what something is for is exactly what a person half-remembers.
+    fn record_hit(&mut self, entry: &SigilEntry, source: &str, query: &str) -> bool {
+        let Some((number, line)) = source
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.to_ascii_lowercase().contains(query))
+        else {
+            return false;
+        };
+        self.sigil_hits
+            .insert(entry.clone(), (number + 1, line.trim().to_string()));
+        true
+    }
+
+    /// Find sigils by name **or** by what is written in them.
+    ///
+    /// A library is a body of source, so searching it should be a grep: a query
+    /// that names no sigil but appears in one still finds it, and the result
+    /// says where. That is how you find the macro you half-remember without
+    /// already knowing which module someone filed it under — which is the only
+    /// time you actually need to search.
+    ///
+    /// A path is still a path. `std/map` matches the module by name, and
+    /// searching for `std/` lists the whole embedded folder, because a name
+    /// match and a content match are the same list.
+    ///
+    /// The first hit is what is recorded, and opening the result goes to it.
+    /// One line per sigil rather than one per occurrence: the browser is a
+    /// tree of what exists, and a file that matched forty times is still one
+    /// file — the editor's own `/search` is what walks the rest.
     fn search_sigils(&mut self, query: &str) {
         let query = query.to_ascii_lowercase();
         let dir = self.sigils_dir();
-        let mut found = Vec::new();
-        Self::collect_sigils(&dir, "", 0, &mut found);
-        let mut names = found
+        let mut saved = Vec::new();
+        Self::collect_sigils(&dir, "", 0, &mut saved);
+        self.sigil_hits.clear();
+
+        let embedded: Vec<String> = rebis_lang::std_modules()
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+        let collected: Vec<String> = kaos_core::sigils::collection_entries()
             .into_iter()
-            .filter(|name| name.to_ascii_lowercase().contains(&query))
-            .map(SigilEntry::Saved)
-            .collect::<Vec<_>>();
-        names.sort();
-        let mut temporary = self
+            .map(|entry| entry.name)
+            .collect();
+
+        let matches_name = |name: &String| name.to_ascii_lowercase().contains(&query);
+        let named = saved.iter().any(matches_name)
+            || embedded.iter().any(matches_name)
+            || collected.iter().any(matches_name)
+            || self
+                .temporary_sigils
+                .iter()
+                .any(|sigil| sigil.label.to_ascii_lowercase().contains(&query));
+
+        // Contents are searched only when NOTHING is named that. Not a
+        // ranking — a fallback, and the difference is the whole design.
+        // Searching `std/` is browsing: it should list that folder, not every
+        // module that imports from it, which is what a plain grep returns and
+        // is most of the library. Searching `std-memo` is looking for
+        // something, nothing is called that, and the contents are where the
+        // answer is. Which search you meant is legible from whether anything
+        // bears the name, so it does not have to be asked for.
+        let grep = !named && !query.is_empty();
+
+        let mut sigils: Vec<SigilEntry> = self
             .temporary_sigils
             .iter()
             .filter(|sigil| sigil.label.to_ascii_lowercase().contains(&query))
@@ -4057,29 +4303,62 @@ impl Workspace {
                 id: sigil.id,
                 label: sigil.label.clone(),
             })
-            .collect::<Vec<_>>();
-        temporary.sort_by_key(|entry| match entry {
+            .collect();
+        sigils.sort_by_key(|entry| match entry {
             SigilEntry::Temporary { id, .. } => *id,
             SigilEntry::Saved(_) | SigilEntry::Std(_) => unreachable!(),
         });
-        temporary.extend(names);
-        // The embedded standard library lists last, as a std/ folder.
-        temporary.extend(
+
+        let mut personal: Vec<SigilEntry> = saved
+            .into_iter()
+            .filter(|name| {
+                if !grep {
+                    return matches_name(name);
+                }
+                let source = fs::read_to_string(dir.join(format!("{name}.rebis")))
+                    .ok()
+                    .unwrap_or_default();
+                self.record_hit(&SigilEntry::Saved(name.clone()), &source, &query)
+            })
+            .map(SigilEntry::Saved)
+            .collect();
+        personal.sort();
+        sigils.extend(personal);
+
+        // The embedded standard library lists last, as a std/ folder, and the
+        // collection after it.
+        sigils.extend(
             rebis_lang::std_modules()
                 .iter()
-                .map(|(name, _)| *name)
-                .filter(|name| name.to_ascii_lowercase().contains(&query))
-                .map(|name| SigilEntry::Std(name.to_string())),
+                .filter(|(name, source)| {
+                    if !grep {
+                        return name.to_ascii_lowercase().contains(&query);
+                    }
+                    self.record_hit(&SigilEntry::Std((*name).to_string()), source, &query)
+                })
+                .map(|(name, _)| SigilEntry::Std((*name).to_string()))
+                .collect::<Vec<_>>(),
         );
-        temporary.extend(
-            kaos_core::sigils::collection_entries()
+        sigils.extend(
+            collected
                 .into_iter()
-                .map(|entry| entry.name)
-                .filter(|name| name.to_ascii_lowercase().contains(&query))
-                .map(SigilEntry::Std),
+                .filter(|name| {
+                    if !grep {
+                        return matches_name(name);
+                    }
+                    // Through the module resolver rather than a guessed path:
+                    // the collection is a submodule the core locates.
+                    let source = kaos_core::sigils::resolve_collection_module(name)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    self.record_hit(&SigilEntry::Std(name.clone()), &source, &query)
+                })
+                .map(SigilEntry::Std)
+                .collect::<Vec<_>>(),
         );
-        self.sigil_results = temporary;
-        self.sigil_choice = 0;
+        self.sigil_results = sigils;
+
         // Folders collapse by default. A non-empty query auto-expands the
         // folders that contain matches, so results are never hidden.
         if query.is_empty() {
@@ -4102,10 +4381,17 @@ impl Workspace {
         self.graph_left = 0;
         self.run_output_visible = false;
         self.result_only_visible = false;
-        self.message = format!(
-            "{} sigil(s) match · /sigil open NAME|temp:N",
-            self.sigil_results.len()
-        );
+        self.message = if grep {
+            format!(
+                "nothing is named that · {} sigil(s) contain it · opening goes to the line",
+                self.sigil_results.len()
+            )
+        } else {
+            format!(
+                "{} sigil(s) match · /sigil open NAME|temp:N",
+                self.sigil_results.len()
+            )
+        };
     }
 
     fn load(&mut self, requested: &str) {
@@ -4133,6 +4419,234 @@ impl Workspace {
                 self.message = format!("could not open {}: {error}", path.display());
             }
         }
+    }
+
+    /// The `/music` family: open the sound panel, play it, tune it, keep it.
+    ///
+    /// One command with words after it rather than six commands, because they
+    /// are one thing — the section, and what to do with what is in it. The
+    /// program is taken from the buffer at the moment it is asked for, so what
+    /// sounds is what is written now, unsaved edits included.
+    fn music_command(&mut self, rest: &str) {
+        let (word, argument) = rest
+            .split_once(char::is_whitespace)
+            .map_or((rest, ""), |(word, argument)| (word, argument.trim()));
+        match word {
+            // Bare `/music` opens the section on the buffer as it stands.
+            "" | "read" => {
+                self.sigil_chat_visible = false;
+                self.visualization = Visualization::Music;
+                self.panel_visible = true;
+                self.runs_visible = false;
+                self.run_output_visible = false;
+                self.result_only_visible = false;
+                self.graph_top = 0;
+                self.read_music();
+            }
+            "play" => {
+                if !self.music.loaded() {
+                    self.read_music();
+                }
+                self.music.play();
+            }
+            "stop" => self.music.stop(),
+            "export" => {
+                let name = if argument.is_empty() {
+                    self.path
+                        .as_ref()
+                        .and_then(|path| path.file_stem())
+                        .map_or_else(|| "sigil".to_string(), |stem| stem.to_string_lossy().into())
+                        + ".wav"
+                } else {
+                    argument.to_string()
+                };
+                let path = resolve(&self.cwd, &name);
+                if !self.music.loaded() {
+                    self.read_music();
+                }
+                if let Err(error) = self.music.export(&path) {
+                    self.music.message = error;
+                }
+            }
+            "root" | "pace" | "partials" | "octaves" | "timbre" => {
+                self.tune_music(word, argument);
+            }
+            other => {
+                self.music.message = format!(
+                    "music · unknown word `{other}` — play, stop, export [FILE], root, pace, \
+                     partials, octaves, timbre"
+                );
+            }
+        }
+        self.message = self.music.message.clone();
+    }
+
+    /// Take the buffer as it stands and derive its music.
+    fn read_music(&mut self) {
+        let source = self.editor.source().to_string();
+        if let Err(error) = self.music.read(&source) {
+            self.music.message = format!("music · {error}");
+        }
+    }
+
+    /// Change one knob and re-render, so the change is heard on the next play
+    /// and seen on this frame.
+    fn tune_music(&mut self, knob: &str, value: &str) {
+        let number = value.parse::<f64>();
+        match knob {
+            "timbre" => {
+                let Some(timbre) = Timbre::ALL
+                    .iter()
+                    .copied()
+                    .find(|timbre| timbre.name() == value)
+                else {
+                    self.music.message = format!(
+                        "music · timbre is one of: {}",
+                        Timbre::ALL
+                            .iter()
+                            .map(|timbre| timbre.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    return;
+                };
+                self.music.tuning.timbre = timbre;
+            }
+            "root" => match number {
+                Ok(hz) if (20.0..=4000.0).contains(&hz) => self.music.tuning.root_hz = hz,
+                _ => {
+                    self.music.message = "music · root wants a frequency in 20–4000 Hz".to_string();
+                    return;
+                }
+            },
+            "pace" => match number {
+                Ok(seconds) if (0.02..=2.0).contains(&seconds) => self.music.tuning.pace = seconds,
+                _ => {
+                    self.music.message =
+                        "music · pace wants seconds per atom, 0.02–2".to_string();
+                    return;
+                }
+            },
+            "partials" => match value.parse::<usize>() {
+                Ok(count) if (1..=6).contains(&count) => self.music.tuning.partials = count,
+                _ => {
+                    self.music.message = "music · partials wants 1–6".to_string();
+                    return;
+                }
+            },
+            "octaves" => match value.parse::<usize>() {
+                Ok(count) if (1..=6).contains(&count) => self.music.tuning.octaves = count,
+                _ => {
+                    self.music.message = "music · octaves wants 1–6".to_string();
+                    return;
+                }
+            },
+            _ => return,
+        }
+        self.music.retune();
+        self.music.message = format!(
+            "{} Hz · {:.2} s/atom · {} partials · {} octaves · {}",
+            self.music.tuning.root_hz,
+            self.music.tuning.pace,
+            self.music.tuning.partials,
+            self.music.tuning.octaves,
+            self.music.tuning.timbre.name(),
+        );
+    }
+
+    /// The sound panel: the wave, then the score.
+    ///
+    /// Takes `&mut self` where the other projections do not, because the
+    /// playhead is read from the player and reading it reaps a player that has
+    /// finished. A projection that could not do that would leave the playhead
+    /// frozen at the end of a piece that stopped.
+    pub fn music_lines(&mut self, width: usize, max_rows: usize) -> Vec<String> {
+        let width = width.max(8);
+        if !self.music.loaded() {
+            return vec![
+                "no sound yet".to_string(),
+                String::new(),
+                "/music        read the buffer and draw its wave".to_string(),
+                "/music play   hear it".to_string(),
+            ];
+        }
+        let mut lines = Vec::new();
+        // A quarter of the panel to the wave, the rest to the score, with the
+        // wave never so short that it stops being a shape.
+        let wave_rows = (max_rows / 4).clamp(3, 8);
+        lines.extend(music::braille(&self.music.bands(width * 2), wave_rows));
+        // The ruler carries the playhead: the piece's own clock, drawn under
+        // the shape it is moving through.
+        let seconds = self.music.score.seconds.max(f64::EPSILON);
+        let head = self
+            .music
+            .playhead()
+            .map(|at| ((at / seconds).clamp(0.0, 1.0) * (width - 1) as f64).round() as usize);
+        lines.push(
+            (0..width)
+                .map(|column| match head {
+                    Some(at) if at == column => '▲',
+                    _ if column % 8 == 0 => '┬',
+                    _ => '─',
+                })
+                .collect(),
+        );
+        lines.push(format!(
+            "0s{:>width$.1}s",
+            seconds,
+            width = width.saturating_sub(4)
+        ));
+        lines.push(String::new());
+        lines.push(format!(
+            "{} Hz · {:.2} s/atom · {} partials · {} · {}",
+            self.music.tuning.root_hz,
+            self.music.tuning.pace,
+            self.music.tuning.partials,
+            self.music.tuning.timbre.name(),
+            self.music.message,
+        ));
+        lines.push(String::new());
+        let listed = max_rows.saturating_sub(lines.len()).max(1);
+        lines.extend(self.score_lines(width, listed));
+        lines
+    }
+
+    /// The score as text: every note, and the Fibonacci sum behind it.
+    ///
+    /// Written out rather than summarised, because the claim the section makes
+    /// — that the tone comes from the word by arithmetic — is only worth
+    /// anything if the arithmetic is on screen to be checked.
+    #[must_use]
+    pub fn score_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
+        if !self.music.loaded() {
+            return vec!["no sound yet · /music reads the buffer".to_string()];
+        }
+        let mut lines = vec!["ONSET   LENGTH  D   PITCH     WORD = FIBONACCI".to_string()];
+        for note in self
+            .music
+            .score
+            .notes
+            .iter()
+            .skip(self.graph_top)
+            .take(max_rows.saturating_sub(1).max(1))
+        {
+            let terms = self
+                .music
+                .reading(&note.token)
+                .terms
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join("+");
+            lines.push(truncate(
+                &format!(
+                    "{:>6.3}  {:>6.3}  {}  {:>7.1}  {} = {}",
+                    note.start, note.duration, note.depth, note.hz, note.token, terms
+                ),
+                width,
+            ));
+        }
+        lines
     }
 
     /// Produce the language's native expression tree.
@@ -4212,6 +4726,13 @@ impl Workspace {
                 })
                 .collect();
         }
+        // Sound is drawn by [`Self::music_lines`], which needs `&mut` for the
+        // playhead. What is left of it here is the part that is pure: the
+        // score. A caller that only has `&self` still gets the truth, minus the
+        // moving parts.
+        if self.visualization == Visualization::Music {
+            return self.score_lines(width, max_rows);
+        }
         if self.chaos_star_visible {
             return Vec::new();
         }
@@ -4227,7 +4748,7 @@ impl Workspace {
                 || rebis_lang::tree(expr),
                 |record| rebis_lang::tree_scored(expr, record),
             ),
-            Visualization::Sigils => unreachable!(),
+            Visualization::Sigils | Visualization::Music => unreachable!(),
         };
         let mut output = Vec::new();
         if self.visualization == Visualization::Tree {
@@ -4257,6 +4778,9 @@ impl Workspace {
             self.run_output.len()
         } else if self.visualization == Visualization::Sigils {
             self.visible_sigil_rows().len() + 3
+        } else if self.visualization == Visualization::Music {
+            // The wave and its ruler stay put; the score under them scrolls.
+            self.music.score.notes.len() + 1
         } else if self.chaos_star_visible {
             0
         } else if let Some(expr) = &self.compiled {
@@ -4266,7 +4790,7 @@ impl Workspace {
                     || rebis_lang::tree(expr),
                     |record| rebis_lang::tree_scored(expr, record),
                 ),
-                Visualization::Sigils => unreachable!(),
+                Visualization::Sigils | Visualization::Music => unreachable!(),
             };
             rendered.lines().count() + usize::from(self.visualization == Visualization::Tree)
         } else {
@@ -4387,6 +4911,82 @@ fn truncate(source: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{gutter_width, row_of_offset, wrapped_rows};
+
+    #[test]
+    fn a_long_line_continues_on_the_next_row_without_a_new_number() {
+        // The whole point: overflow goes UNDER, and the gutter says it is still
+        // the same line.
+        let rows = wrapped_rows("(a b c d e)\nshort", 5);
+        let numbers: Vec<Option<usize>> = rows
+            .iter()
+            .map(|row| (!row.continues).then_some(row.line + 1))
+            .collect();
+        assert_eq!(
+            numbers,
+            vec![Some(1), None, None, Some(2)],
+            "only the row that starts a line is numbered"
+        );
+        let text = |row: &super::VisualRow| {
+            "(a b c d e)\nshort"
+                .chars()
+                .skip(row.start)
+                .take(row.end - row.start)
+                .collect::<String>()
+        };
+        assert_eq!(text(&rows[0]), "(a b ");
+        assert_eq!(text(&rows[1]), "c d e");
+        assert_eq!(text(&rows[2]), ")");
+        assert_eq!(text(&rows[3]), "short");
+        // Every row belongs to the line it came from.
+        assert_eq!(
+            rows.iter().map(|row| row.line).collect::<Vec<_>>(),
+            vec![0, 0, 0, 1]
+        );
+    }
+
+    #[test]
+    fn a_blank_line_still_occupies_one_row() {
+        let rows = wrapped_rows("a\n\nb", 8);
+        assert_eq!(rows.len(), 3, "a blank line is a line: {rows:?}");
+        assert!(rows.iter().all(|row| !row.continues));
+        assert_eq!(rows[1].start, rows[1].end, "the blank row is empty");
+    }
+
+    #[test]
+    fn the_cursor_lands_on_the_row_that_holds_it_including_end_of_line() {
+        let source = "(a b c d e)\nshort";
+        let rows = wrapped_rows(source, 5);
+        // First char of each row.
+        assert_eq!(row_of_offset(&rows, 0), (0, 0));
+        assert_eq!(row_of_offset(&rows, 5), (1, 0));
+        assert_eq!(row_of_offset(&rows, 10), (2, 0));
+        // Mid-row.
+        assert_eq!(row_of_offset(&rows, 7), (1, 2));
+        // Just past the last character of a wrapped line: end of line 1, which is
+        // where the cursor sits after pressing `$`.
+        assert_eq!(row_of_offset(&rows, 11), (2, 1));
+        // And on the last line.
+        assert_eq!(row_of_offset(&rows, 17), (3, 5));
+    }
+
+    #[test]
+    fn the_gutter_never_narrows_below_two_digits() {
+        assert_eq!(gutter_width(1), 2);
+        assert_eq!(gutter_width(9), 2);
+        assert_eq!(gutter_width(10), 2);
+        assert_eq!(gutter_width(100), 3);
+        assert_eq!(gutter_width(1234), 4);
+    }
+
+    #[test]
+    fn a_zero_width_viewport_still_produces_rows() {
+        // A pane can be laid out with no room at all for a frame; wrapping must
+        // not spin or return nothing.
+        let rows = wrapped_rows("abc", 0);
+        assert_eq!(rows.len(), 3, "one char per row at the floor: {rows:?}");
+    }
+
     use super::*;
 
     #[test]
@@ -4497,16 +5097,16 @@ mod tests {
     }
 
     #[test]
-    fn postfix_models_have_their_own_highlight_without_stealing_module_slashes() {
-        let source = "\"hello\"/ollama:qwen4:4b";
+    fn a_routing_slash_is_tinted_without_stealing_module_slashes() {
+        // Routing heads a form now, so the `/` is one token and the selector
+        // after it is an ordinary word.
+        let source = "(/ ollama:qwen4:4b \"hello\")";
         let colours = highlights(source);
-        let model_start = source
+        let slash = source
             .chars()
             .position(|character| character == '/')
             .unwrap();
-        assert!(colours[model_start..]
-            .iter()
-            .all(|highlight| *highlight == Highlight::Model));
+        assert_eq!(colours[slash], Highlight::Model);
 
         let import = "(# std/loops)";
         let import_colours = highlights(import);
@@ -4590,6 +5190,54 @@ mod tests {
         assert_eq!(workspace.execute_kaos_command(), WorkspaceAction::None);
         assert!(workspace.message.contains("formatted canonical Rebis"));
         assert_eq!(workspace.editor.source(), "\"first; line\\nsecond; line\"");
+    }
+
+    #[test]
+    fn the_sound_panel_draws_the_wave_and_shows_its_arithmetic() {
+        let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+        workspace.editor = Editor::new("(\"joy and expansion\" x)".to_string());
+        workspace.refresh();
+
+        workspace.command = "music".to_string();
+        assert_eq!(workspace.execute_kaos_command(), WorkspaceAction::None);
+        assert_eq!(workspace.visualization, Visualization::Music);
+        assert!(workspace.panel_visible, "the panel stayed shut");
+        assert!(workspace.music.loaded(), "no piece was derived");
+
+        let lines = workspace.music_lines(60, 24);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.chars().all(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+                    && !line.is_empty()),
+            "no wave was drawn: {lines:#?}"
+        );
+        // Every word of the prompt is in the score, with the sum it came from.
+        let score = lines.join("\n");
+        for word in ["joy", "and", "expansion"] {
+            assert!(score.contains(word), "{word} is not in the score: {score}");
+        }
+        assert!(
+            score.contains(" = ") && score.contains('+'),
+            "the Fibonacci decomposition is not shown: {score}"
+        );
+
+        // Tuning is a command, and it re-renders rather than waiting for a play.
+        let before = workspace.music.samples.len();
+        workspace.command = "music pace 0.5".to_string();
+        assert_eq!(workspace.execute_kaos_command(), WorkspaceAction::None);
+        assert!(
+            workspace.music.samples.len() > before,
+            "a slower pace did not make a longer piece"
+        );
+        workspace.command = "music timbre saw".to_string();
+        assert_eq!(workspace.execute_kaos_command(), WorkspaceAction::None);
+        assert_eq!(workspace.music.tuning.timbre.name(), "saw");
+        // A knob that will not take the value says so and changes nothing.
+        workspace.command = "music root nonsense".to_string();
+        assert_eq!(workspace.execute_kaos_command(), WorkspaceAction::None);
+        assert!(workspace.message.contains("20–4000"), "{}", workspace.message);
+        assert!((workspace.music.tuning.root_hz - 220.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -4768,12 +5416,12 @@ mod tests {
         editor.cursor = 14;
         assert_eq!(editor.matching_parentheses(), Some((1, 14)));
 
-        let editor = Editor::new("(-> \"a\" \"b\")/claude:opus5");
+        let editor = Editor::new("(/ claude:opus5 (-> \"a\" \"b\"))");
         assert_eq!(
             editor
                 .matching_parentheses()
                 .map(|(start, end)| slice_chars(editor.source(), start, end)),
-            Some("(-> \"a\" \"b\")/claude:opus5".to_string())
+            Some("(/ claude:opus5 (-> \"a\" \"b\"))".to_string())
         );
     }
 
@@ -5528,12 +6176,12 @@ mod tests {
 
     #[test]
     fn block_runs_keep_model_bound_top_level_definitions() {
-        let source = "(~ inspect (topic) (-> topic \"report\"))/claude:opus5\n(inspect \"parser\")";
+        let source = "(/ claude:opus5 (~ inspect (topic) (-> topic \"report\")))\n(inspect \"parser\")";
         let scoped = scoped_block_source(source, "(inspect \"parser\")").unwrap();
         let parsed = rebis_lang::parse(&scoped).unwrap();
 
         assert!(
-            scoped.contains("/claude:opus5"),
+            scoped.contains("claude:opus5"),
             "scoped block source: {scoped}"
         );
         assert!(matches!(parsed, Expr::Compose(_)));
@@ -5803,6 +6451,72 @@ mod tests {
             .unwrap();
         assert!(workspace.click_sigil(55, 2 + leaf_line as u16));
         assert!(workspace.editor.source().contains("std/canon"));
+    }
+
+    #[test]
+    fn searching_falls_through_to_contents_and_lands_on_the_line() {
+        let mut workspace = Workspace::open(PathBuf::from("."), None).unwrap();
+
+        // A name search is browsing: `std/` lists that folder and nothing else,
+        // even though nearly every module in the library imports from it. A
+        // plain grep would return most of the library and be useless for this.
+        workspace.search_sigils("std/");
+        assert_eq!(
+            workspace
+                .sigil_results
+                .iter()
+                .filter(|entry| matches!(entry, SigilEntry::Std(name) if name.starts_with("std/")))
+                .count(),
+            rebis_lang::std_modules().len()
+        );
+        assert!(workspace.sigil_hits.is_empty(), "a name search read contents");
+
+        // A macro nothing is named after falls through to the contents, and the
+        // result records where.
+        workspace.search_sigils("std-memo");
+        let found = workspace
+            .sigil_results
+            .iter()
+            .find(|entry| matches!(entry, SigilEntry::Std(name) if name == "std/correspondence"))
+            .cloned()
+            .expect("the macro is defined in std/correspondence");
+        let (line, text) = workspace
+            .sigil_hits
+            .get(&found)
+            .cloned()
+            .expect("a content match records its line");
+        assert!(line > 0);
+        assert!(
+            text.to_ascii_lowercase().contains("std-memo"),
+            "the recorded line is not the matching one: {text}"
+        );
+        assert!(workspace.message.contains("contain it"), "{}", workspace.message);
+
+        // The browser says where, so the question is answered before anything
+        // is opened.
+        let row = workspace
+            .visible_sigil_rows()
+            .into_iter()
+            .find_map(|row| match row {
+                VisibleRow::Leaf { entry, label, .. } if entry == found => Some(label),
+                _ => None,
+            })
+            .expect("the hit is on a row");
+        assert!(row.contains(&format!(":{line}")), "the row hides the line: {row}");
+
+        // And opening it lands there rather than at the top.
+        workspace.sigil_choice = workspace
+            .visible_sigil_rows()
+            .iter()
+            .position(|row| matches!(row, VisibleRow::Leaf { entry, .. } if *entry == found))
+            .expect("the hit is selectable");
+        workspace.open_selected_sigil();
+        let (row, _) = workspace.editor.row_col();
+        assert_eq!(row + 1, line, "opening did not go to the matched line");
+        assert!(
+            workspace.editor.source().lines().nth(row).is_some_and(|at| at.contains("std-memo")),
+            "the cursor landed away from the match"
+        );
     }
 
     #[test]

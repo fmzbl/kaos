@@ -282,6 +282,10 @@ mod tests {
 
     #[test]
     fn every_other_rendered_ray_stays_in_the_structural_family() {
+        // Only three rays carry a voice of their own; the rest render through
+        // the palette's STRUCTURE, which is one neutral grey family. So the
+        // test is that none of them invents a hue: the ray's name may be
+        // Octarine, but what is drawn is a cool grey like every other surface.
         for ray in [
             Ray::Octarine,
             Ray::Black,
@@ -291,8 +295,8 @@ mod tests {
         ] {
             let (r, g, b) = ray.rgb();
             assert!(
-                b > g && g > r,
-                "{} rendered outside the structural blue family: {r},{g},{b}",
+                b >= g && g >= r && i32::from(b) - i32::from(r) <= 26,
+                "{} rendered outside the neutral structural family: {r},{g},{b}",
                 ray.name()
             );
         }
