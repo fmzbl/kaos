@@ -471,6 +471,40 @@ impl From<std::io::Error> for WallError {
     }
 }
 
+/// Whether the desire behind a sigil is kept.
+///
+/// Carroll, *Liber Null*, "Sigils": *"To successfully lose the sigil, both the
+/// sigil form and the associated desire must be banished from normal waking
+/// consciousness."* The operation has three parts — the sigil is constructed, it
+/// is **lost**, it is charged — and what this code does by default is the exact
+/// opposite of the middle one: [`Stack::said`] keeps the desire in readable
+/// prose beside the glyph and the wall lists every sigil by name, permanently.
+///
+/// **So this is a mode the operator chooses, and never a default.** Losing the
+/// desire trades a real feature — finding your sigil again, knowing what it was
+/// for — for fidelity to the source. Making that the default would be choosing
+/// the book over the person using it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Retention {
+    /// Keep the desire beside the glyph. Today's behaviour, and the default.
+    #[default]
+    Keep,
+    /// Write the glyph and discard the desire unwritten.
+    ///
+    /// Irreversible on purpose: the desire never reaches a file, so there is
+    /// nothing to recover and nothing to be tempted into reading. A control
+    /// offering this has to say so before it does it.
+    Lose,
+}
+
+impl Retention {
+    /// Whether a commit under this mode may write the desire anywhere.
+    #[must_use]
+    pub fn keeps_the_desire(self) -> bool {
+        matches!(self, Self::Keep)
+    }
+}
+
 impl Wall {
     #[must_use]
     pub fn new(root: impl Into<std::path::PathBuf>) -> Wall {
@@ -542,6 +576,65 @@ impl Wall {
         Ok(picture)
     }
 
+    /// Keep a drawing, and decide whether the desire behind it survives.
+    ///
+    /// [`Retention::Keep`] writes the desire beside the glyph, which is what a
+    /// person wants when they will come back to it. [`Retention::Lose`] writes
+    /// the glyph and **returns the desire to the caller's control unwritten** —
+    /// this function never puts it on disk, so a `Lose` commit leaves nothing to
+    /// recover.
+    ///
+    /// The desire is a separate file rather than a field inside the stroke file
+    /// because that is what makes the absence checkable: under `Lose` there is
+    /// no `.desire` beside the glyph, and
+    /// `kaos-core/tests/sigil_wall.rs` greps the whole wall to prove it.
+    ///
+    /// # Errors
+    ///
+    /// When the name is unusable or the filesystem refuses.
+    pub fn commit(
+        &self,
+        name: &str,
+        sigil: &Sigil,
+        desire: &str,
+        retention: Retention,
+        size: usize,
+    ) -> Result<std::path::PathBuf, WallError> {
+        let picture = self.save(name, sigil, size)?;
+        let desire_path = self.desire_path(name)?;
+        if retention.keeps_the_desire() && !desire.trim().is_empty() {
+            std::fs::write(&desire_path, desire.trim())?;
+        } else {
+            // Losing means losing. A previous `Keep` of the same name would
+            // otherwise leave the old sentence sitting beside the new glyph,
+            // which is the one outcome this mode exists to prevent.
+            let _ = std::fs::remove_file(&desire_path);
+        }
+        Ok(picture)
+    }
+
+    /// Where a kept desire lives, if one was kept.
+    ///
+    /// # Errors
+    ///
+    /// When the name is unusable.
+    pub fn desire_path(&self, name: &str) -> Result<std::path::PathBuf, WallError> {
+        Ok(self.root.join(format!("{}.desire", self.stem(name)?)))
+    }
+
+    /// What this sigil was for, when it was kept.
+    ///
+    /// `None` means either that it was committed under [`Retention::Lose`] or
+    /// that nothing was said. The two are deliberately indistinguishable from
+    /// here: a caller that could tell them apart would be able to report that
+    /// there *was* a desire, which is half of remembering it.
+    #[must_use]
+    pub fn desire(&self, name: &str) -> Option<String> {
+        let path = self.desire_path(name).ok()?;
+        let text = std::fs::read_to_string(path).ok()?;
+        (!text.trim().is_empty()).then(|| text.trim().to_string())
+    }
+
     /// Fetch a drawing so it can be drawn on again.
     ///
     /// # Errors
@@ -579,6 +672,9 @@ impl Wall {
         let (strokes, picture) = self.paths(name)?;
         let _ = std::fs::remove_file(strokes);
         let _ = std::fs::remove_file(picture);
+        if let Ok(desire) = self.desire_path(name) {
+            let _ = std::fs::remove_file(desire);
+        }
         Ok(())
     }
 }
@@ -644,6 +740,60 @@ fn read_strokes(text: &str) -> Result<Sigil, WallError> {
     Ok(sigil)
 }
 
+// ── Carroll's word method ─────────────────────────────────────────────────
+
+/// The desire, with repeated letters removed — Carroll's word method.
+///
+/// *Liber Null*, "Sigils": write the desire in a sentence, strike out every
+/// letter that has already appeared, and rearrange what survives into a glyph.
+/// *"I wish to obtain the Necronomicon"* becomes `INSHTOBANECRM`, and Figure 2a
+/// is what a person then draws from it.
+///
+/// This is the one part of the operation the source specifies exactly enough to
+/// test, which is why it is a pure function rather than a feature. Case is
+/// folded — `I` and `i` are one letter — and anything that is not a letter is
+/// dropped, because spaces and punctuation are not part of the desire in the way
+/// the method means.
+///
+/// ```
+/// # use kaos_core::ink::letter_skeleton;
+/// assert_eq!(
+///     letter_skeleton("I wish to obtain the Necronomicon"),
+///     "IWSHTOBANECRM"
+/// );
+/// ```
+///
+/// # A note on the worked example
+///
+/// The plan this was built from quotes the result as `INSHTOBANECRM`, and the
+/// method applied to that sentence gives `IWSHTOBANECRM` — an **N** where the
+/// second surviving letter is the **W** of *"I wish"*. Same thirteen letters
+/// otherwise. The method is specified precisely enough that the method wins over
+/// the transcription, so this returns `W`; the discrepancy is pinned in
+/// `the_worked_example_differs_from_the_plan_by_one_letter` so nobody
+/// "corrects" it back later.
+///
+/// # It is a scaffold, and it is never saved
+///
+/// The surviving letters are drawn faint on the paper to draw *over* and then
+/// discard. They are not strokes, they are not in the [`Sigil`], and they are
+/// not in the raster a model is shown — a model reading the letters would be
+/// reading the desire, which is the opposite of what a sigil is for.
+#[must_use]
+pub fn letter_skeleton(desire: &str) -> String {
+    let mut seen = [false; 26];
+    let mut out = String::new();
+    for letter in desire.chars().filter(char::is_ascii_alphabetic) {
+        let upper = letter.to_ascii_uppercase();
+        let index = (upper as u8 - b'A') as usize;
+        if !seen[index] {
+            seen[index] = true;
+            out.push(upper);
+        }
+    }
+    out
+}
+
 // ── from a stack of drawings to a program ─────────────────────────────────
 
 /// The pending sigils, in the order they were drawn.
@@ -658,6 +808,20 @@ pub struct Stack {
     /// What the sigils are about, in the drawer's own words. Optional — a
     /// sigil that needed a sentence to explain it is a sentence.
     pub said: String,
+    /// Whether [`Stack::said`] survives being run.
+    ///
+    /// Under [`Retention::Lose`] the sentence never reaches [`Stack::program`],
+    /// so it never reaches the prompt, the run record, or a retained trace. That
+    /// is B3 answered by construction rather than by filtering afterwards: a
+    /// redaction pass can be forgotten or can miss a copy, and a sentence that
+    /// was never written down cannot be.
+    ///
+    /// The glyph still travels — it is what the model is being asked to read —
+    /// so a lost-sigil run's trace keeps the picture's filename and the answer,
+    /// which is exactly what Carroll asks a record to keep: *"A record should be
+    /// kept of all work with sigils but not in such a way as to cause conscious
+    /// deliberation over the sigilized desire."*
+    pub retention: Retention,
 }
 
 impl Stack {
@@ -668,6 +832,13 @@ impl Stack {
     pub fn clear(&mut self) {
         self.pictures.clear();
         self.said.clear();
+        self.retention = Retention::default();
+    }
+
+    /// Whether this stack will carry its sentence into the run.
+    #[must_use]
+    pub fn keeps_the_desire(&self) -> bool {
+        self.retention.keeps_the_desire()
     }
 
     #[must_use]
@@ -724,8 +895,10 @@ impl Stack {
                  between them, in the order given."
             )
         };
+        // Under `Lose` the sentence does not travel. Not redacted downstream —
+        // never written, so there is no copy anywhere to redact.
         let mut said = String::new();
-        if !self.said.trim().is_empty() {
+        if self.keeps_the_desire() && !self.said.trim().is_empty() {
             said = format!("\n\nThe person drawing them said: {}", self.said.trim());
         }
         format!(

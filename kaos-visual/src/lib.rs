@@ -1102,6 +1102,18 @@ struct InkPane {
     notice: String,
     /// How wide the pen is.
     pen: f32,
+    /// The desire, for Carroll's word method.
+    ///
+    /// The sentence a person writes before drawing. It produces the faint
+    /// letter scaffold, and — under `Retention::Keep` — it is what the wall
+    /// remembers the glyph was for.
+    desire: String,
+    /// Whether the scaffold is drawn behind the strokes.
+    ///
+    /// A guide, never a mark: it is not in [`InkPane::sigil`], so it cannot
+    /// reach the raster a model is shown. A model reading the letters would be
+    /// reading the desire, which is the opposite of what a sigil is for.
+    scaffold: bool,
 }
 
 #[derive(Default)]
@@ -7273,26 +7285,90 @@ impl Editor {
                                 .hint_text("the-queue"),
                         );
                     });
+                    // Carroll's word method: the desire, with repeated letters
+                    // struck out, drawn faint to draw over and then discard.
+                    ui.horizontal(|ui| {
+                        ui.colored_label(k.faint, "desire");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut pane.desire)
+                                .desired_width(150.0)
+                                .hint_text("I wish to \u{2026}"),
+                        )
+                        .on_hover_text(
+                            "Carroll's word method: the letters that survive become a \
+                             scaffold to draw over. The scaffold is never saved and never \
+                             reaches a model.",
+                        );
+                    });
+                    let skeleton = kaos_core::ink::letter_skeleton(&pane.desire);
+                    if !skeleton.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut pane.scaffold, "");
+                            ui.colored_label(k.secondary, &skeleton);
+                        });
+                    }
+
                     // Keeping and stacking are one action: `&:` reads a file,
                     // so a sigil that is not on the wall cannot be handed to a
                     // program.
-                    if ui
-                        .add_enabled(marks > 0, egui::Button::new("keep & stack"))
-                        .clicked()
-                    {
+                    //
+                    // Two of them, because the second is irreversible and a
+                    // control that can lose a person's desire has to say so
+                    // before it does it rather than after.
+                    let mut commit: Option<kaos_core::ink::Retention> = None;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(marks > 0, egui::Button::new("keep & stack"))
+                            .on_hover_text("the glyph, and what it was for")
+                            .clicked()
+                        {
+                            commit = Some(kaos_core::ink::Retention::Keep);
+                        }
+                        if ui
+                            .add_enabled(marks > 0, egui::Button::new("charge & lose"))
+                            .on_hover_text(
+                                "Keeps the glyph and DISCARDS the desire, unwritten \u{2014} \
+                                 nothing on the wall or in any run record will say what this \
+                                 sigil was for. There is no undo.",
+                            )
+                            .clicked()
+                        {
+                            commit = Some(kaos_core::ink::Retention::Lose);
+                        }
+                    });
+                    if let Some(retention) = commit {
                         let wall = kaos_core::ink::Wall::default_wall();
                         let name = if pane.name.trim().is_empty() {
                             format!("sigil-{}", pane.stack.pictures.len() + 1)
                         } else {
                             pane.name.trim().to_string()
                         };
-                        match wall.save(&name, &pane.sigil, 512) {
+                        match wall.commit(&name, &pane.sigil, &pane.desire, retention, 512) {
                             Ok(picture) => {
                                 pane.stack.push(picture);
+                                // The stack's own retention follows the strictest
+                                // commit in it: one lost sigil is enough to keep
+                                // the sentence out of the program, and a stack
+                                // that carried it anyway would have lost nothing.
+                                if retention == kaos_core::ink::Retention::Lose {
+                                    pane.stack.retention = kaos_core::ink::Retention::Lose;
+                                } else if !pane.desire.trim().is_empty()
+                                    && pane.stack.said.trim().is_empty()
+                                {
+                                    pane.stack.said.clone_from(&pane.desire);
+                                }
                                 pane.sigil.strokes.clear();
                                 pane.undone.clear();
                                 pane.name.clear();
-                                pane.notice = format!("`{name}` kept and stacked");
+                                pane.desire.clear();
+                                pane.notice = match retention {
+                                    kaos_core::ink::Retention::Keep => {
+                                        format!("`{name}` kept and stacked")
+                                    }
+                                    kaos_core::ink::Retention::Lose => {
+                                        format!("`{name}` stacked \u{00b7} the desire is gone")
+                                    }
+                                };
                             }
                             Err(error) => pane.notice = error.to_string(),
                         }
@@ -7452,6 +7528,34 @@ impl Editor {
                     }
                 }
             };
+            // The scaffold, under everything. Carroll's surviving letters, laid
+            // out to draw over and then discard — a guide, never a mark. It is
+            // painted straight onto the canvas rather than pushed into
+            // `pane.sigil`, which is what keeps it out of the saved strokes and
+            // out of the raster a model is shown.
+            if pane.scaffold {
+                let skeleton = kaos_core::ink::letter_skeleton(&pane.desire);
+                if !skeleton.is_empty() {
+                    let letters: Vec<char> = skeleton.chars().collect();
+                    // A ring, so the letters are a shape to trace rather than a
+                    // line to read — the scaffold should stop looking like the
+                    // sentence as soon as possible.
+                    let centre = rect.center();
+                    let radius = rect.width().min(rect.height()) * 0.32;
+                    let size = (radius * 0.42).clamp(14.0, 64.0);
+                    for (index, letter) in letters.iter().enumerate() {
+                        let turn = index as f32 / letters.len() as f32 * std::f32::consts::TAU
+                            - std::f32::consts::FRAC_PI_2;
+                        painter.text(
+                            centre + egui::vec2(turn.cos() * radius, turn.sin() * radius),
+                            egui::Align2::CENTER_CENTER,
+                            letter,
+                            egui::FontId::proportional(size),
+                            egui::Color32::from_gray(215),
+                        );
+                    }
+                }
+            }
             for stroke in &pane.sigil.strokes {
                 ribbon(stroke);
             }

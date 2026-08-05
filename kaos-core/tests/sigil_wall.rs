@@ -5,7 +5,7 @@
 //! with a program. These tests cover the whole path from strokes to source,
 //! without a window.
 
-use kaos_core::ink::{Sigil, Stack, Stroke, Wall};
+use kaos_core::ink::{letter_skeleton, Retention, Sigil, Stack, Stroke, Wall};
 
 fn wall() -> Wall {
     let dir = std::env::temp_dir().join(format!(
@@ -203,4 +203,196 @@ fn an_empty_stack_asks_nothing() {
     assert!(stack.is_empty());
     // Still a valid program — a bare `><` with no sigils framed.
     assert!(rebis_lang::parse(&stack.program()).is_ok());
+}
+
+// ── Carroll's operation: construct, lose, charge ────────────────────────────
+
+/// *Liber Null*, "Sigils": write the desire, strike out repeated letters, and
+/// rearrange what survives into a glyph. Figure 2a.
+#[test]
+fn the_word_method_keeps_each_letter_once_in_the_order_it_appeared() {
+    assert_eq!(
+        letter_skeleton("I wish to obtain the Necronomicon"),
+        "IWSHTOBANECRM"
+    );
+    assert_eq!(letter_skeleton("aabbcc"), "ABC");
+    // Case is one letter, not two.
+    assert_eq!(letter_skeleton("Aa Bb"), "AB");
+    // Spaces, punctuation and digits are not part of the desire.
+    assert_eq!(letter_skeleton("go! now, 42 — go"), "GONW");
+    assert_eq!(letter_skeleton(""), "");
+    assert_eq!(letter_skeleton("!!! 123 ..."), "");
+    // Every surviving letter appears exactly once.
+    let skeleton = letter_skeleton("the quick brown fox jumps over the lazy dog");
+    assert_eq!(
+        skeleton.len(),
+        26,
+        "a pangram survives as the whole alphabet"
+    );
+    for letter in skeleton.chars() {
+        assert_eq!(skeleton.matches(letter).count(), 1, "{letter} twice");
+    }
+}
+
+/// The plan quotes Carroll's worked example as `INSHTOBANECRM`; the method
+/// applied to that sentence gives `IWSHTOBANECRM`, with the **W** of "I wish"
+/// where the transcription has an **N**.
+///
+/// Pinned so nobody "fixes" the function back to the typo. The method is
+/// specified precisely; a transcription is not, and the method wins.
+#[test]
+fn the_worked_example_differs_from_the_plan_by_one_letter() {
+    let ours = letter_skeleton("I wish to obtain the Necronomicon");
+    let quoted = "INSHTOBANECRM";
+    assert_eq!(ours.len(), quoted.len(), "same thirteen letters");
+    let differing: Vec<_> = ours
+        .chars()
+        .zip(quoted.chars())
+        .filter(|(ours, quoted)| ours != quoted)
+        .collect();
+    assert_eq!(differing, vec![('W', 'N')]);
+}
+
+/// The scaffold is drawn over and discarded. It is not a stroke, so it cannot
+/// reach the raster a model is shown — a model reading the letters would be
+/// reading the desire, which is the opposite of a sigil.
+#[test]
+fn the_scaffold_is_not_part_of_the_drawing() {
+    let sigil = mark();
+    let before = sigil.raster(64);
+    // `letter_skeleton` is a pure function over text. There is no path from it
+    // into `Sigil`, and this is the assertion that keeps it that way: the type
+    // has one field and it holds strokes.
+    let _scaffold = letter_skeleton("I wish to obtain the Necronomicon");
+    assert_eq!(sigil.raster(64), before);
+}
+
+/// *"To successfully lose the sigil, both the sigil form and the associated
+/// desire must be banished from normal waking consciousness."*
+///
+/// The acceptance criterion as written: commit a distinctive desire under
+/// `Lose`, then grep the whole wall directory for it.
+#[test]
+fn a_lost_desire_appears_in_no_file_on_the_wall() {
+    let wall = wall();
+    let desire = "PHLOGISTON-QUINTESSENCE-9317";
+
+    wall.commit("lost", &mark(), desire, Retention::Lose, 64)
+        .expect("commits");
+
+    let mut searched = 0;
+    for entry in std::fs::read_dir(wall.root())
+        .expect("the wall exists")
+        .flatten()
+    {
+        let bytes = std::fs::read(entry.path()).expect("readable");
+        searched += 1;
+        assert!(
+            !contains(&bytes, desire.as_bytes()),
+            "{} still holds the desire",
+            entry.path().display()
+        );
+    }
+    assert!(searched >= 2, "the glyph and its strokes were written");
+    assert_eq!(wall.desire("lost"), None);
+    // And the glyph itself survives — losing the desire is not losing the work.
+    assert!(wall.load("lost").is_ok());
+    assert!(wall.names().contains(&"lost".to_string()));
+}
+
+#[test]
+fn keeping_is_the_default_and_is_what_a_person_gets_unless_they_choose() {
+    let wall = wall();
+    assert_eq!(Retention::default(), Retention::Keep);
+    assert!(Retention::default().keeps_the_desire());
+
+    wall.commit("kept", &mark(), "the retry queue", Retention::Keep, 64)
+        .expect("commits");
+    assert_eq!(wall.desire("kept").as_deref(), Some("the retry queue"));
+}
+
+/// Re-committing a kept sigil under `Lose` must not leave the old sentence
+/// beside the new glyph — that is the one outcome the mode exists to prevent.
+#[test]
+fn losing_a_sigil_that_was_kept_removes_what_was_kept() {
+    let wall = wall();
+    wall.commit("mind", &mark(), "SALAMANDER-4471", Retention::Keep, 64)
+        .expect("commits");
+    assert!(wall.desire("mind").is_some());
+
+    wall.commit("mind", &mark(), "SALAMANDER-4471", Retention::Lose, 64)
+        .expect("commits again");
+    assert_eq!(wall.desire("mind"), None);
+    for entry in std::fs::read_dir(wall.root()).expect("the wall").flatten() {
+        let bytes = std::fs::read(entry.path()).expect("readable");
+        assert!(!contains(&bytes, b"SALAMANDER-4471"), "{:?}", entry.path());
+    }
+}
+
+#[test]
+fn forgetting_a_sigil_forgets_its_desire_too() {
+    let wall = wall();
+    wall.commit("gone", &mark(), "UNDINE-8823", Retention::Keep, 64)
+        .expect("commits");
+    wall.forget("gone").expect("forgets");
+    assert_eq!(wall.desire("gone"), None);
+    assert!(!wall.names().contains(&"gone".to_string()));
+}
+
+/// B3. *"A record should be kept of all work with sigils but not in such a way
+/// as to cause conscious deliberation over the sigilized desire."*
+///
+/// A run's record echoes the program it ran, so the test that matters is about
+/// the program: under `Lose` the sentence never enters it. Not redacted
+/// afterwards — never written, so there is no copy to miss.
+#[test]
+fn a_lost_stack_keeps_the_glyph_in_the_program_and_not_the_desire() {
+    let mut stack = Stack::default();
+    stack.push("/tmp/glyph-one.png".into());
+    stack.said = "BASILISK-2205".to_string();
+    stack.retention = Retention::Lose;
+
+    let source = stack.program();
+    rebis_lang::parse(&source).expect("still one well-formed program");
+    assert!(
+        !source.contains("BASILISK-2205"),
+        "the desire reached the program: {source}"
+    );
+    assert!(
+        !stack.instruction().contains("BASILISK-2205"),
+        "the desire reached the prompt"
+    );
+    // What the record DOES keep: the glyph, so the work is traceable.
+    assert!(source.contains("glyph-one.png"), "{source}");
+    assert!(!stack.keeps_the_desire());
+}
+
+#[test]
+fn a_kept_stack_still_carries_what_was_said() {
+    let mut stack = Stack::default();
+    stack.push("/tmp/glyph.png".into());
+    stack.said = "the retry queue".to_string();
+    assert_eq!(stack.retention, Retention::Keep);
+    assert!(stack.program().contains("the retry queue"));
+}
+
+#[test]
+fn clearing_a_stack_returns_it_to_keeping() {
+    // A `Lose` chosen for one working is not a setting that follows the next
+    // one. The mode is per-operation, and forgetting that would silently lose a
+    // desire somebody meant to keep.
+    let mut stack = Stack {
+        retention: Retention::Lose,
+        said: "something".to_string(),
+        ..Default::default()
+    };
+    stack.clear();
+    assert_eq!(stack.retention, Retention::Keep);
+}
+
+/// Substring search over bytes — the wall holds PNGs as well as text.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
