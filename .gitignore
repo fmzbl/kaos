@@ -6,3 +6,4 @@ realbench_*.jsonl
 *.pdf
 __pycache__/
 *.py[cod]
+/.cargo/

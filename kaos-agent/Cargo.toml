@@ -9,10 +9,13 @@ description = "The Kaos agent runtime: providers, backends, the conductor, and t
 kaos-core = { path = "../kaos-core" }
 kaos-pact = { path = "../kaos-pact" }
 rebis-lang.workspace = true
+# Attached files reach a provider as base64 in a JSON body. Behind `api` with
+# the HTTP crates, since a build without them has no wire to put a file on.
+base64 = { version = "0.22", optional = true }
 # HTTP providers (OpenAI + Anthropic). Off ⇒ only the local `claude` CLI and
 # `ollama`, which shell out and need no HTTP crate.
 ureq = { version = "2", features = ["json", "tls"], optional = true }
 serde_json = { version = "1", optional = true }
 
 [features]
-api = ["dep:ureq", "dep:serde_json"]
+api = ["dep:ureq", "dep:serde_json", "dep:base64"]

@@ -1796,11 +1796,21 @@ dependencies = [
 name = "kaos-agent"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "kaos-core",
  "kaos-pact",
  "rebis-lang",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "kaos-conformance"
+version = "0.0.1"
+dependencies = [
+ "kaos-agent",
+ "kaos-core",
+ "rebis-lang",
 ]
 
 [[package]]
@@ -2818,7 +2828,6 @@ dependencies = [
 [[package]]
 name = "rebis-lang"
 version = "0.0.1"
-source = "git+https://github.com/fmzbl/rebis.git#bf3835967260418c77e08614e3a2ce4e0089a839"
 
 [[package]]
 name = "redox_syscall"

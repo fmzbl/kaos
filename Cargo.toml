@@ -14,7 +14,14 @@ license = "GPL-3.0-or-later"
 # members are the app (here) and `kaos-core`, which holds everything that does
 # not need a terminal or a window — see that crate's docs for the split.
 [workspace]
-members = ["kaos-agent", "kaos-core", "kaos-pact", "kaos-visual", "kaos-workspace"]
+members = [
+    "kaos-agent",
+    "kaos-conformance",
+    "kaos-core",
+    "kaos-pact",
+    "kaos-visual",
+    "kaos-workspace",
+]
 
 # Rebis is the model-interface language. Kaos is a host of it; the dependency is
 # deliberately one-way (rebis-lang has no knowledge of Kaos). It is taken from
@@ -24,6 +31,15 @@ members = ["kaos-agent", "kaos-core", "kaos-pact", "kaos-visual", "kaos-workspac
 # so all five crates that use it move together. `Cargo.lock` pins the revision.
 [workspace.dependencies]
 rebis-lang = { git = "https://github.com/fmzbl/rebis.git" }
+
+# TEMPORARY — remove once the `!` dream commit is pushed to the rebis remote.
+# Kaos takes the language from git so a clone of Kaos alone builds; while a
+# language change is still local, this points the same dependency at the
+# working copy so both halves can be built and tested together. `cargo build`
+# fails loudly if the path is missing, so this cannot silently become the
+# permanent arrangement — but it MUST come out before pushing Kaos.
+[patch."https://github.com/fmzbl/rebis.git"]
+rebis-lang = { path = "../rebis" }
 
 [dependencies]
 # The fullscreen TUI. ratatui draws it, crossterm is the terminal backend, and
