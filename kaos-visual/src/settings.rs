@@ -68,8 +68,12 @@ pub(crate) fn group(key: &str) -> Group {
         | "OPENAI_BASE_URL"
         | "OPENROUTER_BASE_URL"
         | "OLLAMA_HOST" => Group::Mind,
-        "KAOS_MAX_STEPS" | "KAOS_HAND" | "KAOS_PROTECT" | "KAOS_NO_FORGE" | "KAOS_NO_DREAM"
-        | "KAOS_NO_PARADIGM" | "KAOS_CLAUDE_YOLO" => Group::Agent,
+        // The chaos stance sits with agent working rather than in its own
+        // group: it decides HOW the work gets done, which is what every other
+        // key here decides too. It reaches runs as well, but a reader looking
+        // for "does an agent do this, or does a program" looks here first.
+        "KAOS_CHAOS" | "KAOS_MAX_STEPS" | "KAOS_HAND" | "KAOS_PROTECT" | "KAOS_NO_FORGE"
+        | "KAOS_NO_DREAM" | "KAOS_NO_PARADIGM" | "KAOS_CLAUDE_YOLO" => Group::Agent,
         "KAOS_MYTH"
         | "KAOS_K"
         | "KAOS_AGENTIC"
@@ -97,81 +101,7 @@ pub(crate) fn is_tristate(key: &str) -> bool {
 
 /// Variables intentionally kept out of the persistent config file.
 ///
-/// The visual tab shows these as a read-only boundary reference so users can
-/// tell the difference between a setting they can save and a value supplied by
-/// a parent process, credentials store, or hosted-run transport.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct EnvironmentDoc {
-    pub(crate) key: &'static str,
-    pub(crate) details: &'static str,
-}
-
-pub(crate) const ENVIRONMENT_DOCS: &[EnvironmentDoc] = &[
-    EnvironmentDoc {
-        key: "OPENAI_API_KEY",
-        details: "OpenAI credential; use `kaos auth` or an explicit shell export, never the persistent config.",
-    },
-    EnvironmentDoc {
-        key: "ANTHROPIC_API_KEY",
-        details: "Anthropic API credential; the Claude subscription CLI uses `claude login` instead.",
-    },
-    EnvironmentDoc {
-        key: "OPENROUTER_API_KEY",
-        details: "OpenRouter credential; use `kaos auth` or an explicit shell export.",
-    },
-    EnvironmentDoc {
-        key: "REBIS_COLLECTION_PATH",
-        details: "Optional Rebis collection root or modules directory used to discover source-only imports.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_BIN",
-        details: "Optional visual-editor override for the Kaos executable used to launch terminal runs.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_FOLD",
-        details: "Private child-process flag that asks the terminal parent to render foldable progress groups.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_SESSION",
-        details: "Private session identifier passed to child chats so transcripts can be resumed.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_RESUME",
-        details: "Private child-process flag selecting resume versus create for a chat session.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_REBIS_CONTEXT",
-        details: "Private flag that injects Rebis authoring and validation guidance into a coding chat.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_RAW_CHAT_TASK_STDIN",
-        details: "Private flag selecting a raw task from standard input for visual and terminal chat.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_CHAT_OUTPUT",
-        details: "Private flag requesting a clean assistant-only response from a child chat.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_PAUSE_ON_TRANSIENT",
-        details: "Hosted-run transport flag enabling continuation-safe pauses after retryable model failures.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_RUN_PROCESS_GROUP",
-        details: "Hosted-run transport flag that lets pause and cancellation include command descendants.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_REBIS_CHECKPOINT",
-        details: "Private path for the Rebis prompt journal used to resume an interrupted hosted run.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_REBIS_DIRECTIVE",
-        details: "Private path for supervisor directives sent to a live Rebis child.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_REBIS_INLET",
-        details: "Private path for user input delivered to a live Rebis child.",
-    },
-];
+pub(crate) use kaos_core::config::ENVIRONMENT_DOCS;
 
 #[derive(Default)]
 pub(crate) struct SettingsPane {

@@ -25,6 +25,11 @@ pub(crate) struct Ink {
     pub(crate) fill: Color32,
     pub(crate) ink: Color32,
     pub(crate) faint: Color32,
+    /// Frames, dividers, and hairlines — dimmer than any text. See
+    /// [`kaos_core::theme::Palette::rule`].
+    pub(crate) rule: Color32,
+    /// A heading or a label naming what stands beside it. Silver.
+    pub(crate) mid: Color32,
 }
 
 impl Ink {
@@ -39,6 +44,8 @@ impl Ink {
             fill: rgb(p.fill),
             ink: rgb(p.ink),
             faint: rgb(p.faint),
+            rule: rgb(p.rule),
+            mid: rgb(p.mid),
         }
     }
 }
@@ -193,17 +200,11 @@ pub(crate) fn install_theme(ctx: &egui::Context, k: Ink) {
     visuals.override_text_color = None;
 
     let hairline = |width: f32, color: Color32| UiStroke::new(width, color);
-    let wash = |color: Color32, opacity: f32| {
-        Color32::from_rgba_unmultiplied(
-            color.r(),
-            color.g(),
-            color.b(),
-            (opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
-        )
-    };
-    // Rules and edges are hairlines, not lines: full-strength `faint` on every
-    // frame boundary turns a panel into a wireframe.
-    let rule = wash(k.faint, if light { 0.45 } else { 0.35 });
+    // Rules and edges are hairlines, not lines: full-strength text grey on every
+    // frame boundary turns a panel into a wireframe. The palette carries a tone
+    // for exactly this, dimmer than any text, so the edge is the palette's
+    // rather than a washed-out copy of the caption colour.
+    let rule = k.rule;
 
     // Resting: a surface a step forward from the panel, edged rather than
     // outlined, with no accent anywhere.
@@ -311,7 +312,9 @@ mod tests {
             k.ground,
             k.chrome,
             k.fill,
+            k.rule,
             k.ink,
+            k.mid,
             k.faint,
             k.accent,
             k.secondary,

@@ -11,7 +11,7 @@ use kaos_core::retained::RetainedLog;
 
 use crate::process::{Event, Job, Launch};
 
-pub(crate) use kaos_core::run_model::{Authority, Lane, Mode, Scope, State};
+pub(crate) use kaos_core::run_model::{Authority, Lane, Lineage, Mode, Scope, State};
 
 const MAX_RUN_HISTORY: usize = 128;
 
@@ -38,10 +38,18 @@ pub(crate) struct Run {
     /// file per run, named in the child's environment; see
     /// [`kaos_workspace::rebis_inlet`] for the one-delivery-per-file protocol.
     inlet_path: Option<PathBuf>,
+    /// Where this run's child asks for runs beneath it. Drained as the run
+    /// streams; see [`kaos_core::nest`].
+    nest_path: Option<PathBuf>,
     /// What the reader is typing for the port this run is stopped on. Held per
     /// run so switching between two waiting runs cannot deliver one's answer to
     /// the other.
     pub(crate) input_draft: String,
+    /// Where this run sits in the tree of runs. A run an agent opened from
+    /// inside another is that run's child; the shared model in
+    /// [`kaos_core::run_model`] answers how deep it is and what it belongs
+    /// under, so both frontends draw the same tree.
+    pub(crate) lineage: Lineage,
 }
 
 impl Run {
@@ -111,6 +119,8 @@ impl Run {
             lane: Lane::Serial,
             mode: Mode::Dry,
             state: State::Complete,
+            lineage: Lineage::root(),
+            nest_path: None,
             output: output.into(),
             expanded: false,
             queued_at: now,
@@ -172,9 +182,13 @@ impl Drop for Desk {
             job.kill();
         }
         for run in &self.runs {
-            for path in [run.temp_source.as_ref(), run.inlet_path.as_ref()]
-                .into_iter()
-                .flatten()
+            for path in [
+                run.temp_source.as_ref(),
+                run.inlet_path.as_ref(),
+                run.nest_path.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
             {
                 let _ = std::fs::remove_file(path);
             }
@@ -187,6 +201,58 @@ impl Desk {
         &mut self,
         source: String,
         lane_override: Option<Lane>,
+        cwd: &Path,
+    ) -> u64 {
+        self.queue_under(source, lane_override, Lineage::root(), cwd)
+    }
+
+    /// Open every run the children have asked for, beneath whichever asked.
+    ///
+    /// Drained on each poll rather than at completion, so a program that opens
+    /// a run early is not left invisible until it finishes. The request comes
+    /// through a per-run sidecar rather than the output stream: these programs
+    /// are often *about* writing Rebis, and a marker in their output would let
+    /// a program open runs by describing one.
+    fn open_requested_runs(&mut self, cwd: &Path) -> bool {
+        let asked = self
+            .runs
+            .iter()
+            .filter_map(|run| {
+                let path = run.nest_path.as_ref()?;
+                let requests = kaos_core::nest::drain(path);
+                (!requests.is_empty()).then_some((run.id, run.lineage, requests))
+            })
+            .collect::<Vec<_>>();
+        let mut opened = false;
+        for (parent, lineage, requests) in asked {
+            for request in requests {
+                let child = self.queue_under(
+                    request.source.clone(),
+                    None,
+                    kaos_core::run_model::Lineage::under(parent, lineage),
+                    cwd,
+                );
+                if let Some(run) = self.runs.iter_mut().find(|run| run.id == parent) {
+                    run.output.push(format!(
+                        "nested      \u{2325} run #{child} \u{2014} {}",
+                        kaos_core::nest::label(&request, parent)
+                    ));
+                }
+                opened = true;
+            }
+        }
+        opened
+    }
+
+    /// Queue a run at a given place in the tree.
+    ///
+    /// [`Self::submit`] is this with a root lineage. A run an agent asked for
+    /// comes through here with the asking run's lineage extended by one.
+    pub(crate) fn queue_under(
+        &mut self,
+        source: String,
+        lane_override: Option<Lane>,
+        lineage: Lineage,
         cwd: &Path,
     ) -> u64 {
         self.prune_history();
@@ -220,7 +286,9 @@ impl Desk {
             paused_total: Duration::ZERO,
             temp_source: None,
             inlet_path: None,
+            nest_path: None,
             input_draft: String::new(),
+            lineage,
         });
         self.selected = Some(id);
         if needs_permission {
@@ -337,6 +405,16 @@ impl Desk {
         let inlet_path =
             std::env::temp_dir().join(format!("kaos-visual-inlet-{}-{id}", std::process::id()));
         let _ = std::fs::remove_file(&inlet_path);
+        // The same shape for runs the child asks to open beneath itself. Only
+        // given when nesting is still allowed at this depth, so the limit is
+        // enforced by not handing over the channel rather than by trusting the
+        // child to check.
+        let nest_path = self.runs[index].lineage.may_nest().then(|| {
+            let path =
+                std::env::temp_dir().join(format!("kaos-visual-nest-{}-{id}", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            path
+        });
         let launch = Launch {
             program: kaos_executable(),
             args,
@@ -347,6 +425,16 @@ impl Desk {
                     kaos_core::config::value("KAOS_MODEL").unwrap_or_else(|| "sim".to_string()),
                 ),
                 (kaos_agent::pause::ENABLE_ENV.to_string(), "1".to_string()),
+                // The stance travels with the run, so a program that opens a
+                // nested run or a chat beneath itself inherits it. Written
+                // unconditionally, including "0": this editor may itself have
+                // been launched with `KAOS_CHAOS=1`, and a dry or direct run
+                // that merely inherited that would not be the run the user
+                // chose in the modal.
+                (
+                    kaos_core::chaos::ENABLE_ENV.to_string(),
+                    kaos_core::chaos::export(mode == Mode::Chaos).to_string(),
+                ),
                 (
                     kaos_agent::pause::PROCESS_GROUP_ENV.to_string(),
                     "1".to_string(),
@@ -355,7 +443,15 @@ impl Desk {
                     kaos_workspace::rebis_inlet::INLET_PATH_ENV.to_string(),
                     inlet_path.display().to_string(),
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(nest_path.iter().map(|path| {
+                (
+                    kaos_core::nest::NEST_PATH_ENV.to_string(),
+                    path.display().to_string(),
+                )
+            }))
+            .collect(),
             stdin: Some(input),
             process_group: true,
         };
@@ -366,6 +462,7 @@ impl Desk {
                 let run = &mut self.runs[index];
                 run.temp_source = Some(path);
                 run.inlet_path = Some(inlet_path);
+                run.nest_path = nest_path;
                 run.state = State::Running;
                 run.started_at.get_or_insert_with(Instant::now);
                 run.elapsed = None;
@@ -398,7 +495,7 @@ impl Desk {
     }
 
     pub(crate) fn poll(&mut self, cwd: &Path) -> bool {
-        let mut changed = false;
+        let mut changed = self.open_requested_runs(cwd);
         let mut finished = Vec::new();
         for job in &self.jobs {
             for event in job.drain() {
@@ -958,5 +1055,106 @@ mod tests {
         let run = desk.runs.iter().find(|run| run.id == id).unwrap();
         assert_eq!(run.timer().chars().filter(|c| *c == ':').count(), 1);
         assert_eq!(run.timer().chars().filter(|c| *c == '.').count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod nesting_tests {
+    use super::*;
+
+    #[test]
+    fn a_run_queued_under_another_is_drawn_beneath_it() {
+        let mut runs = Desk::default();
+        let cwd = std::path::Path::new(".");
+        let parent = runs.submit("(\"root\")".into(), None, cwd);
+        let parent_lineage = runs
+            .runs
+            .iter()
+            .find(|run| run.id == parent)
+            .map(|run| run.lineage)
+            .unwrap();
+        assert!(!parent_lineage.nested(), "a queued run starts at the root");
+
+        let child = runs.queue_under(
+            "(\"branch\")".into(),
+            None,
+            Lineage::under(parent, parent_lineage),
+            cwd,
+        );
+        let child_lineage = runs
+            .runs
+            .iter()
+            .find(|run| run.id == child)
+            .map(|run| run.lineage)
+            .unwrap();
+        assert_eq!(child_lineage.parent, Some(parent));
+        assert_eq!(child_lineage.depth, 1);
+
+        // And the list draws the child under its parent, one step in — the same
+        // ordering the terminal uses, from the same shared function.
+        let shape = kaos_core::run_model::tree_order(
+            &runs
+                .runs
+                .iter()
+                .map(|run| (run.id, run.lineage.parent))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(shape, vec![(0, parent), (1, child)], "{shape:?}");
+    }
+
+    #[test]
+    fn a_request_from_a_child_becomes_a_run_beneath_it() {
+        let mut runs = Desk::default();
+        let cwd = std::path::Path::new(".");
+        let parent = runs.submit("(\"root\")".into(), None, cwd);
+
+        // Stand in for the child process: give the run a sidecar and write to
+        // it exactly as the conductor would from inside the child.
+        let path =
+            std::env::temp_dir().join(format!("kaos-nest-test-{}-{parent}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        if let Some(run) = runs.runs.iter_mut().find(|run| run.id == parent) {
+            run.nest_path = Some(path.clone());
+        }
+        kaos_core::nest::request(&path, "answer the comments", "(\"reply\")").unwrap();
+        kaos_core::nest::request(&path, "make the changes", "(\"edit\")").unwrap();
+
+        assert!(runs.open_requested_runs(cwd), "the requests opened runs");
+        let shape = kaos_core::run_model::tree_order(
+            &runs
+                .runs
+                .iter()
+                .map(|run| (run.id, run.lineage.parent))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(shape.len(), 3, "{shape:?}");
+        assert_eq!(shape[0], (0, parent));
+        assert!(shape[1..].iter().all(|(depth, _)| *depth == 1), "{shape:?}");
+        // In the order they were asked for, carrying the programs as written.
+        let sources = runs
+            .runs
+            .iter()
+            .filter(|run| run.lineage.parent == Some(parent))
+            .map(|run| run.source.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(sources, vec!["(\"reply\")", "(\"edit\")"]);
+        // Draining is once only: a second poll opens nothing further.
+        assert!(!runs.open_requested_runs(cwd), "a request opened twice");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn nesting_stops_before_it_runs_away() {
+        // Depth is bounded by the shared model, so neither frontend has to
+        // remember to check it.
+        let mut lineage = Lineage::root();
+        for _ in 0..kaos_core::run_model::MAX_NESTING * 2 {
+            if !lineage.may_nest() {
+                break;
+            }
+            lineage = Lineage::under(1, lineage);
+        }
+        assert!(!lineage.may_nest());
+        assert!(lineage.depth < kaos_core::run_model::MAX_NESTING);
     }
 }

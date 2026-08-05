@@ -86,17 +86,17 @@ impl Bounds {
 
 pub(crate) fn save(
     mandala: &Mandala,
-    angled: &HashSet<NodeId>,
+    squared: &HashSet<NodeId>,
     ink: Ink,
     path: &Path,
 ) -> Result<(), String> {
-    let bytes = render(mandala, angled, ink)?;
+    let bytes = render(mandala, squared, ink)?;
     std::fs::write(path, bytes)
         .map_err(|error| format!("could not write {}: {error}", path.display()))
 }
 
-fn render(mandala: &Mandala, angled: &HashSet<NodeId>, ink: Ink) -> Result<Vec<u8>, String> {
-    let svg = render_svg(mandala, angled, ink)?;
+fn render(mandala: &Mandala, squared: &HashSet<NodeId>, ink: Ink) -> Result<Vec<u8>, String> {
+    let svg = render_svg(mandala, squared, ink)?;
     let mut options = svg2pdf::usvg::Options::default();
     options.fontdb_mut().load_system_fonts();
     let tree = svg2pdf::usvg::Tree::from_str(&svg, &options)
@@ -109,7 +109,7 @@ fn render(mandala: &Mandala, angled: &HashSet<NodeId>, ink: Ink) -> Result<Vec<u
     .map_err(|error| format!("could not encode PDF: {error}"))
 }
 
-fn render_svg(mandala: &Mandala, angled: &HashSet<NodeId>, ink: Ink) -> Result<String, String> {
+fn render_svg(mandala: &Mandala, squared: &HashSet<NodeId>, ink: Ink) -> Result<String, String> {
     if mandala.is_empty() {
         return Err("nothing to export — the mandala is empty".to_string());
     }
@@ -146,14 +146,19 @@ fn render_svg(mandala: &Mandala, angled: &HashSet<NodeId>, ink: Ink) -> Result<S
         r#"<g stroke-linecap="round" stroke-linejoin="round" font-family="'DejaVu Sans Mono','Liberation Mono',monospace">"#,
     );
 
-    // Match the 2D painter: every boundary is a receiving surface beneath the
-    // operator traces, and text-bearing/sigil forms sit above both.
+    // Match the 2D painter pass for pass: every boundary is a receiving surface,
+    // then the forms resting on it, then the connections over both, and the
+    // sigils last of all. The marks come after the arrows and the arrows after
+    // the walls because those three used to compete for who went down last, and
+    // whichever lost was the one drawn through.
     append_nodes(&mut svg, mandala, ink, false, true);
     append_nodes(&mut svg, mandala, ink, true, true);
-    append_edges(&mut svg, mandala, angled, ink, false);
-    append_edges(&mut svg, mandala, angled, ink, true);
     append_nodes(&mut svg, mandala, ink, false, false);
     append_nodes(&mut svg, mandala, ink, true, false);
+    append_edges(&mut svg, mandala, squared, ink, false);
+    append_edges(&mut svg, mandala, squared, ink, true);
+    append_marks(&mut svg, mandala, ink, false);
+    append_marks(&mut svg, mandala, ink, true);
     svg.push_str("</g></svg>");
     Ok(svg)
 }
@@ -172,7 +177,6 @@ fn drawing_bounds(mandala: &Mandala) -> Bounds {
             && !matches!(
                 node.shape(),
                 Shape::Circle
-                    | Shape::Triangle
                     | Shape::Square
                     | Shape::Diamond
                     | Shape::Parallelogram
@@ -195,12 +199,49 @@ fn drawing_bounds(mandala: &Mandala) -> Bounds {
     bounds
 }
 
+/// Write every form's ring sigil, after the walls and the connections.
+///
+/// A form wears the notation that opened it on its own ring, exactly as the
+/// canvas draws it, so an export reads as the same drawing — including which of
+/// two overlapping marks ends up on top.
+fn append_marks(svg: &mut String, mandala: &Mandala, ink: Ink, inlined: bool) {
+    for id in mandala.paint_order(inlined) {
+        let Some(node) = mandala.node(id) else {
+            continue;
+        };
+        if mandala.is_written_prefix(id) || node.form.is_flow() {
+            continue;
+        }
+        let mark = format!("{}{}", mandala.written_prefix(id), node.mark());
+        if mark.is_empty() {
+            continue;
+        }
+        let (_, half_h) = mandala.extent(id);
+        append_text(
+            svg,
+            node.x as f32,
+            (node.y - half_h) as f32,
+            // The same damped growth the canvas uses, so an export reads as the
+            // same drawing.
+            crate::MARK_PX * crate::mark_weight(node_resize(mandala, node)),
+            &mark,
+            ink.ink,
+        );
+    }
+}
+
 fn append_nodes(svg: &mut String, mandala: &Mandala, ink: Ink, inlined: bool, boundaries: bool) {
     for id in mandala.paint_order(inlined) {
         let Some(node) = mandala.node(id) else {
             continue;
         };
         if node.form.opens_indentation() != boundaries {
+            continue;
+        }
+        // A finished flow is drawn as the arrow between the two forms it routes and
+        // as nothing else, exactly as on the canvas. An unfinished one keeps its
+        // small handle so an export shows the program is incomplete.
+        if node.form.is_flow() && mandala.flow_result(node.id).is_some() {
             continue;
         }
         append_node(svg, mandala, node, ink);
@@ -240,15 +281,6 @@ fn append_node(svg: &mut String, mandala: &Mandala, node: &Node, ink: Ink) {
             )
             .expect("writing to a String cannot fail");
         }
-        Shape::Triangle => append_polygon(
-            svg,
-            centre,
-            &Shape::triangle_points(),
-            resize,
-            fill.as_str(),
-            stroke.as_str(),
-            outline_width,
-        ),
         Shape::Diamond => append_polygon(
             svg,
             centre,
@@ -361,21 +393,9 @@ fn append_node(svg: &mut String, mandala: &Mandala, node: &Node, ink: Ink) {
         );
     }
 
-    // An indentation wears the notation that opened it on its own ring, exactly
-    // as the canvas draws it, so an export reads as the same drawing.
-    let mark = node.mark();
-    if !mark.is_empty() {
-        append_text(
-            svg,
-            centre.x,
-            centre.y - half.y,
-            // The same damped growth the canvas uses, so an export reads as
-            // the same drawing.
-            crate::MARK_PX * crate::mark_weight(resize),
-            &mark,
-            ink.ink,
-        );
-    }
+    // The ring sigil is NOT written here — `append_marks` writes every one of
+    // them after the connections, so an arrow can neither cross a mark nor be
+    // erased by one.
 
     // A program triangle is deliberately anonymous in static output. In the
     // editor its "program" label appears only while the node is selected.
@@ -387,7 +407,6 @@ fn append_node(svg: &mut String, mandala: &Mandala, node: &Node, ink: Ink) {
         && matches!(
             shape,
             Shape::Circle
-                | Shape::Triangle
                 | Shape::Square
                 | Shape::Diamond
                 | Shape::Parallelogram
@@ -414,7 +433,6 @@ fn append_node(svg: &mut String, mandala: &Mandala, node: &Node, ink: Ink) {
         let inside = matches!(
             shape,
             Shape::Circle
-                | Shape::Triangle
                 | Shape::Square
                 | Shape::Diamond
                 | Shape::Parallelogram
@@ -439,7 +457,7 @@ fn append_node(svg: &mut String, mandala: &Mandala, node: &Node, ink: Ink) {
 fn append_edges(
     svg: &mut String,
     mandala: &Mandala,
-    angled: &HashSet<NodeId>,
+    squared: &HashSet<NodeId>,
     ink: Ink,
     want_interior: bool,
 ) {
@@ -461,7 +479,7 @@ fn append_edges(
                 Vec2::new(to_extent.0 as f32, to_extent.1 as f32),
             ],
             11.0,
-            angled.contains(&edge.owner),
+            !squared.contains(&edge.owner),
         );
         let mut path = String::new();
         for [start, end] in segments {
