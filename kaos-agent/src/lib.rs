@@ -11,6 +11,7 @@ pub mod agent;
 pub mod attach;
 pub mod auth;
 pub mod backend;
+pub mod composer;
 pub mod conductor;
 pub mod familiar;
 pub mod gate;

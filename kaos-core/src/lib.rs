@@ -24,6 +24,7 @@ pub mod config;
 pub mod cost;
 pub mod dream;
 pub mod fold;
+pub mod info;
 pub mod ink;
 pub mod music;
 pub mod nest;

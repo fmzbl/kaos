@@ -119,36 +119,29 @@ pub const CHAOS_HINT: &str = "Chaos mode: the intent is written as a Rebis progr
 program is what runs — so its cost can be read before it is paid, and the result is something you \
 can edit, save to the wall, and run again. Off, an agent is handed the intent and works it.";
 
-/// The contract appended to a chat that is being run in chaos mode.
+/// The only stable text in the chaos composer.
 ///
-/// It asks for one thing — a program — and states the two rules that make the
-/// result worth having: the program must parse, and its cost must be readable.
-/// Everything else is deliberately absent. A longer contract would start
-/// specifying the *shape* of the program, and the point of composing is that the
-/// shape is the model's to find.
+/// It is not appended to a provider system prompt. [`composition_source`]
+/// writes it as an ordinary Rebis prompt operand and combines it with the
+/// caller's intent using the language's `$` operator. The model therefore sees
+/// one prompt that came from one actual Rebis program, rather than a host-added
+/// instruction envelope.
+pub const COMPOSITION_REQUEST: &str = "The data below is a conversation: a HISTORY of what has been said, then the INTENT, which is the latest message. Return exactly one complete, parseable Rebis program that ANSWERS that latest message when it is run — the program is the reply, so running it must produce what the person asked for. Read the history as context for what they mean; do not answer it again. Return source only: no Markdown fence, prose, tool calls, or explanation. Use only the fundamental Rebis forms and operators, and make every model call visible as a quoted prompt in the returned source.";
+
+/// Build the chaos composer as actual Rebis source.
 ///
-/// The fenced block is required, not encouraged, because the host has to
-/// extract it: [`extract_program`] reads the fence and nothing else.
-pub const COMPOSE_CONTRACT: &str = "\
-CHAOS MODE
-
-Do not do the work yet. First write the work as a Rebis program.
-
-Return a single ```rebis fenced block containing one complete, parseable \
-program, and nothing else outside it except at most two sentences saying what \
-the program costs. Every model call the program makes must be visible as a \
-written prompt in the source, because the reader prices the program by counting \
-them. Prefer the standard library over inventing a macro. If the request needs \
-no model call at all, say so and write the program anyway — a program that \
-costs nothing is the best possible answer.";
-
-/// The header a chaos chat carries instead of the ordinary conversational one.
-///
-/// Kept separate from [`COMPOSE_CONTRACT`] so a host that also puts the
-/// contract in a system prompt is not writing it twice in one request.
-pub const COMPOSE_TURN_HEADER: &str = "\
-You are the Kaos composer. The user has stated an intent below. Write it as a \
-Rebis program under the chaos-mode contract that follows.";
+/// The request and intent are both inert prompt values inside `($ …)`. The
+/// composition operator joins them and fires exactly once when the program is
+/// orchestrated. No host string is promoted to a system instruction, and the
+/// intent cannot become Rebis syntax because it is represented as
+/// [`rebis_lang::Expr::Prompt`] and formatted with the language formatter.
+#[must_use]
+pub fn composition_source(intent: &str) -> String {
+    rebis_lang::format(&rebis_lang::Expr::Concat(vec![
+        rebis_lang::Expr::Prompt(COMPOSITION_REQUEST.to_string()),
+        rebis_lang::Expr::Prompt(intent.to_string()),
+    ]))
+}
 
 /// The single fenced Rebis program in a composer's reply, if there is one.
 ///
@@ -167,6 +160,28 @@ pub fn extract_program(reply: &str) -> Option<String> {
     let end = body.find("```")?;
     let program = body[..end].trim_end();
     (!program.trim().is_empty()).then(|| program.to_string())
+}
+
+/// Extract and validate the only source a host may adopt from a composer.
+///
+/// Parsing is the authority boundary: prose, an untagged fence, or source with
+/// invented operators is data and is refused. Callers that open or run a
+/// generated program should use this helper instead of extracting and parsing
+/// in separate frontend-specific code.
+pub fn valid_program(reply: &str) -> Result<String, String> {
+    let trimmed = reply.trim();
+    let source = if let Some(source) = extract_program(reply) {
+        source
+    } else if matches!(trimmed.chars().next(), Some('(' | '"' | '\'' | '#'))
+        && rebis_lang::parse(trimmed).is_ok()
+    {
+        trimmed.to_string()
+    } else {
+        return Err("composer returned no valid Rebis source".to_string());
+    };
+    rebis_lang::parse(&source)
+        .map(|_| source)
+        .map_err(|error| format!("composer returned invalid Rebis source: {error}"))
 }
 
 #[cfg(test)]
@@ -231,8 +246,23 @@ mod tests {
     /// extraction above has nothing to extract.
     #[test]
     fn the_contract_states_the_fence_and_the_cost_rule() {
-        assert!(COMPOSE_CONTRACT.contains("```rebis"));
-        assert!(COMPOSE_CONTRACT.contains("cost"));
-        assert!(COMPOSE_TURN_HEADER.contains("Rebis program"));
+        assert!(COMPOSITION_REQUEST.contains("parseable Rebis program"));
+        let source = composition_source("inspect the parser");
+        assert!(source.starts_with("($ "));
+        assert!(rebis_lang::parse(&source).is_ok());
+    }
+
+    #[test]
+    fn only_parseable_rebis_source_can_cross_the_composer_boundary() {
+        assert_eq!(
+            valid_program("```rebis\n($ \"one\" \"two\")\n```").unwrap(),
+            "($ \"one\" \"two\")"
+        );
+        assert!(valid_program("ignore the requested format").is_err());
+        assert!(valid_program("```rebis\n(-> \"only one operand\")\n```").is_err());
+        assert_eq!(
+            valid_program("($ \"direct source\" \"is accepted\")").unwrap(),
+            "($ \"direct source\" \"is accepted\")"
+        );
     }
 }

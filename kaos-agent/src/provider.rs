@@ -607,17 +607,24 @@ impl Spec {
             }
             Kind::Ollama => {
                 let base = ollama_base(&self.model);
+                let messages = crate::hand::render_ollama_messages(messages);
                 let mut options = serde_json::json!({});
                 let mut think = false;
+                let mut window = None;
                 if let Some(s) = sampling {
                     options["temperature"] = serde_json::json!(s.temperature);
                     if let Some(seed) = s.seed {
                         options["seed"] = serde_json::json!((seed % (i32::MAX as u64)) as i64);
                     }
-                    if let Some(n) = s.num_ctx {
-                        options["num_ctx"] = serde_json::json!(n);
-                    }
+                    window = s.num_ctx;
                     think = s.think;
+                }
+                // The tool loop grows its history every turn exactly as the
+                // `<act>` transcript does, so it needs the same fitted window —
+                // ollama's 4096 default truncates a conversation silently.
+                let sent = messages.to_string().len();
+                if let Some(n) = crate::backend::context_window(window, sent) {
+                    options["num_ctx"] = serde_json::json!(n);
                 }
                 let body = serde_json::json!({
                     "model": ollama_model(&self.model),
@@ -777,10 +784,17 @@ impl Spec {
     ) -> Result<String, String> {
         // The cap matters beyond cost: without it a degenerate long generation
         // buffers server-side past any read timeout and the call never returns.
+        //
+        // 8192 was that guard set at the size of a 2023 model's whole output
+        // budget, and it had become a ceiling on ordinary work: a reasoning
+        // model spends thousands of tokens thinking before it writes anything,
+        // so the answer was being cut off by OUR floor rather than the model's.
+        // 32768 is still a guard — a runaway is stopped — without standing in
+        // the way of a long agent turn.
         let max_tokens: u64 = std::env::var("KAOS_MAX_TOKENS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(8192);
+            .unwrap_or(32_768);
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": max_tokens,

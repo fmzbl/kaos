@@ -36,6 +36,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
+use kaos_core::chat::STOPPED_MARK;
 use kaos_core::retained::RetainedLog;
 
 use crate::rebis_workspace::{
@@ -147,6 +148,7 @@ const MAIN_SLASH_COMMANDS: &[CommandSpec] = &[
     command("auth forget", "auth forget "),
     command("config", "config"),
     command("config restore", "config restore"),
+    command("info", "info"),
     command("sigils [QUERY]", "sigils "),
     command("code [PATH] [INTENT]", "code "),
     command("cast [INTENT]", "cast "),
@@ -169,6 +171,7 @@ const REBIS_SLASH_COMMANDS: &[CommandSpec] = &[
     command("chat run [ID] [QUESTION]", "chat run "),
     command("config", "config"),
     command("config restore", "config restore"),
+    command("info", "info"),
     command("model [MODEL]", "model "),
     command("think [on|off]", "think "),
     command("chaos", "chaos"),
@@ -244,11 +247,11 @@ fn completions(query: &str, catalog: &'static [CommandSpec]) -> Vec<CommandSpec>
     let query = query.trim_start_matches('/').to_ascii_lowercase();
     catalog
         .iter()
-        .cloned()
         .filter(|command| {
             command.insert.starts_with(&query)
                 || (command.insert.ends_with(' ') && query.starts_with(command.insert.as_ref()))
         })
+        .cloned()
         .collect()
 }
 
@@ -783,7 +786,6 @@ enum QueuedWork {
 /// does not invent another meaning for queued, running, or complete.
 type RebisRunState = kaos_core::run_model::State;
 const MAX_REBIS_RUN_HISTORY: usize = 128;
-const MAX_REBIS_RUN_DISPLAY_LINES: usize = 2_000;
 const MAX_RUN_CHAT_REPLY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RUN_CHAT_TURNS: usize = 128;
 
@@ -4354,13 +4356,15 @@ impl App {
         }
         let mut history = self.session.turns[start..end]
             .iter()
-            .map(|turn| {
-                let role = match turn.role {
-                    crate::sessions::Role::User => "USER",
-                    crate::sessions::Role::Model => "ASSISTANT",
-                };
-                format!("{role}: {}", bounded_context_copy(&turn.text, limit / 2))
+            .filter_map(|turn| match turn.role {
+                crate::sessions::Role::User => Some(("USER", turn.text.clone())),
+                // A failed or stopped turn is the HOST speaking, not the model.
+                // Sending it back would carry every error the conversation has
+                // ever hit into the next prompt.
+                crate::sessions::Role::Model => kaos_core::chat::model_turn_for_history(&turn.text)
+                    .map(|said| ("ASSISTANT", said)),
             })
+            .map(|(role, text)| format!("{role}: {}", bounded_context_copy(&text, limit / 2)))
             .collect::<Vec<_>>()
             .join("\n\n");
         if start > 0 {
@@ -4944,6 +4948,41 @@ impl App {
         self.adopt_composed_program(&reply);
     }
 
+    /// Fold what a STOPPED turn managed to produce into the conversation.
+    ///
+    /// Interrupting is not undoing. The turn never reached its final-answer
+    /// delimiter, so [`Self::flush_reply`] would find no answer and keep
+    /// nothing — which left the reader with their own question followed by
+    /// silence, and minutes of real model work discarded. What it did before
+    /// the stop is kept instead: its work trace, and whatever it had said,
+    /// marked plainly as stopped so nothing here is mistaken for a finished
+    /// answer. A turn that produced nothing at all still records the stop, so
+    /// the conversation never has a question with no reply under it.
+    fn flush_interrupted_reply(&mut self, reason: &str) {
+        let streamed = std::mem::take(&mut self.session_reply);
+        // Only a conversation waiting on an answer gets one. `cancel_all_work`
+        // is also the gesture that stops a Rebis run and that tears the app
+        // down on quit; neither is a chat turn, and neither should leave a
+        // message in somebody's saved conversation.
+        let awaiting = matches!(
+            self.session.turns.last(),
+            Some(turn) if turn.role == crate::sessions::Role::User
+        );
+        if !awaiting {
+            return;
+        }
+        let trace = kaos_core::chat::extract_chat_trace(&streamed);
+        let said = kaos_core::chat::extract_chat_reply(&streamed);
+        let note = format!("{STOPPED_MARK} by {reason}");
+        let reply = if said.trim().is_empty() {
+            note
+        } else {
+            format!("{said}\n\n{note}")
+        };
+        self.session
+            .push_with_trace(crate::sessions::Role::Model, reply, trace);
+    }
+
     /// Rebuild completed model work as collapsed terminal folds when a saved
     /// conversation is reopened. The live transcript already has these
     /// entries; persisted traces need the same presentation after the process
@@ -4976,15 +5015,15 @@ impl App {
         if !self.chaos_mode {
             return;
         }
-        let Some(source) = kaos_core::chaos::extract_program(reply) else {
-            return;
+        let source = match kaos_core::chaos::valid_program(reply) {
+            Ok(source) => source,
+            Err(error) => {
+                self.note(&format!(
+                    "chaos mode composed no valid Rebis program ({error}) — left in the transcript"
+                ));
+                return;
+            }
         };
-        if let Err(error) = rebis_lang::parse(&source) {
-            self.note(&format!(
-                "chaos mode composed a program that does not parse ({error}) — left in the transcript"
-            ));
-            return;
-        }
         let request = RunRequest {
             source,
             input: String::new(),
@@ -5003,7 +5042,7 @@ impl App {
     /// the raw fold markers; [`flush_reply`] removes visible work sections and
     /// persists only the final answer.
     fn record_reply_line(&mut self, text: &str) {
-        if !text.is_empty() && self.session_reply.len() < 200_000 {
+        if !text.is_empty() {
             self.session_reply.push_str(text);
             self.session_reply.push('\n');
         }
@@ -5227,6 +5266,7 @@ impl App {
                 Some("restore") if args.len() == 2 => self.open_config(true),
                 _ => self.note("usage: /config or /config restore"),
             },
+            "info" => self.show_info(),
             "chaos" => {
                 self.chaos_mode = match args.get(1).map(String::as_str) {
                     Some("on" | "yes" | "1") => true,
@@ -5798,7 +5838,6 @@ impl App {
             // A coding job launched by the interactive app is the `/chat` mind
             // (including an explicit `/code`). Give it Kaos's compiled Rebis
             // cookbook so it can explain, repair, and author the language.
-            cmd.env("KAOS_REBIS_CONTEXT", "1");
         }
         if transport.raw_chat_task {
             cmd.env(RAW_CHAT_TASK_ENV, "1");
@@ -5979,9 +6018,15 @@ impl App {
         true
     }
 
-    /// Chat-screen ^C is STOP, not quit: it cancels whatever is in flight —
-    /// active and queued work first, then a pending permission question, then
-    /// a typed prompt — and exits Kaos only when the chat is already idle.
+    /// Chat-screen ^C is STOP, then quit.
+    ///
+    /// The first press stops whatever is in flight and leaves you in the chat.
+    /// It also ARMS the quit, so a second ^C exits immediately: the stop was
+    /// already the deliberate beat that a confirmation exists to provide, and
+    /// making someone press it three or four times to leave — once to stop,
+    /// once to clear the draft, then twice more to confirm — is a worse answer
+    /// to "I want out" than trusting the second press. Any other key disarms
+    /// it, so the armed state can never carry over into ordinary typing.
     fn chat_ctrl_c(&mut self) {
         if self.has_active_jobs()
             || !self.queue.is_empty()
@@ -5989,6 +6034,13 @@ impl App {
             || !self.parallel_gate_queue.is_empty()
         {
             self.cancel_all_work("^C");
+            self.confirm_quit = true;
+            self.note("stopped \u{00b7} ^C again quits \u{00b7} any other key stays");
+            return;
+        }
+        // Armed by the stop above: this is the second press, so leave.
+        if self.confirm_quit {
+            self.quit_from_ctrl_c();
             return;
         }
         if self.pending.take().is_some() {
@@ -6039,10 +6091,11 @@ impl App {
             drop(child);
             self.job_start = None;
             self.activity.clear();
-            // A stopped chat may have streamed model work but never reached its
-            // final-answer delimiter. Do not turn that partial trace into a
-            // durable assistant message on the next save.
-            self.session_reply.clear();
+            // A stopped chat never reached its final-answer delimiter, so what
+            // it streamed is not an answer — but it is not nothing either, and
+            // discarding it left the reader's question with no reply beneath
+            // it. Keep the work, marked as stopped.
+            self.flush_interrupted_reply(reason);
             // A cancel can land mid-stream with a fold still open; close it (as the
             // Done path does) or every later line vanishes into the dead fold's body.
             self.open_fold = None;
@@ -6280,6 +6333,23 @@ impl App {
             format!("  {s}"),
             Style::new().fg(C_ASH()),
         )));
+        self.follow = true;
+    }
+
+    /// Show the same complete, frontend-neutral product explanation that the
+    /// visual Info tab renders. Keep it as individual transcript rows so the
+    /// terminal's normal scrolling and selection never shorten the document.
+    fn show_info(&mut self) {
+        self.push_line(Line::from(Span::styled(
+            "KAOS INFO",
+            Style::new().fg(C_PRIMARY()).add_modifier(Modifier::BOLD),
+        )));
+        for line in kaos_core::info::APP_INFO.lines() {
+            self.push_line(Line::from(Span::styled(
+                line.to_string(),
+                Style::new().fg(C_BONE()),
+            )));
+        }
         self.follow = true;
     }
 
@@ -6612,19 +6682,12 @@ fn rebis_run_tree_rows(runs: &[RebisRunView<'_>]) -> Vec<RebisRunTreeRow> {
                 });
             } else {
                 let mut depth = 0usize;
-                let hidden = run
-                    .entry
-                    .output
-                    .len()
-                    .saturating_sub(MAX_REBIS_RUN_DISPLAY_LINES);
-                if hidden > 0 {
-                    rows.push(RebisRunTreeRow::Output {
-                        run: index,
-                        depth,
-                        text: format!("… {hidden} older retained lines hidden"),
-                    });
-                }
-                for line in run.entry.output.iter().skip(hidden) {
+                // The retained stream is already bounded by the shared log
+                // budget and carries an omission marker when that budget is
+                // reached. Do not add a second presentation cap here: the
+                // terminal run browser is the place where the complete
+                // retained trace is reviewed.
+                for line in run.entry.output.iter() {
                     match crate::fold::classify(line) {
                         crate::fold::Marker::Open(title) => {
                             let title = title.trim();
@@ -8603,8 +8666,9 @@ mod tests {
         let direct =
             kaos_core::chat::DEFAULT_CONTEXT.render_turn(false, "", "add a --version flag");
         let chaos = kaos_core::chat::DEFAULT_CONTEXT.render_turn(true, "", "add a --version flag");
-        assert!(!direct.contains(kaos_core::chaos::COMPOSE_CONTRACT));
-        assert!(chaos.contains(kaos_core::chaos::COMPOSE_CONTRACT));
+        assert!(direct.contains("MODE=direct"));
+        assert!(chaos.contains("MODE=chaos"));
+        assert!(!chaos.contains(kaos_core::chaos::COMPOSITION_REQUEST));
         assert!(chaos.contains("add a --version flag"));
     }
 
@@ -9659,14 +9723,15 @@ mod tests {
             "\u{1e}FOLD_OPEN\u{1f}model turn 1 · complete response".to_string(),
             "model    I will inspect the parser first.".to_string(),
             "\u{1e}FOLD_CLOSE".to_string(),
-            "     ☽ I will inspect the parser first.".to_string(),
             "   1 ± edit src/parser.rs".to_string(),
+            "     ☽ I will inspect the parser first.".to_string(),
             "\u{1e}FOLD_OPEN\u{1f}⋯ step 1 in full — edit src/parser.rs".to_string(),
             "  the exact change:".to_string(),
             "    - old".to_string(),
             "    + new".to_string(),
             "\u{1e}FOLD_CLOSE".to_string(),
             "   2 $ cargo test".to_string(),
+            "     ☽ runs that command in the project and reads what it prints".to_string(),
             "model    parser repaired and verified".to_string(),
             "\u{1e}FOLD_CLOSE".to_string(),
         ]
@@ -10388,14 +10453,110 @@ mod tests {
             "cancelling work must not eat the draft"
         );
 
+        // Stop first, quit on the very next ^C.
         app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert!(!app.quit);
-        assert!(app.input.is_empty());
-        // Idle now: ask, then confirm.
+        assert!(app.quit, "the second ^C leaves");
+    }
+
+    #[test]
+    fn any_other_key_disarms_the_quit_the_stop_armed() {
+        // The armed state must never survive into ordinary typing: stopping a
+        // model and then continuing to work cannot leave a ^C that exits.
+        let mut app = App::new();
+        let child = Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap();
+        let (_tx, rx) = mpsc::channel();
+        app.job = Some(Job {
+            child: Arc::new(Mutex::new(child)),
+            rx,
+            label: "a turn".to_string(),
+            claude_session: false,
+            rebis_run_id: None,
+            run_chat_id: None,
+            owns_process_group: false,
+        });
+
+        app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(!app.quit, "the first ^C only stops");
+        assert!(app.confirm_quit, "and arms the quit");
+
+        app.on_key(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(!app.confirm_quit, "typing disarms it");
+
+        app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(
+            !app.quit,
+            "^C after typing clears the draft, it does not quit"
+        );
+    }
+
+    #[test]
+    fn an_idle_chat_still_asks_before_it_quits() {
+        // Nothing was stopped, so nothing stood in for the confirmation.
+        let mut app = App::new();
         app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(!app.quit, "the first idle ^C asks");
         app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert!(app.quit, "an idle chat exits on the confirming ^C");
+        assert!(app.quit, "the confirming ^C exits");
+    }
+
+    #[test]
+    fn stopping_a_chat_turn_keeps_what_the_model_had_done() {
+        // Interrupting steers the model; it does not undo it. The stopped turn
+        // keeps its work and says it was stopped, so the conversation never
+        // holds a question with nothing under it.
+        let mut app = App::new();
+        app.session
+            .push(crate::sessions::Role::User, "explain this");
+        let child = Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap();
+        let (_tx, rx) = mpsc::channel();
+        app.job = Some(Job {
+            child: Arc::new(Mutex::new(child)),
+            rx,
+            label: "chat turn".to_string(),
+            claude_session: false,
+            rebis_run_id: None,
+            run_chat_id: None,
+            owns_process_group: false,
+        });
+        app.session_reply = "\u{1e}FOLD_OPEN\u{1f}model turn 1\nmodel    reading the file\n\u{1e}FOLD_CLOSE\nchat    final answer\nIt parses the header first.".to_string();
+
+        app.cancel_all_work("^C");
+
+        let last = app.session.turns.last().expect("the turn is recorded");
+        assert_eq!(last.role, crate::sessions::Role::Model);
+        assert!(
+            last.text.contains("It parses the header first."),
+            "what it said survives: {:?}",
+            last.text
+        );
+        assert!(last.text.contains("stopped by ^C"), "and says it stopped");
+        assert!(
+            last.trace.contains("reading the file"),
+            "its work trace survives too"
+        );
+    }
+
+    #[test]
+    fn stopping_work_that_is_not_a_chat_turn_writes_no_message() {
+        // ^C also stops Rebis runs and tears the app down on quit. Neither is
+        // an unanswered question, so neither may leave a message behind.
+        let mut app = App::new();
+        let child = Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap();
+        let (_tx, rx) = mpsc::channel();
+        app.job = Some(Job {
+            child: Arc::new(Mutex::new(child)),
+            rx,
+            label: "a rebis run".to_string(),
+            claude_session: false,
+            rebis_run_id: None,
+            run_chat_id: None,
+            owns_process_group: false,
+        });
+        app.cancel_all_work("^C");
+        assert!(
+            app.session.turns.is_empty(),
+            "no conversation was waiting on an answer"
+        );
     }
 
     #[test]

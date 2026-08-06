@@ -3463,7 +3463,7 @@ impl Workspace {
                 };
             }
             "runs" => return WorkspaceAction::BrowseRuns,
-            "model" | "new" | "clear" | "quit" | "mouse" | "chaos" | "chaos on"
+            "info" | "model" | "new" | "clear" | "quit" | "mouse" | "chaos" | "chaos on"
             | "chaos off" | "config" | "config restore" | "theme" | "theme dark"
             | "theme light" | "think" | "think on" | "think off" | "think toggle" => {
                 return WorkspaceAction::Kaos(command)

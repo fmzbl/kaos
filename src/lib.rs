@@ -42,8 +42,8 @@ pub use kaos_core::{config, cost, runs, sessions, sigils, tabs, theme, visual};
 pub use kaos_agent::hand;
 // The editor itself — state only, no drawing.
 pub use kaos_agent::{
-    agent, auth, backend, conductor, familiar, myth, pause, provider, rebis_worktree, scry, solve,
-    spiral,
+    agent, auth, backend, composer, conductor, familiar, myth, pause, provider, rebis_worktree,
+    scry, solve, spiral,
 };
 pub use kaos_pact::{
     adept, charge, dream, egregore, equation, gnosis, grade, order, ray, rite, rng, sigil,

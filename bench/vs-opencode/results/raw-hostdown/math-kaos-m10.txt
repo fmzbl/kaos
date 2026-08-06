@@ -1,0 +1,31 @@
+chat Rebis program · the harness around your prompt · 184 bytes
+chat      "KAOS_CHAT_DATA\nMODE=direct\nHISTORY_BYTES=0\n(first turn)\nQUESTION_BYTES=99\nHow many positive integers less than 1000 are divisible by 11?\n\nAnswer with the final integer only.\n"
+chat node prompt · exactly what the model receives · 619 bytes
+chat      KAOS_REBIS_AGENT_CONTEXT
+chat      VERSION=1
+chat      SCOPE_BYTES=4
+chat      root
+chat      MODEL_BYTES=18
+chat      ollama:qwen3.6:35b
+chat      WORKSPACE_BYTES=38
+chat      /home/facu/code/kaos/bench/vs-opencode
+chat      PROGRAM_BYTES=184
+chat      "KAOS_CHAT_DATA\nMODE=direct\nHISTORY_BYTES=0\n(first turn)\nQUESTION_BYTES=99\nHow many positive integers less than 1000 are divisible by 11?\n\nAnswer with the final integer only.\n"
+chat      INITIAL_RECORD_BYTES=0
+chat      
+chat      SUPERVISOR_DIRECTIVE_BYTES=0
+chat      
+chat      ATTACHMENT_COUNT=0
+chat      NODE_PROMPT_BYTES=174
+chat      KAOS_CHAT_DATA
+chat      MODE=direct
+chat      HISTORY_BYTES=0
+chat      (first turn)
+chat      QUESTION_BYTES=99
+chat      How many positive integers less than 1000 are divisible by 11?
+chat      
+chat      Answer with the final integer only.
+chat      
+chat    chat model turn 1 · working · ollama:qwen3.6:35b · limit 600s
+chat error: oracle failure: charge fizzled (exit 1) — `qwen3.6:35b` on http://192.168.10.197:11434: Head "http://192.168.10.197:11434/": dial tcp 192.168.10.197:11434: connect: no route to host; HTTP attempt: ollama http: http://192.168.10.197:11434/api/generate: Connection Failed: Connect error: No route to host (os error 113)
+

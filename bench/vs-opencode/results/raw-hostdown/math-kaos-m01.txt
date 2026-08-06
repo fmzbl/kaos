@@ -1,0 +1,54 @@
+chat Rebis program · the harness around your prompt · 357 bytes
+chat      "KAOS_CHAT_DATA\nMODE=direct\nHISTORY_BYTES=0\n(first turn)\nQUESTION_BYTES=271\nJanet's ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins with four. She sells the remainder at the farmers' market for $2 per egg. How many dollars does she make every day at the farmers' market?\n\nAnswer with the final integer only.\n"
+chat node prompt · exactly what the model receives · 965 bytes
+chat      KAOS_REBIS_AGENT_CONTEXT
+chat      VERSION=1
+chat      SCOPE_BYTES=4
+chat      root
+chat      MODEL_BYTES=18
+chat      ollama:qwen3.6:35b
+chat      WORKSPACE_BYTES=38
+chat      /home/facu/code/kaos/bench/vs-opencode
+chat      PROGRAM_BYTES=357
+chat      "KAOS_CHAT_DATA\nMODE=direct\nHISTORY_BYTES=0\n(first turn)\nQUESTION_BYTES=271\nJanet's ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins with four. She sells the remainder at the farmers' market for $2 per egg. How many dollars does she make every day at the farmers' market?\n\nAnswer with the final integer only.\n"
+chat      INITIAL_RECORD_BYTES=0
+chat      
+chat      SUPERVISOR_DIRECTIVE_BYTES=0
+chat      
+chat      ATTACHMENT_COUNT=0
+chat      NODE_PROMPT_BYTES=347
+chat      KAOS_CHAT_DATA
+chat      MODE=direct
+chat      HISTORY_BYTES=0
+chat      (first turn)
+chat      QUESTION_BYTES=271
+chat      Janet's ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins with four. She sells the remainder at the farmers' market for $2 per egg. How many dollars does she make every day at the farmers' market?
+chat      
+chat      Answer with the final integer only.
+chat      
+chat    chat model turn 1 · working · ollama:qwen3.6:35b · limit 600s
+chat    chat model turn 1 · complete response
+chat      <act tool="bash">
+chat      <arg name="cmd">python3 -c "
+chat      eggs_laid = 16
+chat      breakfast = 3
+chat      baking = 4
+chat      remaining = eggs_laid - breakfast - baking
+chat      revenue = remaining * 2
+chat      print(revenue)
+chat      "</arg>
+chat      </act>
+  [2;48;2;0;0;0;38;2;126;136;152m 1[0m [1;48;2;0;0;0;38;2;96;154;255m$[0m [48;2;0;0;0;38;2;255;255;255mpython3 -c " ↵ eggs_laid = 16 ↵ breakfast = 3 ↵ baking = 4 ↵ remaining = eggs_laid -…[0m
+     [2;48;2;0;0;0;38;2;96;154;255m☽ runs that command in the project and reads what it prints[0m
+     [48;2;0;0;0;38;2;96;154;255m→[0m [2;48;2;0;0;0;38;2;126;136;152mexit 0 · 18[0m
+chat    chat model turn 2 · working · ollama:qwen3.6:35b · limit 600s
+chat    chat model turn 2 · complete response
+chat      <act tool="finish">
+chat      <arg name="message">18</arg>
+chat      </act>
+  [2;48;2;0;0;0;38;2;126;136;152m 2[0m [1;48;2;0;0;0;38;2;96;154;255m⚑ finish[0m
+     [2;48;2;0;0;0;38;2;96;154;255m☽ the work is done and verified; this is what the run returns[0m
+     [48;2;0;0;0;38;2;255;255;255m18[0m
+chat    final answer
+18
+

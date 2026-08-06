@@ -1,0 +1,39 @@
+chat Rebis program · the harness around your prompt · 240 bytes
+chat      "KAOS_CHAT_DATA\nMODE=direct\nHISTORY_BYTES=0\n(first turn)\nQUESTION_BYTES=154\nJames writes a 3-page letter to 2 different friends twice a week. How many pages does he write in a year of 52 weeks?\n\nAnswer with the final integer only.\n"
+chat node prompt · exactly what the model receives · 731 bytes
+chat      KAOS_REBIS_AGENT_CONTEXT
+chat      VERSION=1
+chat      SCOPE_BYTES=4
+chat      root
+chat      MODEL_BYTES=18
+chat      ollama:qwen3.6:35b
+chat      WORKSPACE_BYTES=38
+chat      /home/facu/code/kaos/bench/vs-opencode
+chat      PROGRAM_BYTES=240
+chat      "KAOS_CHAT_DATA\nMODE=direct\nHISTORY_BYTES=0\n(first turn)\nQUESTION_BYTES=154\nJames writes a 3-page letter to 2 different friends twice a week. How many pages does he write in a year of 52 weeks?\n\nAnswer with the final integer only.\n"
+chat      INITIAL_RECORD_BYTES=0
+chat      
+chat      SUPERVISOR_DIRECTIVE_BYTES=0
+chat      
+chat      ATTACHMENT_COUNT=0
+chat      NODE_PROMPT_BYTES=230
+chat      KAOS_CHAT_DATA
+chat      MODE=direct
+chat      HISTORY_BYTES=0
+chat      (first turn)
+chat      QUESTION_BYTES=154
+chat      James writes a 3-page letter to 2 different friends twice a week. How many pages does he write in a year of 52 weeks?
+chat      
+chat      Answer with the final integer only.
+chat      
+chat    chat model turn 1 · working · ollama:qwen3.6:35b · limit 600s
+chat    chat model turn 1 · complete response
+chat      <act tool="finish">
+chat      <arg name="message">312</arg>
+chat      </act>
+  [2;48;2;0;0;0;38;2;126;136;152m 1[0m [1;48;2;0;0;0;38;2;96;154;255m⚑ finish[0m
+     [2;48;2;0;0;0;38;2;96;154;255m☽ the work is done and verified; this is what the run returns[0m
+     [48;2;0;0;0;38;2;255;255;255m312[0m
+chat    final answer
+312
+

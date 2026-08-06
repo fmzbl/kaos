@@ -1183,6 +1183,7 @@ fn pane_title(pane: &Pane) -> String {
         Pane::Sigils(_) => "sigils".to_string(),
         Pane::Source(_) => "source".to_string(),
         Pane::Settings(_) => "settings".to_string(),
+        Pane::Info => "info".to_string(),
         Pane::Automata(pane) => format!("generation · {}", pane.origin),
         Pane::Music(pane) => format!("sound · {}", pane.origin),
         Pane::Runs => "runs".to_string(),
@@ -1212,6 +1213,8 @@ enum Pane {
     /// Every non-secret Kaos preference, backed by the same persistent file as
     /// the terminal `/config` editor.
     Settings(settings::SettingsPane),
+    /// The shared, read-only product and Rebis execution manual.
+    Info,
     /// A run as the cellular automaton it generates: the program's geometry
     /// supplies the lattice, the model's own bytes supply the rule. See the
     /// `automata` module for why this is a generation and not a diagram.
@@ -1381,13 +1384,18 @@ struct ChatSubmission {
 
 fn recent_chat_history(turns: &[kaos_core::sessions::Turn]) -> Vec<(String, String)> {
     let limit = kaos_core::chat::MAX_CHAT_HISTORY_BYTES;
-    let mut answer: Option<&str> = None;
+    let mut answer: Option<String> = None;
     let mut bytes = 0usize;
     let mut recent = Vec::new();
     for turn in turns.iter().rev() {
         match turn.role {
             kaos_core::sessions::Role::Model => {
-                answer.get_or_insert(&turn.text);
+                // A failed or stopped turn is the HOST speaking, not the model.
+                // Carrying it back would put every error the conversation has
+                // ever hit into the next prompt.
+                if let Some(said) = kaos_core::chat::model_turn_for_history(&turn.text) {
+                    answer.get_or_insert(said);
+                }
             }
             kaos_core::sessions::Role::User => {
                 let answer = answer.take().unwrap_or_default();
@@ -1397,7 +1405,7 @@ fn recent_chat_history(turns: &[kaos_core::sessions::Turn]) -> Vec<(String, Stri
                 }
                 recent.push((
                     bounded_context_copy(&turn.text, limit / 2),
-                    bounded_context_copy(answer, limit / 2),
+                    bounded_context_copy(&answer, limit / 2),
                 ));
                 bytes = bytes.saturating_add(turn_bytes);
                 if bytes >= limit {
@@ -1692,6 +1700,7 @@ impl Editor {
             Some(Pane::Automata(_)) => self.automata_tab(ui),
             Some(Pane::Music(_)) => self.detached_music_tab(ui),
             Some(Pane::Settings(_)) => self.settings(ui),
+            Some(Pane::Info) => self.info(ui),
             Some(Pane::Runs) => self.runs_tab(ui),
             Some(Pane::Actions) => self.actions_tab(ui),
             None => {}
@@ -2205,14 +2214,15 @@ impl Editor {
         if !self.chaos {
             return;
         }
-        let Some(source) = kaos_core::chaos::extract_program(reply) else {
-            return;
+        let source = match kaos_core::chaos::valid_program(reply) {
+            Ok(source) => source,
+            Err(error) => {
+                self.notice = Some(format!(
+                    "chaos mode composed no valid Rebis program ({error}) — left in the chat"
+                ));
+                return;
+            }
         };
-        if rebis_lang::parse(&source).is_err() {
-            self.notice =
-                Some("chaos mode composed a program that does not parse — left in the chat".into());
-            return;
-        }
         self.tabs
             .open("composed", Pane::Source(SourcePane::with_text(source)));
         self.notice = Some(
@@ -2263,9 +2273,17 @@ impl Editor {
     /// The same path the input box takes, so a queued message and a typed one
     /// are the same turn in every respect.
     fn dispatch_chat_turn(&mut self, session: &str, said: String) {
-        let Some(chat) = self.chat_pane_mut(session) else {
+        let Some(submission) = self.prepare_chat_submission(session, said) else {
             return;
         };
+        self.launch_chat_submission(submission);
+    }
+
+    /// Record one accepted user turn and capture the exact history used for
+    /// its provider call. Both typed sends and queued sends use this seam so
+    /// they cannot drift in resume, persistence, or run-chat handling.
+    fn prepare_chat_submission(&mut self, session: &str, said: String) -> Option<ChatSubmission> {
+        let chat = self.chat_pane_mut(session)?;
         let resume = chat
             .session
             .turns
@@ -2278,6 +2296,25 @@ impl Editor {
         let run_id = chat.run_id;
         let _ = kaos_core::sessions::Store::default_store().save(&chat.session);
 
+        Some(ChatSubmission {
+            said,
+            session: chat.session.id.clone(),
+            resume,
+            run_id,
+            history,
+        })
+    }
+
+    /// Convert a prepared chat turn into the one child-process request shared
+    /// by the visual composer and queued-chat drain.
+    fn launch_chat_submission(&mut self, submission: ChatSubmission) {
+        let ChatSubmission {
+            said,
+            session,
+            resume,
+            run_id,
+            history,
+        } = submission;
         let history_text = history
             .iter()
             .map(|(user, assistant)| format!("USER: {user}\nASSISTANT: {assistant}"))
@@ -2506,7 +2543,71 @@ fn stream_sections(lines: &[String]) -> Vec<StreamSection> {
             roots.push(section);
         }
     }
-    roots
+    gather_loose_lines(roots)
+}
+
+/// How many bare lines may stand at the top of the stream before the older ones
+/// are folded away, and how many of the newest always stay in view.
+const LOOSE_LINE_LIMIT: usize = 24;
+const LOOSE_LINE_TAIL: usize = 12;
+
+/// Fold away a wall of unattached lines, keeping the newest in view.
+///
+/// Model work arrives inside folds, so top-level lines are normally a handful
+/// of headings. But a retained log keeps only its last lines: when a single
+/// enormous observation (a `find` across `target/`, say) overflows the window,
+/// the `FOLD_OPEN` that owned those lines is dropped with the rest of the head,
+/// and thousands of orphaned body lines arrive with no fold to live in. Painted
+/// one per row, that is the wall of paths this exists to prevent — unreadable,
+/// unscrollable past, and with no way to collapse it because the header that
+/// would have collapsed it no longer exists.
+///
+/// So the tree owns the invariant instead of trusting the markers: a long run
+/// of loose lines becomes a section of its own. The newest stay visible,
+/// because this also renders a LIVE stream and watching it work is the point.
+fn gather_loose_lines(roots: Vec<StreamSection>) -> Vec<StreamSection> {
+    let loose = roots
+        .iter()
+        .filter(|section| matches!(section, StreamSection::Line(_)))
+        .count();
+    if loose <= LOOSE_LINE_LIMIT {
+        return roots;
+    }
+    // Everything up to the last fold-worthy stretch is folded; the tail of
+    // loose lines nearest the end is left where the eye expects it.
+    let keep_from = roots
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, section)| matches!(section, StreamSection::Line(_)))
+        .nth(LOOSE_LINE_TAIL - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let mut out: Vec<StreamSection> = Vec::new();
+    let mut buried: Vec<StreamSection> = Vec::new();
+    for (index, section) in roots.into_iter().enumerate() {
+        match section {
+            StreamSection::Line(line) if index < keep_from => {
+                buried.push(StreamSection::Line(line));
+            }
+            other => {
+                if !buried.is_empty() {
+                    out.push(StreamSection::Fold {
+                        title: "\u{22ef} earlier output".to_string(),
+                        body: std::mem::take(&mut buried),
+                    });
+                }
+                out.push(other);
+            }
+        }
+    }
+    if !buried.is_empty() {
+        out.push(StreamSection::Fold {
+            title: "\u{22ef} earlier output".to_string(),
+            body: buried,
+        });
+    }
+    out
 }
 
 fn stream_section_lines(items: &[StreamSection]) -> usize {
@@ -2881,6 +2982,7 @@ impl eframe::App for Editor {
                 Some(Pane::Automata(_)) => self.automata_tab(ui),
                 Some(Pane::Music(_)) => self.music_tab(ui),
                 Some(Pane::Settings(_)) => self.settings(ui),
+                Some(Pane::Info) => self.info(ui),
                 Some(Pane::Runs) => self.runs_tab(ui),
                 Some(Pane::Actions) => self.actions_tab(ui),
                 None => {}
@@ -3386,6 +3488,7 @@ impl Editor {
                         let mut close: Option<TabId> = None;
                         let mut reorder: Option<(TabId, usize)> = None;
                         let mut settings = false;
+                        let mut info = false;
                         let mut runs = false;
                         let mut actions = false;
                         let mut generation = false;
@@ -3431,9 +3534,10 @@ impl Editor {
                             ui.separator();
                         }
                         if ui.small_button("+ mandala").clicked() {
-                            let n = self.tabs.len() + 1;
-                            self.tabs
-                                .open(format!("mandala {n}"), Pane::Mandala(Doc::default()));
+                            // Numbering is `Tabs::open`'s job — it counts the
+                            // mandalas, where this counted every tab open and
+                            // called the second mandala "mandala 5".
+                            self.tabs.open("mandala", Pane::Mandala(Doc::default()));
                         }
                         if ui.small_button("+ chat").clicked() {
                             self.tabs.open("chat", Pane::Chat(ChatPane::default()));
@@ -3472,6 +3576,9 @@ impl Editor {
                         if ui.small_button("settings").clicked() {
                             settings = true;
                         }
+                        if ui.small_button("info").clicked() {
+                            info = true;
+                        }
                         let run_label = if self.runs.active_count() == 0 {
                             "runs".to_string()
                         } else {
@@ -3508,6 +3615,9 @@ impl Editor {
                         }
                         if settings {
                             self.open_settings();
+                        }
+                        if info {
+                            self.open_info();
                         }
                         if runs {
                             self.open_runs();
@@ -3587,6 +3697,18 @@ impl Editor {
         }
     }
 
+    fn open_info(&mut self) {
+        let existing = self
+            .tabs
+            .iter()
+            .find_map(|tab| matches!(tab.content, Pane::Info).then_some(tab.id));
+        if let Some(id) = existing {
+            self.tabs.select(id);
+        } else {
+            self.tabs.open("info", Pane::Info);
+        }
+    }
+
     fn open_runs(&mut self) {
         let existing = self
             .tabs
@@ -3661,6 +3783,65 @@ impl Editor {
         ui.separator();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::CollapsingHeader::new("SEARCH CONFIGURATION")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.colored_label(
+                        k.faint,
+                        "Search persistent settings and environment-only configuration by key, description, or example.",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("find");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut pane.search)
+                                .desired_width(360.0)
+                                .hint_text("model, timeout, Ollama, Rebis…"),
+                        );
+                        if ui
+                            .add_enabled(!pane.search.is_empty(), egui::Button::new("clear"))
+                            .clicked()
+                        {
+                            pane.search.clear();
+                        }
+                    });
+                    let query = pane.search.trim();
+                    let persistent = kaos_core::config::CONFIG_KEYS
+                        .iter()
+                        .copied()
+                        .filter(|key| settings::matches(key, query))
+                        .collect::<Vec<_>>();
+                    let environment = settings::ENVIRONMENT_DOCS
+                        .iter()
+                        .filter(|doc| settings::matches_environment(doc, query))
+                        .collect::<Vec<_>>();
+                    let total = persistent.len() + environment.len();
+                    if query.is_empty() {
+                        ui.colored_label(k.faint, format!("{total} documented configuration entries"));
+                    } else if total == 0 {
+                        ui.colored_label(k.faint, "no matching configuration entries");
+                    } else {
+                        ui.colored_label(
+                            k.accent,
+                            format!("{total} matching configuration entr{}", if total == 1 { "y" } else { "ies" }),
+                        );
+                        for key in persistent {
+                            let doc = settings::documentation(key)
+                                .expect("every persistent setting has documentation");
+                            ui.horizontal(|ui| {
+                                ui.monospace(key);
+                                ui.colored_label(k.faint, format!("{} · {}", settings::group(key).label(), doc.summary));
+                            });
+                        }
+                        for doc in environment {
+                            ui.horizontal(|ui| {
+                                ui.monospace(doc.key);
+                                ui.colored_label(k.faint, format!("environment only · {}", doc.details));
+                            });
+                        }
+                    }
+                });
+
+            ui.add_space(8.0);
             egui::CollapsingHeader::new("SESSION ONLY")
                 .default_open(true)
                 .show(ui, |ui| {
@@ -3745,33 +3926,18 @@ impl Editor {
                 });
 
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.colored_label(k.faint, "PERSISTENT");
-                ui.add(
-                    egui::TextEdit::singleline(&mut pane.filter)
-                        .desired_width(280.0)
-                        .hint_text("filter settings"),
-                );
-            });
+            ui.colored_label(k.faint, "PERSISTENT");
             ui.colored_label(
                 k.faint,
                 "Every entry below shows its type, documented default, behavior, and a copyable example.",
             );
-            let needle = pane.filter.trim().to_ascii_lowercase();
+            let needle = pane.search.trim();
             for group in settings::Group::ALL {
                 let keys = kaos_core::config::CONFIG_KEYS
                     .iter()
                     .copied()
                     .filter(|key| settings::group(key) == group)
-                    .filter(|key| {
-                        needle.is_empty()
-                            || key.to_ascii_lowercase().contains(&needle)
-                            || settings::documentation(key).is_some_and(|doc| {
-                                doc.summary.to_ascii_lowercase().contains(&needle)
-                                    || doc.details.to_ascii_lowercase().contains(&needle)
-                                    || doc.example.to_ascii_lowercase().contains(&needle)
-                            })
-                    })
+                    .filter(|key| settings::matches(key, needle))
                     .collect::<Vec<_>>();
                 if keys.is_empty() {
                     continue;
@@ -3923,11 +4089,7 @@ impl Editor {
 
             let environment_docs = settings::ENVIRONMENT_DOCS
                 .iter()
-                .filter(|doc| {
-                    needle.is_empty()
-                        || doc.key.to_ascii_lowercase().contains(&needle)
-                        || doc.details.to_ascii_lowercase().contains(&needle)
-                })
+                .filter(|doc| settings::matches_environment(doc, needle))
                 .collect::<Vec<_>>();
             if !environment_docs.is_empty() {
                 egui::CollapsingHeader::new("ENVIRONMENT ONLY & SECRETS")
@@ -4037,6 +4199,32 @@ impl Editor {
         }
     }
 
+    /// Render the complete explanation without a presentation cap. The same
+    /// constant feeds the terminal `/info` command, so neither frontend can
+    /// drift into describing a different execution model.
+    fn info(&mut self, ui: &mut egui::Ui) {
+        let k = self.ink;
+        egui::ScrollArea::vertical()
+            .id_salt("info_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(10.0);
+                ui.colored_label(k.accent, "KAOS INFO");
+                ui.separator();
+                for line in kaos_core::info::APP_INFO.lines() {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(line)
+                                .monospace()
+                                .color(if line.ends_with(':') { k.accent } else { k.ink }),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.add_space(16.0);
+            });
+    }
+
     /// A conversation tab: browse the saved sessions, or read and extend one.
     ///
     /// These are the same sessions `/resume` reads in the terminal app — same
@@ -4045,6 +4233,7 @@ impl Editor {
     fn chat(&mut self, ui: &mut egui::Ui) {
         let k = self.ink;
         let mut submission: Option<ChatSubmission> = None;
+        let mut typed_send: Option<(String, String)> = None;
         let mut stop_chat = false;
         let session_id = match self.tabs.active() {
             Some(Pane::Chat(chat)) => Some(chat.session.id.clone()),
@@ -4232,16 +4421,9 @@ impl Editor {
                                     .id_salt(("chat_run_input", run.id))
                                     .show(ui, |ui| paint_code_panel(ui, &run.input, k, k.accent));
                                 }
-                                let hidden = run.output.len().saturating_sub(500);
-                                if hidden > 0 {
-                                    ui.colored_label(
-                                        k.faint,
-                                        format!("… {hidden} older retained output lines hidden"),
-                                    );
-                                }
                                 paint_stream_sections(
                                     ui,
-                                    &run.output.as_slice()[hidden..],
+                                    run.output.as_slice(),
                                     k,
                                     &format!("chat-run-output-{}", run.id),
                                 );
@@ -4284,50 +4466,53 @@ impl Editor {
                 .on_hover_text(kaos_core::chaos::CHAOS_HINT);
             ui.checkbox(&mut think, "think")
                 .on_hover_text("allow reasoning-capable models to think before answering");
-            let send = ui
-                .add(
-                    egui::TextEdit::singleline(&mut chat.input)
-                        .desired_width((ui.available_width() - 70.0).max(80.0))
-                        .hint_text(if chat_busy {
-                            "say something — it queues behind the answer in progress"
-                        } else if chaos {
-                            "state an intent — it becomes a Rebis program"
-                        } else {
-                            "say something"
-                        }),
-                )
-                .lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (send || ui.button("send").clicked()) && !chat.input.trim().is_empty() {
-                chat.browsing = false;
-                let said = std::mem::take(&mut chat.input);
-                if chat_busy {
-                    // The turn in flight keeps going; this rides behind it and
-                    // goes out the moment it lands.
-                    chat.queued.push(said);
-                    return;
+            // The buttons are placed FIRST, from the right edge inward, and the
+            // field then takes whatever is left. Laid out the other way round —
+            // field first, claiming all but a fixed 70px — this row does not
+            // wrap, so a second button lands past the panel edge and is
+            // clipped: rendered, painted, and invisible, which a reader cannot
+            // tell apart from a button that was never added. Reserving room by
+            // guessing a width only moves the point at which that happens.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Stopping belongs here, beside send, where the eye and the
+                // hand already are while a model works — not only up in the
+                // title bar among the session buttons, where it reads as
+                // furniture and is off-screen the moment you scroll.
+                if chat_busy
+                    && ui
+                        .button(egui::RichText::new("\u{25a0} stop").color(k.danger))
+                        .on_hover_text("stop this model turn and keep what it has written")
+                        .clicked()
+                {
+                    stop_chat = true;
                 }
-                let resume = chat
-                    .session
-                    .turns
-                    .iter()
-                    .any(|turn| turn.role == kaos_core::sessions::Role::Model);
-                chat.session
-                    .push(kaos_core::sessions::Role::User, said.clone());
-                let prior_turns = chat.session.turns.len().saturating_sub(1);
-                let history = recent_chat_history(&chat.session.turns[..prior_turns]);
-                let run_id = chat.run_id;
-                // Persist immediately: the terminal app saves on every turn for
-                // the same reason, so a crash loses nothing already said.
-                let _ = kaos_core::sessions::Store::default_store().save(&chat.session);
-                submission = Some(ChatSubmission {
-                    said,
-                    session: chat.session.id.clone(),
-                    resume,
-                    run_id,
-                    history,
-                });
-            }
+                let pressed = ui.button("send").clicked();
+                let entered = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut chat.input)
+                            .desired_width(ui.available_width())
+                            .hint_text(if chat_busy {
+                                "say something — it queues behind the answer in progress"
+                            } else if chaos {
+                                "state an intent — it becomes a Rebis program"
+                            } else {
+                                "say something"
+                            }),
+                    )
+                    .lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (pressed || entered) && !chat.input.trim().is_empty() {
+                    chat.browsing = false;
+                    let said = std::mem::take(&mut chat.input);
+                    if chat_busy {
+                        // The turn in flight keeps going; this rides behind
+                        // it and goes out the moment it lands.
+                        chat.queued.push(said);
+                        return;
+                    }
+                    typed_send = Some((chat.session.id.clone(), said));
+                }
+            });
         });
         let _ = chat;
         self.chaos = chaos;
@@ -4340,6 +4525,9 @@ impl Editor {
                     chat.notice = Some(format!("thinking changed for this session only: {error}"));
                 }
             }
+        }
+        if let Some((session, said)) = typed_send {
+            submission = self.prepare_chat_submission(&session, said);
         }
         if stop_chat {
             if let Some(session) = session_id.as_deref() {
@@ -4367,17 +4555,13 @@ impl Editor {
             history,
         }) = submission
         {
-            let history_text = history
-                .iter()
-                .map(|(user, assistant)| format!("USER: {user}\nASSISTANT: {assistant}"))
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            let prompt = run_id
-                .and_then(|id| self.run_chat_context(id, &history, &said))
-                .unwrap_or_else(|| {
-                    kaos_core::chat::DEFAULT_CONTEXT.render_turn(self.chaos, &history_text, &said)
-                });
-            self.actions.submit_chat(prompt, session, resume, &self.cwd);
+            self.launch_chat_submission(ChatSubmission {
+                said,
+                session,
+                resume,
+                run_id,
+                history,
+            });
         }
     }
 
@@ -6233,16 +6417,9 @@ impl Editor {
                                     },
                                 );
                             }
-                            let hidden = run.output.len().saturating_sub(2_000);
-                            if hidden > 0 {
-                                ui.colored_label(
-                                    k.faint,
-                                    format!("… {hidden} older retained lines hidden in this view"),
-                                );
-                            }
                             paint_stream_sections(
                                 ui,
-                                &run.output.as_slice()[hidden..],
+                                run.output.as_slice(),
                                 k,
                                 &format!("run-output-{id}"),
                             );
@@ -6581,14 +6758,7 @@ impl Editor {
                         if output.is_empty() {
                             ui.colored_label(k.faint, "(waiting for output)");
                         }
-                        let hidden = output.len().saturating_sub(2_000);
-                        if hidden > 0 {
-                            ui.colored_label(
-                                k.faint,
-                                format!("… {hidden} older retained lines hidden in this view"),
-                            );
-                        }
-                        for line in output.iter().skip(hidden) {
+                        for line in output.iter() {
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(line).monospace().color(k.faint),
@@ -9021,21 +9191,14 @@ impl Editor {
                         volumetric: false,
                     },
                 );
-            }
-        };
-
-        let paint_walls = |pass: bool| {
-            for id in self.doc().mandala.paint_order(pass) {
-                let Some(n) = self.doc().mandala.node(id) else {
-                    continue;
-                };
-                if !n.form.opens_indentation() {
-                    continue;
+                if boundaries {
+                    // Keep each boundary's wall directly beside its fill. The
+                    // shared paint order puts outer containers first, so a
+                    // nested circle or brace paints its opaque surface over
+                    // any parent edge it overlaps instead of blending through
+                    // it.
+                    self.paint_boundary_wall(painter, n, centre, zoom);
                 }
-                if !showing(footprint(n)) {
-                    continue;
-                }
-                self.paint_boundary_wall(painter, n, at(n.x, n.y), zoom);
             }
         };
 
@@ -9060,10 +9223,6 @@ impl Editor {
         paint_nodes(true, true);
         paint_nodes(false, false);
         paint_nodes(true, false);
-        // Then the walls, so a boundary stays drawn around its contents even
-        // while a piece is dragged across it.
-        paint_walls(false);
-        paint_walls(true);
         // Then the connections, over the walls. An arrow's whole meaning is the
         // two forms it joins, so it must never be the thing that gets covered —
         // and it was, by the opaque chip a ring label clears the wall with.
@@ -10491,6 +10650,25 @@ fn launch_terminal(command: &str, cwd: &std::path::Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// Send session writes to a scratch directory for the rest of the process.
+    ///
+    /// `Store::default_store()` resolves to `~/.kaos/sessions` — a real
+    /// person's conversations. Any test that dispatches a chat turn saves one,
+    /// so without this the suite files a fixture into that history on every
+    /// run; a few hundred runs in, the sessions worth keeping are buried under
+    /// identical copies of the same test message. Setting the override once is
+    /// enough: it is process-wide, and every test in this binary wants it.
+    fn scratch_session_store() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let dir = std::env::temp_dir()
+                .join(format!("kaos-visual-test-sessions-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            std::env::set_var("KAOS_SESSION_DIR", &dir);
+        });
+    }
+
     /// Height of the top header at a given window width, laid out headlessly.
     fn header_height(width: f32) -> f32 {
         let mut editor = Editor::new(Mandala::new());
@@ -10538,6 +10716,7 @@ mod tests {
             Pane::Sigils(SigilPane::default()),
             Pane::Source(SourcePane::default()),
             Pane::Settings(settings::SettingsPane::default()),
+            Pane::Info,
             Pane::Automata(Box::new(
                 AutomataPane::from_source("([m] \"one\" \"two\")", "test")
                     .expect("test source should build a generation"),
@@ -10573,6 +10752,58 @@ mod tests {
             matches!(sections[1], StreamSection::Line(ref line) if line == "chat    final answer")
         );
         assert!(matches!(sections[2], StreamSection::Line(ref line) if line == "done"));
+    }
+
+    #[test]
+    fn an_orphaned_wall_of_output_is_folded_instead_of_painted_flat() {
+        // The real failure: a huge observation overflows the retained log, the
+        // log drops its head, and the FOLD_OPEN that owned those lines goes
+        // with it. What arrives is thousands of body lines with no fold — a
+        // wall of paths with nothing to collapse it. The tree must impose the
+        // section the lost marker would have.
+        let mut lines = vec!["[... 12506 earlier lines / 388602 bytes omitted ...]".to_string()];
+        lines.extend((0..400).map(|n| format!("./target/debug/incremental/artifact-{n}.o")));
+        let sections = stream_sections(&lines);
+
+        let loose = sections
+            .iter()
+            .filter(|s| matches!(s, StreamSection::Line(_)))
+            .count();
+        assert!(
+            loose <= LOOSE_LINE_LIMIT,
+            "{loose} bare lines still painted flat"
+        );
+        assert!(
+            sections
+                .iter()
+                .any(|s| matches!(s, StreamSection::Fold { .. })),
+            "the wall must be collapsible"
+        );
+        // Nothing is thrown away — it is behind a header, not gone.
+        assert_eq!(stream_section_lines(&sections), lines.len());
+        // And the newest output stays where the eye expects it.
+        assert!(
+            matches!(sections.last(), Some(StreamSection::Line(l)) if l.ends_with("artifact-399.o")),
+            "the live tail must remain visible"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_stream_is_left_exactly_as_it_was() {
+        // The gathering must not disturb a normal turn: a handful of headings
+        // beside real folds is not a wall.
+        let lines = vec![
+            "\u{1e}FOLD_OPEN\u{1f}model turn 1".to_string(),
+            "model    thinking".to_string(),
+            "\u{1e}FOLD_CLOSE".to_string(),
+            "chat    final answer".to_string(),
+            "done".to_string(),
+        ];
+        let sections = stream_sections(&lines);
+        assert!(matches!(sections[0], StreamSection::Fold { .. }));
+        assert!(matches!(sections[1], StreamSection::Line(ref l) if l == "chat    final answer"));
+        assert!(matches!(sections[2], StreamSection::Line(ref l) if l == "done"));
+        assert_eq!(sections.len(), 3);
     }
 
     #[test]
@@ -10801,6 +11032,10 @@ mod tests {
     #[test]
     fn a_message_typed_mid_answer_waits_its_turn_instead_of_starting_a_second_one() {
         use kaos_core::sessions::Role;
+        // Dispatching a turn SAVES it, and the default store is the real
+        // `~/.kaos/sessions`. Left alone, every run of this test filed another
+        // copy of its fixture into somebody's actual chat history.
+        scratch_session_store();
         let mut editor = Editor::new(Mandala::new());
         let chat = ChatPane {
             browsing: false,

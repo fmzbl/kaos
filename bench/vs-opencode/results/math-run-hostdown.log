@@ -1,0 +1,14 @@
+== MATH ==
+  kaos      m01 PASS got=18 want=18 106s 
+  kaos      m02 PASS got=936 want=936 20s 
+  kaos      m03 PASS got=70000 want=70000 17s 
+  kaos      m04 FAIL got=312 want=624 5s 
+  kaos      m05 PASS got=50 want=50 17s 
+  kaos      m06 PASS got=204 want=204 17s 
+  kaos      m07 PASS got=120 want=120 15s 
+  kaos      m08 FAIL got=11434 want=1 631s 
+  kaos      m09 FAIL got=113 want=1000 6s 
+  kaos      m10 FAIL got=113 want=90 6s 
+  opencode  m01 FAIL got=None want=18 900s timeout
+  opencode  m02 FAIL got=None want=936 900s timeout
+  opencode  m03 FAIL got=None want=70000 900s timeout

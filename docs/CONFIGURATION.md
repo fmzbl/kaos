@@ -83,8 +83,9 @@ editor opens it as a `composed` source tab.
 | `KAOS_THINK` | `false` | boolean | Let reasoning-capable Ollama/OpenRouter models spend tokens thinking before answering. |
 | `KAOS_TIMEOUT_S` | `120` | seconds | Wall timeout for one-shot completions such as `/cast`. |
 | `KAOS_CHAT_TIMEOUT_S` | `600` | seconds | Wall timeout for one model turn in a tool-using chat or coding agent. |
-| `KAOS_MAX_TOKENS` | `8192` | integer | `max_tokens` sent to OpenAI-compatible providers. |
-| `KAOS_NUM_PREDICT` | *(empty)* | integer | Optional Ollama `num_predict` generation cap. Empty keeps Ollama's default. |
+| `KAOS_MAX_TOKENS` | `32768` | integer | `max_tokens` sent to OpenAI-compatible providers. A guard against a runaway generation, not a budget: set it lower only to bound cost. |
+| `KAOS_NUM_PREDICT` | *(empty)* | integer | Optional Ollama `num_predict` generation cap. Empty means **no cap** — Ollama imposes none of its own, and a long reply runs out of window, not of permission. Set it only to stop a looping model burning the timeout. |
+| `KAOS_NUM_CTX` | *(empty)* | integer | Optional Ollama `num_ctx`. Empty fits the window to each prompt, reserving 8192 tokens for the reply — Ollama's own 4096 default silently drops the front of a longer prompt and leaves no room to answer in. Kaos fits up to 65536 on its own; set this to pin a window your hardware can hold. |
 | `KAOS_FABLE_FALLBACK_MODEL` | *(empty)* | text | Claude model used as an optional fallback after a Fable refusal. |
 | `KAOS_PROVIDER_SORT` | *(empty)* | text | OpenRouter routing preference: commonly `throughput`, `latency`, or `price`. |
 | `KAOS_PROVIDER_ONLY` | *(empty)* | text | Comma-separated OpenRouter provider slugs; disables provider fallbacks. |
@@ -99,14 +100,17 @@ Examples:
 KAOS_MODEL = ollama:qwen3:4b
 KAOS_THINK = false
 KAOS_TIMEOUT_S = 300
-KAOS_NUM_PREDICT = 4096
+KAOS_NUM_CTX = 32768
 OPENAI_BASE_URL = https://my-openai-compatible-host.example
 ```
 
 `KAOS_MODEL` accepts the same provider forms exposed by `/model`, including
 `sim`, `ollama:model`, `openai:model`, `openrouter:vendor/model`, and
 `claude:sonnet` or another Claude CLI tag. `KAOS_MAX_TOKENS` is for hosted
-chat-completions; Ollama's explicit generation cap is `KAOS_NUM_PREDICT`.
+chat-completions. Local Ollama generation is bounded by the context window,
+not by a token cap: Kaos sizes `num_ctx` per prompt and reserves 8192 tokens
+for the reply, so `KAOS_NUM_PREDICT` should normally stay empty and
+`KAOS_NUM_CTX` is the knob worth touching.
 
 The visual Settings editor provides a filtered model dropdown for `KAOS_MODEL`,
 including the currently installed Ollama names. The terminal `/model` palette
@@ -244,6 +248,7 @@ permissions, or export a key in the shell that launches Kaos.
 | --- | --- |
 | `REBIS_COLLECTION_PATH` | Optional Rebis collection root or `modules` directory for source-only imports. |
 | `KAOS_BIN` | Visual-editor override for the Kaos executable used to launch terminal children. |
+| `KAOS_SESSION_DIR` | Redirects the saved-conversation store away from `~/.kaos/sessions`. Keeps a test suite, or a throwaway experiment, out of a real chat history. |
 | `XDG_CONFIG_HOME` | Standard config-root override; determines the persistent config and credentials paths. |
 | `HOME` | Standard home directory fallback used when `XDG_CONFIG_HOME` is absent. |
 
@@ -257,7 +262,6 @@ child. They are not user configuration knobs:
 | `KAOS_FOLD` | Requests foldable child progress rendering. |
 | `KAOS_SESSION` | Carries the durable conversation identifier. |
 | `KAOS_RESUME` | Selects resume versus create for that conversation. |
-| `KAOS_REBIS_CONTEXT` | Adds Rebis authoring and validation guidance to a coding chat. |
 | `KAOS_RAW_CHAT_TASK_STDIN` | Marks a raw task supplied through standard input. |
 | `KAOS_CHAT_OUTPUT` | Requests an assistant-only child response. |
 | `KAOS_CHAT_TRACE` | Requests visible model/tool work alongside the assistant response; terminal and visual front ends render it as collapsible sections. |

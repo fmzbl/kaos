@@ -26,14 +26,21 @@ pub fn path_from_env() -> Option<PathBuf> {
     std::env::var_os(DIRECTIVE_PATH_ENV).map(PathBuf::from)
 }
 
-/// Add a clearly delimited supervisor instruction to one unfinished node.
+/// Add a clearly delimited supervisor data field to one unfinished node.
+///
+/// The directive is metadata supplied by an explicit supervisor action. It is
+/// kept as a length-delimited data envelope rather than rewritten as a hidden
+/// natural-language instruction; provider hosts can place it in their normal
+/// Rebis agent context without changing the program's prompt value.
 #[must_use]
 pub fn directed_prompt(prompt: &str, directive: Option<&str>) -> String {
     directive.map_or_else(
         || prompt.to_string(),
         |directive| {
             format!(
-                "{prompt}\n\nSUPERVISOR DIRECTIVE:\n{directive}\n\nFollow this directive while completing the node above."
+                "KAOS_REBIS_DIRECTIVE_DATA\nPROMPT_BYTES={}\n{prompt}\nDIRECTIVE_BYTES={}\n{directive}\n",
+                prompt.len(),
+                directive.len(),
             )
         },
     )
@@ -44,10 +51,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_nonempty_directive_is_delimited_without_changing_the_base_prompt() {
+    fn a_nonempty_directive_is_delimited_data_without_changing_the_prompt_value() {
         let rendered = directed_prompt("inspect", Some("compare run two"));
-        assert!(rendered.starts_with("inspect\n\nSUPERVISOR DIRECTIVE:"));
+        assert!(rendered.starts_with("KAOS_REBIS_DIRECTIVE_DATA\nPROMPT_BYTES=7\ninspect\n"));
         assert!(rendered.contains("compare run two"));
+        assert!(!rendered.contains("Follow this directive"));
         assert_eq!(directed_prompt("inspect", None), "inspect");
     }
 }

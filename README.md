@@ -167,10 +167,9 @@ the bare `topic` symbol appears.
 
 See [docs/REBIS.md](docs/REBIS.md) for Kaos integration details and the
 [chat authoring reference](docs/REBIS_CHAT_CONTEXT.md) for complex, nested
-programs. Kaos compiles that reference into `/chat`, so the agent can explain,
-debug, and write Rebis without relying on a model's prior knowledge. The same
-reference is injected into every executing Rebis agent so nodes also
-understand the surrounding language. Rebis's own repository contains the
+programs. The reference is explicit documentation, not hidden prompt text:
+chaos composition is built from actual Rebis operators and generated source is
+parsed before a host can adopt it. Rebis's own repository contains the
 complete language guide, formal semantics, symbol reference, standard-library
 manual, and host API.
 

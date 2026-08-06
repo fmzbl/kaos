@@ -1,12 +1,14 @@
-# Rebis context used by Kaos chat and agents
+# Rebis reference for explicit authoring
 
-Kaos injects this reference into the `/chat` coding agent and every executing
-Rebis node. When authoring, use it when a user asks for a Rebis program, an
-explanation of Rebis code, or help correcting a program. Prefer valid structural
-Rebis over invented Lisp forms. Preserve the user's intended number of model
-calls and point out when a macro duplicates an argument and therefore repeats
-work. When executing a node, use the reference to understand the surrounding
-language but follow the node prompt and return only its flow value.
+This file is documentation, not an injected system prompt. Kaos keeps it
+available for people and explicit documentation tooling; chat data and Rebis
+nodes do not receive it automatically. Composition is built from actual Rebis
+source and generated source crosses the host boundary only after parsing.
+
+When authoring, prefer valid structural Rebis over invented Lisp forms. Preserve
+the user's intended number of model calls and point out when a macro duplicates
+an argument and therefore repeats work. When executing a node, follow the node
+prompt and return only its flow value.
 
 ## Core rules
 

@@ -29,14 +29,6 @@ use std::time::{Duration, Instant};
 
 use crate::agent::{self, Workspace};
 
-/// How much of a fetched page reaches the prompt.
-///
-/// The page itself is capped in bytes by [`crate::web`]; this is the tighter
-/// question of how much of it a turn can carry without crowding out everything
-/// the agent already knows. A page longer than this is nearly always a page the
-/// agent should be reading a section of.
-const WEB_PAGE_CHARS: usize = 12_000;
-
 // ───────────────────────────── tools ───────────────────────────────
 
 /// One action the agent can take in a turn.
@@ -297,6 +289,38 @@ pub fn parse_actions(text: &str, limit: usize) -> Vec<Tool> {
         }
         rest = &rest[end..];
     }
+    // Qwen and several Ollama templates use the model's native-looking text
+    // spelling even when the host asked for the portable `<act>` dialect:
+    // `<tool_call>{"name":"read_file","arguments":{"path":"…"}}</tool_call>`.
+    // It is the same request, not a new authority, so normalize that wire
+    // spelling into the one executor representation. Keep this fallback after
+    // canonical acts so a model cannot duplicate a real action by mentioning a
+    // tool-call example in its narration.
+    if tools.is_empty() {
+        let mut rest = text;
+        while tools.len() < limit {
+            let Some(start) = rest.find("<tool_call") else {
+                break;
+            };
+            let after = &rest[start..];
+            let end = after
+                .find("</tool_call>")
+                .map(|i| start + i + "</tool_call>".len())
+                .unwrap_or(rest.len());
+            if let Some(tool) = parse_tool_call(&rest[start..end]) {
+                tools.push(tool);
+            }
+            rest = &rest[end..];
+        }
+    }
+    // A few local templates omit the wrapper and return the JSON tool record
+    // directly. Only accept a whole, object-shaped reply with a recognized
+    // tool name; ordinary prose and JSON answers remain non-actions.
+    if tools.is_empty() && text.trim_start().starts_with('{') {
+        if let Some(tool) = parse_tool_call(text.trim()) {
+            tools.push(tool);
+        }
+    }
     tools
 }
 
@@ -358,13 +382,17 @@ pub fn parse_action(text: &str) -> Option<Tool> {
         }
     }
     let inline = inline_text(body);
+    tool_from_args(&tool, &args, &inline)
+}
+
+fn tool_from_args(tool: &str, args: &BTreeMap<String, String>, inline: &str) -> Option<Tool> {
     let get = |keys: &[&str]| -> String {
         keys.iter()
             .find_map(|key| args.get(*key).filter(|value| !value.is_empty()))
             .cloned()
-            .unwrap_or_else(|| inline.clone())
+            .unwrap_or_else(|| inline.to_string())
     };
-    match tool.as_str() {
+    match tool {
         "read_file" | "read" | "open_file" => Some(Tool::ReadFile {
             path: get(&["path", "file"]),
         }),
@@ -398,6 +426,105 @@ pub fn parse_action(text: &str) -> Option<Tool> {
             message: get(&["message", "msg", "summary"]),
         }),
         _ => None,
+    }
+}
+
+/// Parse the text tool-call spelling emitted by Qwen/Ollama templates. This
+/// deliberately stays on the same known-tool table as [`parse_action`]; a
+/// model cannot mint a new executable operation by choosing another name.
+fn parse_tool_call(text: &str) -> Option<Tool> {
+    let trimmed = text.trim();
+    let body = if trimmed.starts_with("<tool_call") {
+        let start = trimmed.find('>')?;
+        trimmed[start + 1..]
+            .strip_suffix("</tool_call>")
+            .unwrap_or(&trimmed[start + 1..])
+            .trim()
+    } else {
+        trimmed
+    };
+    if !body.starts_with('{') {
+        return None;
+    }
+    let fields = parse_json_object(body);
+    let tool = fields
+        .get("name")
+        .or_else(|| fields.get("tool"))
+        .or_else(|| fields.get("function"))
+        .cloned()?;
+    let mut args = BTreeMap::new();
+    for key in ["arguments", "parameters", "args"] {
+        if let Some(value) = json_field_value(body, key) {
+            if value.trim_start().starts_with('{') {
+                args.extend(parse_json_object(value));
+            } else if value.trim_start().starts_with('"') {
+                if let Some((decoded, _)) = parse_json_string(value.trim(), 0) {
+                    args.extend(parse_json_object(&decoded));
+                }
+            }
+        }
+    }
+    // Some templates flatten arguments next to `name`; preserve those too.
+    for (key, value) in fields {
+        if !matches!(
+            key.as_str(),
+            "name" | "tool" | "function" | "arguments" | "parameters" | "args"
+        ) {
+            args.entry(key).or_insert(value);
+        }
+    }
+    tool_from_args(&tool, &args, "")
+}
+
+/// Return the raw JSON value for one top-level string key. The small scanner
+/// handles nested objects and quoted strings without introducing a second JSON
+/// dependency into the no-API build of the agent crate.
+fn json_field_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let marker = format!("\"{key}\"");
+    let key_start = text.find(&marker)?;
+    let colon = key_start + marker.len() + text[key_start + marker.len()..].find(':')?;
+    let value_start = text[colon + 1..]
+        .char_indices()
+        .find(|(_, character)| !character.is_whitespace())
+        .map(|(index, _)| colon + 1 + index)?;
+    if text.as_bytes().get(value_start) == Some(&b'{') {
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (offset, character) in text[value_start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match character {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        let end = value_start + offset + character.len_utf8();
+                        return text.get(value_start..end);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    } else if text.as_bytes().get(value_start) == Some(&b'"') {
+        let (_, end) = parse_json_string(text, value_start)?;
+        text.get(value_start..end)
+    } else {
+        let end = text[value_start..]
+            .find([',', '}'])
+            .map(|offset| value_start + offset)
+            .unwrap_or(text.len());
+        text.get(value_start..end).map(str::trim)
     }
 }
 
@@ -764,74 +891,10 @@ impl Chat for ScriptedChat {
 /// single breath, few enough that one bad turn cannot flood the session.
 pub const MAX_ACTS_PER_TURN: usize = 5;
 
-/// Human-readable Rebis reference compiled into Kaos. Keeping the examples in
-/// `docs/` makes the chat's knowledge auditable and prevents its authoring rules
-/// from drifting away from the documentation users see.
-const REBIS_AUTHORING_CONTEXT: &str = kaos_core::chat::REBIS_AUTHORING_GUIDE;
-
-/// Every Kaos agent conversation carries the Rebis reference. A user can move
-/// from ordinary project chat to authoring or run inspection in the next turn,
-/// so routing the guide from keyword guesses made the context nondeterministic.
-/// The environment flag remains accepted by callers for compatibility.
-pub fn wants_rebis_authoring_context(_task: &str) -> bool {
-    true
-}
-
-#[cfg(test)]
-fn task_requests_rebis_authoring_context(task: &str) -> bool {
-    let task = task.to_ascii_lowercase();
-    task.contains("rebis")
-        || task.contains(".rebis")
-        || task.contains("(# std")
-        || task.contains("(~ ")
-        || task.contains("/run block")
-        || task.contains("/mandala")
-}
-
-/// The exact reference shared by human-facing docs, `/chat`, and executing
-/// Rebis nodes. Hosts can reuse it without maintaining a second prompt copy.
-pub fn rebis_authoring_context() -> &'static str {
-    REBIS_AUTHORING_CONTEXT
-}
-
-/// The Rebis reference framed for the native `claude` CLI agent — the mind
-/// behind `/chat` (and `/code` on a Claude model). That agent brings its own
-/// tools and loop, so this is the ONLY seam through which it learns the
-/// language it hosts; it is appended to Claude's own system prompt via
-/// `--append-system-prompt`. Unlike [`rebis_agent_system_prompt`] this does not
-/// narrow the agent to a single node — the chat mind explains, authors, and
-/// repairs whole Rebis programs.
-pub fn claude_agent_rebis_appendix() -> String {
-    format!(
-        "You are the coding mind inside Kaos, a terminal workspace for Rebis \u{2014} \
-         a small Lisp-like language for composing model calls, agents, deterministic \
-         judges, reusable macros, and execution flows (programs usually live in \
-         `.rebis` files). Users will ask you to explain, write, debug, and repair \
-         Rebis programs. The reference below is the language you host; use it to \
-         answer questions directly and to author or fix Rebis code with your normal \
-         tools. It is knowledge, not a request to edit files.\n\n{REBIS_AUTHORING_CONTEXT}"
-    )
-}
-
 /// System prompt for a normal-mode Rebis node.
 ///
-/// The contract and nothing else. This deliberately does NOT carry
-/// [`REBIS_AUTHORING_CONTEXT`], and the reason is in the words that used to
-/// follow it: *you are now executing one node, not authoring the surrounding
-/// program*. The reference teaches a model to WRITE Rebis; a node answering
-/// `"name one primary colour"` is not writing anything, so the cookbook was
-/// eighteen kilobytes of instructions sent in order to be countermanded two
-/// sentences later.
-///
-/// Measured, the cost is not theoretical. That is ~4,500 tokens on every node
-/// of every program. A hosted model hides it behind caching and network
-/// latency; a small local model on CPU spends its entire budget there, and a
-/// one-word answer takes minutes. It made local models unusable as Rebis
-/// hosts, which is the case this project cares most about.
-///
-/// The chat mind still gets the reference through
-/// [`claude_agent_rebis_appendix`] and [`rebis_authoring_context`] — that is
-/// where a model actually authors Rebis, and where the knowledge belongs.
+/// The node receives the value selected by the Rebis program and returns only
+/// that value. Documentation is never appended implicitly.
 pub fn rebis_agent_system_prompt() -> String {
     "You are exactly one agent node in a Rebis program. Answer the supplied \
      prompt directly and return only the value that should flow to the next \
@@ -853,28 +916,6 @@ pub fn rebis_node_tool_contract() -> String {
      this node's work, then call finish whose message is only the value that \
      should flow to the next Rebis node."
         .to_string()
-}
-
-fn add_rebis_authoring_context(mut system: String, include: bool) -> String {
-    if include {
-        system.push_str("\n\n");
-        system.push_str(REBIS_AUTHORING_CONTEXT);
-        system.push_str(
-            "\n\nThe Rebis reference above is authoring knowledge, not a request to edit files. \
-             Continue to obey the tool protocol in the first part of this system prompt. \
-             For an explanation-only request, return the useful answer through finish(message).",
-        );
-    }
-    system
-}
-
-fn system_prompt_for_task(task: &str) -> String {
-    add_rebis_authoring_context(system_prompt(), wants_rebis_authoring_context(task))
-}
-
-#[cfg(feature = "api")]
-fn native_system_prompt_for_task(task: &str) -> String {
-    add_rebis_authoring_context(native_system_prompt(), wants_rebis_authoring_context(task))
 }
 
 /// The system prompt for the NATIVE tool loop — the doctrine without the
@@ -909,7 +950,8 @@ pub fn system_prompt() -> String {
      - search: args query (look something up on the open web; returns a ranked \
      list of pages, not the answer)\n\
      - fetch: args url (read one http/https page as text, usually one search \
-     returned; long pages are truncated)\n\
+     returned; older observations are compacted only when the working context \
+     needs room)\n\
      - rebis: args source, note (open a Rebis program as a run nested under \
      this one — write the program, the host runs it and shows it beneath this \
      run; use it to carry out a plan rather than doing every step yourself)\n\
@@ -956,17 +998,59 @@ pub struct Step {
 /// narration for this step. Rendering may provide a compact projection, but the
 /// retained run stream must never inherit a display-oriented truncation.
 fn thought_of(reply: &str) -> String {
-    let outside = match reply.find("<act") {
-        Some(start) => {
-            let after = reply[start..]
-                .find("</act>")
-                .map(|i| &reply[start + i + "</act>".len()..])
-                .unwrap_or("");
-            format!("{}{}", reply[..start].trim_end(), after)
+    if reply.trim_start().starts_with('{') && parse_tool_call(reply.trim()).is_some() {
+        return String::new();
+    }
+    let mut outside = String::with_capacity(reply.len());
+    let mut cursor = 0usize;
+    let mut removed_action = false;
+    loop {
+        let next = ["<act", "<tool_call"]
+            .iter()
+            .filter_map(|marker| {
+                reply[cursor..]
+                    .find(marker)
+                    .map(|offset| (cursor + offset, *marker))
+            })
+            .min_by_key(|(start, _)| *start);
+        let Some((start, marker)) = next else {
+            outside.push_str(&reply[cursor..]);
+            break;
+        };
+        outside.push_str(&reply[cursor..start]);
+        let close = if marker == "<act" {
+            "</act>"
+        } else {
+            "</tool_call>"
+        };
+        let Some(end) = reply[start..].find(close) else {
+            // An incomplete action is not useful narration. Keep the text
+            // before it, but do not show a half-rendered tool payload as the
+            // agent's thought.
+            break;
+        };
+        cursor = start + end + close.len();
+        removed_action = true;
+    }
+    let mut outside = outside.trim().to_string();
+    if removed_action {
+        // The action's surrounding line breaks are transport syntax, not a
+        // second blank paragraph in the model's narration.
+        while outside.contains("\n\n") {
+            outside = outside.replace("\n\n", "\n");
         }
-        None => reply.to_string(),
-    };
-    outside.trim().to_string()
+    }
+    outside
+}
+
+/// Does this text reach for the action protocol at all — even badly? Used to
+/// tell a mind's SPEECH from the wreckage of a gesture: a block cut in half, a
+/// fragment that lost its opening tag, an action nothing could execute. Such a
+/// reply meant to act, so it is never relayed as if it had meant to answer.
+fn holds_protocol(text: &str) -> bool {
+    ["<act", "</act>", "<arg", "<tool_call", "</tool_call>"]
+        .iter()
+        .any(|marker| text.contains(marker))
 }
 
 /// The `<act>…</act>` span of a reply — first block through last block,
@@ -1061,7 +1145,10 @@ impl Conductor {
     /// fresh observations burn bright, the middle decays to a base budget, and
     /// each symbol's polarity decides which end of it survives the cut. An
     /// unparseable reply is BANISHED — it never enters the transcript; only a
-    /// one-line nudge remains, so a format stumble cannot rot the context.
+    /// one-line nudge remains, so a format stumble cannot rot the context. Its
+    /// WORDS are still kept: after three banishments the run ends carrying the
+    /// last thing the mind actually said, because a mind that answered in prose
+    /// has answered, and the caller above still owes its user a reply.
     pub fn run(&self, task: &str, chat: &dyn Chat, on_step: impl FnMut(&Step)) -> Session {
         self.run_observed(task, chat, |_| {}, |_, _| {}, on_step)
     }
@@ -1077,12 +1164,15 @@ impl Conductor {
         mut on_model_reply: impl FnMut(usize, &str),
         mut on_step: impl FnMut(&Step),
     ) -> Session {
-        let system = self.session_system(system_prompt_for_task(task));
+        let system = self.session_system(system_prompt());
         let mut steps = Vec::new();
         // (acted, observation) per turn; acted is the reply's <act> block(s) or
         // a nudge marker. The intent lives at index 0 of the rendered transcript.
         let mut turns: Vec<(String, String)> = Vec::new();
         let mut nudges = 0usize;
+        // The last words a banished reply carried. Banishment discards the
+        // malformed CONTEXT, not what the mind managed to say.
+        let mut spoken = String::new();
         // The repetition ward: hash of the last identical read, per gesture.
         let mut last_reads: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
@@ -1132,24 +1222,45 @@ impl Conductor {
             }
             let tools = parse_actions(&reply, MAX_ACTS_PER_TURN);
             if tools.is_empty() {
-                // Banish the malformed reply; keep only the nudge. Three
-                // consecutive banishments end the session — the mind is not
-                // speaking the protocol and further turns only spend.
+                // Banish the malformed reply from the TRANSCRIPT — a format
+                // stumble must not rot the context — but keep its prose in
+                // hand. A mind that has gathered its facts and then writes the
+                // answer straight out has done the work; only its envelope is
+                // wrong, and throwing the words away fails a run that already
+                // holds its result.
+                // Two things are NOT an answer and are never kept: reasoning,
+                // and the wreckage of an action. A reply carrying any protocol
+                // markup was an attempt to act — a half-written block, a
+                // fragment that lost its opening tag — and relaying that to a
+                // user as their reply would be worse than saying nothing. Only
+                // a reply that never reached for the protocol at all is speech.
+                let words = crate::backend::strip_think(&reply).trim().to_string();
+                if !words.is_empty() && !holds_protocol(&words) {
+                    spoken = words;
+                }
                 nudges += 1;
                 if nudges >= 3 {
+                    // Three banishments: the mind is not speaking the protocol
+                    // and further turns only spend. Return what it said rather
+                    // than an error — the caller (a chat turn, a Rebis node)
+                    // still owes its user an answer, and a session with words
+                    // in hand is not a session with nothing.
                     return Session {
                         steps,
                         finished: false,
-                        final_message: String::new(),
-                        error: Some(
-                            "the mind would not speak in <act> blocks (3 banished replies)".into(),
-                        ),
+                        final_message: spoken.clone(),
+                        error: spoken.is_empty().then(|| {
+                            "the mind would not speak in executable <act> or <tool_call> blocks (3 banished replies)".to_string()
+                        }),
                         nested,
                     };
                 }
                 turns.push((
                     "(your previous reply held no <act> block and was banished)".to_string(),
-                    "reply with <act tool=\"…\">…</act> blocks.".to_string(),
+                    "reply with one executable <act tool=\"…\">…</act> block (or a native <tool_call> JSON block), not a prose plan. \
+                     If your reply WAS the finished answer, send it as the finish action: \
+                     <act tool=\"finish\"><arg name=\"message\">your answer</arg></act>."
+                        .to_string(),
                 ));
                 continue;
             };
@@ -1292,13 +1403,16 @@ impl Conductor {
         mut on_step: impl FnMut(&Step),
     ) -> Session {
         use crate::hand::{parse_reply, render_messages, tool_schemas, Msg};
-        let system = self.session_system(native_system_prompt_for_task(task));
+        let system = self.session_system(native_system_prompt());
         let tools = tool_schemas();
         let mut history: Vec<Msg> = vec![Msg::user(format!(
             "TASK: {task}\n\nBegin. Work with tool calls."
         ))];
         let mut steps = Vec::new();
-        let mut idle = 0usize; // consecutive call-less replies
+        // Consecutive call-less replies, and what they said — kept for the
+        // same reason the act loop keeps it: a prose answer is still an answer.
+        let mut idle = 0usize;
+        let mut spoken = String::new();
         let mut last_reads: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
         let mut model_turn = 0usize;
@@ -1351,20 +1465,31 @@ impl Conductor {
             }
             if reply.calls.is_empty() {
                 // A bare-text reply is a stall in a tool loop. Nudge twice,
-                // then end — same banishment law as the act protocol.
+                // then end — same banishment law as the act protocol, and the
+                // same mercy: the text it spoke instead of calling is kept and
+                // returned, so a mind that answered in prose still answers.
                 idle += 1;
+                let words = crate::backend::strip_think(&reply.content)
+                    .trim()
+                    .to_string();
+                if !words.is_empty() {
+                    spoken = words;
+                }
                 if idle >= 3 {
                     return Session {
                         steps,
                         finished: false,
-                        final_message: String::new(),
-                        error: Some("the mind stopped calling tools (3 idle replies)".into()),
+                        final_message: spoken.clone(),
+                        error: spoken
+                            .is_empty()
+                            .then(|| "the mind stopped calling tools (3 idle replies)".to_string()),
                         nested,
                     };
                 }
                 history.push(Msg::assistant(reply.content, Vec::new()));
                 history.push(Msg::user(
-                    "Continue with tool calls (finish(message) when done and verified)."
+                    "Continue with tool calls. If your last reply was the finished answer, \
+                     send it through the finish tool instead of as text."
                         .to_string(),
                 ));
                 continue;
@@ -1667,9 +1792,11 @@ impl Conductor {
                 Err(error) => format!("error: {error}"),
             },
             Tool::Fetch { url } => match crate::web::fetch(url) {
-                // Clipped here rather than in `fetch`: the ceiling is about what
-                // a prompt can carry, which is this loop's concern.
-                Ok(text) => crate::web::clip(&text, WEB_PAGE_CHARS),
+                // Keep the complete fetched page in the Step and frontend trace.
+                // The working transcript applies its context budget when a
+                // provider request needs room; clipping at the tool boundary
+                // made the expandable step permanently incomplete.
+                Ok(text) => text,
                 Err(error) => format!("error: {error}"),
             },
             // A timer is the one action the workspace cannot carry out: it is a
@@ -2304,7 +2431,11 @@ fn number_lines(s: &str) -> String {
     if out.is_empty() {
         out.push_str("(empty file)");
     }
-    trunc(&out, 4000)
+    // The working transcript may compact old observations before they reach a
+    // provider, but the Step record and the frontend fold must retain the
+    // actual file. A fixed 4,000-character cut here used to make the supposedly
+    // expandable read step permanently incomplete.
+    out
 }
 
 fn trunc(s: &str, n: usize) -> String {
@@ -2322,54 +2453,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rebis_authoring_context_is_auditable_complete_and_parseable() {
-        let prompt = add_rebis_authoring_context(system_prompt(), true);
-        let routed_prompt = system_prompt_for_task("help me write a Rebis review program");
-        for required in [
-            "(<- A B)",
-            "equivalent to `(-> B A)`",
-            "(~ name (parameters) body)",
-            "(# std)",
-            "(? A B ...)",
-            "/run block parallel",
-            "finish(message)",
-        ] {
-            assert!(prompt.contains(required), "missing Rebis rule: {required}");
-            assert!(
-                routed_prompt.contains(required),
-                "routed chat prompt missing Rebis rule: {required}"
-            );
-        }
-
-        let examples = REBIS_AUTHORING_CONTEXT
-            .split("```rebis\n")
-            .skip(1)
-            .map(|tail| tail.split("\n```").next().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(examples.len(), 8);
-        for (index, source) in examples.iter().enumerate() {
-            rebis_lang::parse(source)
-                .unwrap_or_else(|error| panic!("Rebis chat example {}: {error}", index + 1));
-        }
-
-        assert!(task_requests_rebis_authoring_context(
-            "help repair this Rebis macro"
-        ));
-        assert!(task_requests_rebis_authoring_context(
-            "why does (~ inspect (topic) topic) fail?"
-        ));
-        assert!(task_requests_rebis_authoring_context(
-            "You are a Rebis agent operating in this workspace:\n/tmp/project"
-        ));
-        // A node's contract is the contract, not the cookbook: the authoring
-        // reference is for the mind that WRITES Rebis, and sending it to one
-        // that is executing a single node costs ~4,500 tokens per call to say
-        // something the next sentence countermands.
+    fn agent_contracts_do_not_carry_hidden_rebis_documentation() {
         let node_prompt = rebis_agent_system_prompt();
-        assert!(!node_prompt.contains("## Example 7: bounded recursive refinement"));
         assert!(node_prompt.len() < 600, "the node contract grew a cookbook");
         assert!(node_prompt.ends_with("return only its flow value."));
-        assert_eq!(rebis_authoring_context(), REBIS_AUTHORING_CONTEXT);
+        assert!(!system_prompt().contains(kaos_core::chat::REBIS_AUTHORING_GUIDE));
+        assert!(!native_system_prompt().contains(kaos_core::chat::REBIS_AUTHORING_GUIDE));
     }
 
     #[test]
@@ -2417,10 +2506,7 @@ mod tests {
             system.ends_with(&rebis_node_tool_contract()),
             "the node contract must be the model's most recent instruction"
         );
-        assert!(
-            system.contains("## Example 7"),
-            "a Rebis-framed task must carry the authoring cookbook"
-        );
+        assert!(!system.contains(kaos_core::chat::REBIS_AUTHORING_GUIDE));
     }
 
     fn tmpdir(files: &[(&str, &str)]) -> PathBuf {
@@ -2474,6 +2560,12 @@ mod tests {
             "I should fix the sign first.\nThen verify."
         );
         assert_eq!(thought_of("<act tool=\"bash\"></act>"), "");
+        assert_eq!(
+            thought_of(
+                "reasoning before\n<tool_call>{\"name\":\"finish\",\"arguments\":{\"message\":\"done\"}}</tool_call>"
+            ),
+            "reasoning before"
+        );
         // No act block at all: the whole reply is the thought.
         assert_eq!(thought_of("just musing"), "just musing");
 
@@ -2577,6 +2669,88 @@ mod tests {
                 message: "Done.".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn parse_accepts_qwen_tool_call_text_from_ollama() {
+        let reply = r#"<think>inspect the project first</think>
+<tool_call>
+{"name":"read_file","arguments":{"path":"README.md"}}
+</tool_call>"#;
+        assert_eq!(
+            parse_actions(reply, MAX_ACTS_PER_TURN),
+            vec![Tool::ReadFile {
+                path: "README.md".to_string()
+            }]
+        );
+        assert_eq!(
+            parse_actions(r#"{"name":"finish","arguments":{"message":"done"}}"#, 1),
+            vec![Tool::Finish {
+                message: "done".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_mind_that_answers_in_prose_still_answers() {
+        // The failure this fixes: a mind gathers its facts, decides it is done,
+        // and writes the answer as ordinary text instead of a finish act. The
+        // protocol replies are still banished — three of them end the run —
+        // but the run ends holding the words, not an error, so a chat turn
+        // relays the answer instead of `oracle failure: …`.
+        let dir = tmpdir(&[("f.txt", "the contents of f")]);
+        let chat = ScriptedChat::new(vec![
+            "<act tool=\"read_file\"><arg name=\"path\">f.txt</arg></act>",
+            "Here is what I found: f holds its contents.",
+            "To answer your question: f holds its contents.",
+            "The file f holds its contents — that is the whole answer.",
+        ]);
+        let c = Conductor::new(&dir);
+        let session = c.run("what does f hold?", &chat, |_| {});
+        assert!(session.error.is_none(), "prose is not a hard failure");
+        assert!(!session.finished, "it never called finish");
+        assert_eq!(
+            session.final_message,
+            "The file f holds its contents — that is the whole answer."
+        );
+        assert_eq!(session.steps.len(), 1, "the read still stands");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_silent_mind_is_still_an_error() {
+        // Nothing said and nothing done: there is no answer to relay, so the
+        // caller must hear that the session failed rather than receive "".
+        let dir = tmpdir(&[("f.txt", "x")]);
+        let chat = ScriptedChat::new(vec!["", "   ", "\n"]);
+        let c = Conductor::new(&dir);
+        let session = c.run("t", &chat, |_| {});
+        assert!(session.final_message.is_empty());
+        assert!(session
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("3 banished replies"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_wreckage_of_an_action_is_never_relayed_as_an_answer() {
+        // Seen from a live run: a reply arrived as the TAIL of an act block,
+        // its opening tag lost, so nothing could execute and nothing in it was
+        // speech. Reasoning is discarded on the same law. Both must end the
+        // run as an error, never as a "reply" of protocol scraps.
+        let dir = tmpdir(&[("f.txt", "x")]);
+        let chat = ScriptedChat::new(vec![
+            "<arg name=\"path\">kaos-core/src/chat.rs</arg>\n</act>",
+            "Thinking...\nI should read the file next, then decide",
+            "<act tool=\"read_file\"><arg name=\"path\">",
+        ]);
+        let c = Conductor::new(&dir);
+        let session = c.run("t", &chat, |_| {});
+        assert!(session.final_message.is_empty(), "scraps are not an answer");
+        assert!(session.error.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

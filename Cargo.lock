@@ -2828,6 +2828,7 @@ dependencies = [
 [[package]]
 name = "rebis-lang"
 version = "0.0.1"
+source = "git+https://github.com/fmzbl/rebis.git#2413d8dab992b398b30e44421c8cde8a6b78eef1"
 
 [[package]]
 name = "redox_syscall"

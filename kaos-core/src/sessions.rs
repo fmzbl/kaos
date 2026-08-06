@@ -297,7 +297,22 @@ impl Store {
 
     /// `~/.kaos/sessions`, alongside the sigil library; falls back to the
     /// working directory when there is no home.
+    ///
+    /// `KAOS_SESSION_DIR` redirects it. That override is not a preference — it
+    /// is what keeps a test suite out of somebody's real conversations. Any
+    /// code path that saves a chat reaches this store, so a test exercising one
+    /// wrote a fixture into `~/.kaos/sessions` on every run; a few hundred
+    /// runs later the history a person actually wanted was buried under
+    /// identical copies of "and the dead letters?". A store that can be
+    /// pointed elsewhere makes that structurally impossible rather than a rule
+    /// each test has to remember.
     pub fn default_store() -> Self {
+        if let Some(dir) = std::env::var_os("KAOS_SESSION_DIR")
+            .map(PathBuf::from)
+            .filter(|dir| !dir.as_os_str().is_empty())
+        {
+            return Self::new(dir);
+        }
         let base = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));

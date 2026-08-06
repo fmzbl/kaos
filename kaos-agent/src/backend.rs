@@ -98,14 +98,7 @@ pub fn run_claude_agent(
     model: Option<&str>,
     emit: impl FnMut(&str),
 ) -> Result<(), String> {
-    // The native `claude` agent runs the `/chat` mind with its own tools and
-    // loop, so `--append-system-prompt` is the only seam through which it can
-    // learn the Rebis language Kaos hosts. Gate the cookbook on the same
-    // predicate the `<act>` loop uses (the TUI sets KAOS_REBIS_CONTEXT for
-    // chat; a bare `/code` opts in when its task names Rebis).
-    let appendix = crate::conductor::wants_rebis_authoring_context(task)
-        .then(crate::conductor::claude_agent_rebis_appendix);
-    run_claude_agent_inner(root, task, model, true, appendix.as_deref(), emit).map(|_| ())
+    run_claude_agent_inner(root, task, model, true, None, emit).map(|_| ())
 }
 
 /// Direct Claude CLI agent with its final result returned to the host. Rebis
@@ -144,8 +137,7 @@ pub fn run_claude_chat_with_result_stream(
     model: Option<&str>,
     emit: impl FnMut(&str),
 ) -> Result<String, String> {
-    let appendix = crate::conductor::claude_agent_rebis_appendix();
-    run_claude_agent_inner(root, task, model, true, Some(&appendix), emit)
+    run_claude_agent_inner(root, task, model, true, None, emit)
 }
 
 /// One independent direct Claude agent with no conversation resume semantics.
@@ -226,9 +218,8 @@ fn run_claude_agent_inner(
     // argument. This keeps large multiline code intact and avoids the OS's
     // per-argument size limit.
     cmd.arg("-p").arg("--input-format").arg("text");
-    // Extra doctrine appended to Claude's own system prompt (e.g. the Rebis
-    // cookbook for the chat mind). System-level, not part of the task message,
-    // so a resumed multi-turn session carries it without bloating history.
+    // An explicit caller may still supply a provider-native system appendix
+    // for a transport protocol. Rebis documentation is never added here.
     if let Some(appendix) = system_appendix {
         cmd.arg("--append-system-prompt").arg(appendix);
     }
@@ -380,32 +371,39 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
     match v["type"].as_str() {
         Some("assistant") => {
+            // The mind's narration is held back rather than printed where it
+            // arrives, so it can be placed UNDER the gesture it explains. A
+            // turn that narrates once and then acts five times would otherwise
+            // leave four gestures unexplained; `explained` hands the sentence
+            // to the first, and the rest fall back to what the tool does.
+            let mut narration: Option<String> = None;
+            let mut acted = false;
             for block in v["message"]["content"].as_array().into_iter().flatten() {
                 match block["type"].as_str() {
                     Some("text") => {
-                        for line in block["text"]
-                            .as_str()
-                            .unwrap_or("")
-                            .lines()
-                            .filter(|l| !l.trim().is_empty())
-                            .take(3)
-                        {
-                            out.push(format!(
-                                "     {}",
-                                dim(GREEN(), &format!("\u{263d} {}", clip(line.trim(), 92)))
-                            ));
+                        let text = block["text"].as_str().unwrap_or("");
+                        if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
+                            narration.get_or_insert_with(|| line.trim().to_string());
                         }
                     }
                     Some("tool_use") => {
+                        acted = true;
                         let name = block["name"].as_str().unwrap_or("tool");
                         let input = &block["input"];
+                        let explanation = narration
+                            .take()
+                            .unwrap_or_else(|| claude_gesture_of(name, input));
+                        // Every arm below pushes its gesture line first, so the
+                        // explanation slots in directly beneath it — above any
+                        // diff the gesture carries.
+                        let at = out.len();
                         match name {
                             "Edit" => {
                                 let path = input["file_path"].as_str().unwrap_or("?");
                                 out.push(format!(
                                     "   {} {}",
                                     bold(PURPLE(), "\u{00b1} edit"),
-                                    bone(short(path))
+                                    bone(path)
                                 ));
                                 push_block(
                                     &mut out,
@@ -426,25 +424,21 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                 out.push(format!(
                                     "   {} {}  {}",
                                     bold(PURPLE(), "\u{271a} write"),
-                                    bone(short(path)),
+                                    bone(path),
                                     dim(ASH(), &format!("({} lines)", contents.lines().count())),
                                 ));
                                 push_block(&mut out, contents, '+', GREEN());
                             }
                             "Bash" => {
                                 let cmd = input["command"].as_str().unwrap_or("?");
-                                out.push(format!(
-                                    "   {} {}",
-                                    bold(GREEN(), "$"),
-                                    bone(&clip(cmd, 88))
-                                ));
+                                out.push(format!("   {} {}", bold(GREEN(), "$"), bone(cmd)));
                             }
                             "Read" => {
                                 let path = input["file_path"].as_str().unwrap_or("?");
                                 out.push(format!(
                                     "   {} {}",
                                     fg(GREEN(), "\u{25cb} read"),
-                                    dim(ASH(), short(path))
+                                    dim(ASH(), path)
                                 ));
                             }
                             "Grep" | "Glob" => {
@@ -452,7 +446,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                 out.push(format!(
                                     "   {} {}",
                                     fg(GREEN(), "\u{2315} search"),
-                                    dim(ASH(), &clip(pat, 80))
+                                    dim(ASH(), pat)
                                 ));
                             }
                             "TodoWrite" => {
@@ -469,8 +463,27 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                                 ));
                             }
                         }
+                        if out.len() > at {
+                            out.insert(
+                                at + 1,
+                                format!(
+                                    "     {}",
+                                    dim(GREEN(), &format!("\u{263d} {explanation}"))
+                                ),
+                            );
+                        }
                     }
                     _ => {}
+                }
+            }
+            // A turn that only spoke is the mind talking to the reader, not an
+            // unexplained gesture: it is shown as it always was.
+            if !acted {
+                if let Some(said) = narration {
+                    out.push(format!(
+                        "     {}",
+                        dim(GREEN(), &format!("\u{263d} {said}"))
+                    ));
                 }
             }
         }
@@ -491,7 +504,7 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
                     if let Some(l) = text.lines().find(|l| !l.trim().is_empty()) {
                         out.push(format!(
                             "     {}",
-                            fg(PURPLE(), &format!("\u{2192} {}", clip(l.trim(), 88)))
+                            fg(PURPLE(), &format!("\u{2192} {}", l.trim()))
                         ));
                     }
                 }
@@ -516,53 +529,48 @@ pub fn claude_event_lines(raw: &str) -> Vec<String> {
     vec![format!("  {raw}")]
 }
 
+/// What one of the native agent's gestures IS, in a plain sentence — used when
+/// the mind acted without narrating, so no step in the trace is ever left
+/// standing on its own. The twin of the `<act>` loop's own `gesture_of`.
+#[cfg(feature = "api")]
+fn claude_gesture_of(name: &str, input: &serde_json::Value) -> String {
+    let field = |key: &str| input[key].as_str().unwrap_or("?").to_string();
+    match name {
+        "Edit" => format!(
+            "changes one exact passage of {} — the diff below is it",
+            field("file_path")
+        ),
+        "Write" => format!(
+            "writes {} lines to {}",
+            input["content"].as_str().unwrap_or("").lines().count(),
+            field("file_path")
+        ),
+        "Bash" => input["description"]
+            .as_str()
+            .filter(|d| !d.trim().is_empty())
+            .map(|d| d.trim().to_string())
+            .unwrap_or_else(|| {
+                "runs that command in the project and reads what it prints".to_string()
+            }),
+        "Read" => format!("reads {} into what it knows", field("file_path")),
+        "Grep" => "searches the project for that pattern".to_string(),
+        "Glob" => "lists the files whose names match that pattern".to_string(),
+        "TodoWrite" => "sets out the steps it means to take".to_string(),
+        "WebSearch" => {
+            "searches the open web — this returns a ranked list of pages, not an answer".to_string()
+        }
+        "WebFetch" => "reads that page as text".to_string(),
+        "Task" => "hands a piece of this work to a second agent".to_string(),
+        other => format!("uses its own {other} tool"),
+    }
+}
+
 #[cfg(feature = "api")]
 fn push_block(out: &mut Vec<String>, text: &str, sign: char, colour: (u8, u8, u8)) {
     use kaos_core::theme::*;
-    const SHOWN: usize = 6;
     let lines: Vec<&str> = text.lines().collect();
-    for l in lines.iter().take(SHOWN) {
-        out.push(format!(
-            "     {}",
-            fg(colour, &format!("{sign} {}", clip(l, 88)))
-        ));
-    }
-    if lines.len() > SHOWN {
-        out.push(format!(
-            "     {}",
-            dim(
-                ASH(),
-                &format!("{sign} \u{2026} {} more lines", lines.len() - SHOWN)
-            )
-        ));
-    }
-}
-
-/// Last two path components — enough to recognise a file without the noise.
-#[cfg(feature = "api")]
-fn short(path: &str) -> &str {
-    let mut idx = 0;
-    let mut seen = 0;
-    for (i, c) in path.char_indices().rev() {
-        if c == '/' {
-            seen += 1;
-            if seen == 2 {
-                idx = i + 1;
-                break;
-            }
-        }
-    }
-    &path[idx..]
-}
-
-#[cfg(feature = "api")]
-fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let mut t: String = s.chars().take(n.saturating_sub(1)).collect();
-        t.push('\u{2026}');
-        t
+    for l in &lines {
+        out.push(format!("     {}", fg(colour, &format!("{sign} {l}"))));
     }
 }
 
@@ -590,9 +598,11 @@ pub struct Sampling {
     /// can. Honoured on the HTTP path; the CLI fallback ignores it.
     pub json: bool,
     /// Hard cap on generated tokens for THIS call (ollama's `num_predict`). `None`
-    /// falls back to the `KAOS_NUM_PREDICT` env, then ollama's default. A caller
-    /// that knows its answer is short sets this so a small model that loops or
-    /// rambles cannot burn the whole timeout.
+    /// falls back to the `KAOS_NUM_PREDICT` env, and then to NO CAP — ollama does
+    /// not impose one of its own. A caller that knows its answer is short sets
+    /// this so a small model that loops or rambles cannot burn the whole timeout;
+    /// leaving it unset is the right default, because what a long reply actually
+    /// runs out of is window ([`ANSWER_HEADROOM`]), not permission.
     pub num_predict: Option<i64>,
     /// Context window for THIS call (ollama's `num_ctx`). `None` keeps the
     /// server default — which ollama ships at a small 4096: a long transcript
@@ -705,21 +715,121 @@ fn ollama_generate_text(
 ) -> Result<String, String> {
     #[cfg(feature = "api")]
     {
-        return match ollama_http(model, prompt, timeout, sampling) {
+        match ollama_http(model, prompt, timeout, sampling) {
             Ok(text) => Ok(text),
             // The server may be down or the endpoint absent on an old ollama; the CLI
             // path below still works via `ollama run`, so degrade rather than fail.
             // Preserve the HTTP error if the fallback fails too: otherwise a
             // remote model problem becomes an opaque `exit 1`.
-            Err(http_error) => ollama_complete(model, prompt, timeout)
-                .map_err(|cli_error| format!("{cli_error}; HTTP attempt: {http_error}")),
-        };
+            //
+            // Only when the ENDPOINT failed. A model that answered badly —
+            // spent its budget reasoning, returned nothing — has already been
+            // paid for, and `ollama run` cannot do better: it ignores this
+            // call's sampling (its cap, its seed, its `think` setting) and
+            // charges a second full generation to say the same thing. Worse,
+            // it says it as raw monologue, which the agent loop then cannot
+            // read as an action. Let the model's own verdict stand.
+            Err(http_error) if endpoint_failed(&http_error) => {
+                ollama_complete(model, prompt, timeout)
+                    .map_err(|cli_error| format!("{cli_error}; HTTP attempt: {http_error}"))
+            }
+            Err(model_error) => Err(model_error),
+        }
     }
     #[cfg(not(feature = "api"))]
     {
         let _ = sampling; // honoured only on the HTTP path
         ollama_complete(model, prompt, timeout)
     }
+}
+
+/// The largest window this build will ask ollama to open by itself. A window is
+/// KV cache — real memory on the machine serving it — so a prompt that outgrows
+/// even this gets the honest truncation error instead of an allocation nobody
+/// asked for. `KAOS_NUM_CTX` overrides the whole calculation in either
+/// direction for someone who knows their hardware.
+#[cfg(feature = "api")]
+const MAX_FITTED_CONTEXT: i64 = 65_536;
+
+/// Room kept for the model's own reply inside the fitted window.
+///
+/// This — not `num_predict` — is what actually bounds a local generation here.
+/// Left empty, ollama imposes no token cap of its own (measured: a request with
+/// no `num_predict` ran to 1492 tokens and stopped because the model was
+/// finished, not because it was cut). What stops it early is running out of
+/// WINDOW, which the prompt and the reply share. So the reply's share is
+/// reserved up front, and it is sized for a reasoning model: the monologue is
+/// generated tokens too, and 2k left one barely enough to think, let alone
+/// think and then answer.
+#[cfg(feature = "api")]
+const ANSWER_HEADROOM: i64 = 8_192;
+
+/// The context window to ask for, given what THIS prompt needs.
+///
+/// ollama's own default is 4096 tokens, and it does not fail when a prompt
+/// exceeds it — it silently drops the front and generates in what is left. For
+/// a one-shot completion that is survivable. For an agent it is fatal and
+/// invisible: the transcript grows every turn, crosses the line, and from then
+/// on the mind is answering a truncated question with no room to finish, so its
+/// reply arrives cut mid-thought and holds no executable action. That is a
+/// context failure wearing the mask of a model that "won't follow the format".
+///
+/// So the window is named rather than inherited — but it is named with the SAME
+/// number every time, and that stability is the whole design.
+///
+/// ollama keys a resident model on its options: change `num_ctx` and it evicts
+/// the model and loads it again. A window sized to each prompt therefore looks
+/// reasonable and behaves terribly — every turn whose transcript crosses a
+/// threshold pays a full reload of a multi-gigabyte model, which on a remote
+/// box reads as `timed out reading response` and looks like the network. So one
+/// window is chosen up front, big enough for an agent's whole conversation, and
+/// held: the model is loaded once and stays.
+///
+/// A prompt that outgrows even [`MAX_FITTED_CONTEXT`] gets the honest truncation
+/// error rather than a bespoke allocation. `KAOS_NUM_CTX` (or an explicit
+/// `num_ctx` from the caller) replaces the choice entirely, for someone who
+/// knows what their hardware will hold.
+#[cfg(feature = "api")]
+pub(crate) fn context_window(explicit: Option<i64>, prompt_chars: usize) -> Option<i64> {
+    if let Some(n) = explicit {
+        return Some(n);
+    }
+    if let Some(n) = std::env::var("KAOS_NUM_CTX")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|n| *n > 0)
+    {
+        return Some(n);
+    }
+    // ~4 chars per token is the rough English/code ratio. Only a prompt that
+    // genuinely will not fit the standing window moves off it — one step, to
+    // the ceiling, so there are at most two windows a session can ask for
+    // instead of a ladder of reloads.
+    let needed = (prompt_chars as i64 / 4) + ANSWER_HEADROOM;
+    Some(if needed > FITTED_CONTEXT {
+        MAX_FITTED_CONTEXT
+    } else {
+        FITTED_CONTEXT
+    })
+}
+
+/// The standing window every local call asks for. Large enough to hold an agent
+/// transcript plus [`ANSWER_HEADROOM`] without ever being renegotiated.
+#[cfg(feature = "api")]
+const FITTED_CONTEXT: i64 = 32_768;
+
+/// Did the ENDPOINT fail, as opposed to the model failing at it?
+///
+/// The `ollama run` fallback exists for one case: an ollama that cannot serve
+/// this request over HTTP (down, too old to know the endpoint, answering
+/// something that is not JSON). Everything else in the error vocabulary of
+/// [`ollama_http`] is a verdict on the completion itself and must not be paid
+/// for twice. A timeout is on this side of the line too: the same model on the
+/// same box, asked the same question through a subprocess, is not faster.
+#[cfg(feature = "api")]
+fn endpoint_failed(error: &str) -> bool {
+    let slow = error.contains("timed out") || error.contains("timeout");
+    (error.starts_with("ollama http:") || error.starts_with("ollama: bad json:")) && !slow
 }
 
 /// The HTTP path to ollama (`/api/generate`), used directly by callers that must
@@ -779,7 +889,7 @@ pub fn ollama_http_attached(
     if let Some(n) = num_predict {
         options["num_predict"] = serde_json::json!(n);
     }
-    if let Some(n) = sampling.num_ctx {
+    if let Some(n) = context_window(sampling.num_ctx, prompt.len()) {
         options["num_ctx"] = serde_json::json!(n);
     }
     let mut body = serde_json::json!({
@@ -914,7 +1024,16 @@ pub fn ollama_complete(model: &str, prompt: &str, timeout: Duration) -> Result<S
         .join()
         .map_err(|_| "stderr reader thread panicked".to_string())?;
     if status.success() {
-        Ok(strip_think(&raw).trim().to_string())
+        let clean = strip_think(&raw).trim().to_string();
+        // Same law as the HTTP path: a reply that is monologue wall to wall —
+        // a thought the model never closed because generation stopped inside
+        // it — is not an answer, and handing it up as one gives every caller
+        // above a wall of reasoning where it expected a result (an agent loop
+        // reads no action in it and banishes the turn).
+        if clean.is_empty() && !raw.trim().is_empty() {
+            return Err("ollama: the reply was all reasoning, cut before any answer".into());
+        }
+        Ok(clean)
     } else {
         let detail = stderr.trim().trim_start_matches("Error:").trim();
         let detail = if detail.is_empty() {
@@ -963,6 +1082,15 @@ pub fn strip_think(s: &str) -> String {
     for marker in ["</think>", "...done thinking.", "…done thinking."] {
         if let Some(i) = out.rfind(marker) {
             out = out[i + marker.len()..].to_string();
+        }
+    }
+    // An OPENER with no closer left, in the CLI's own rendering: the model was
+    // still thinking when generation stopped, so every word after it is
+    // monologue. Dropped for the same reason an unclosed `<think>` is — what
+    // survives must be answer, never reasoning.
+    for opener in ["Thinking...", "Thinking…"] {
+        if out.trim_start().starts_with(opener) {
+            out = String::new();
         }
     }
     out
@@ -1035,6 +1163,55 @@ mod tests {
         );
         // Unclosed block: drop the dangling remainder.
         assert_eq!(strip_think("done<think>still musing"), "done");
+        // The CLI's opener with no closer: generation stopped inside the
+        // thought, so there is no answer in it at all.
+        assert_eq!(
+            strip_think("Thinking...\nI should read the file next, then decide"),
+            ""
+        );
+    }
+
+    #[cfg(feature = "api")]
+    #[test]
+    fn the_window_is_fitted_to_the_prompt_that_must_fit_in_it() {
+        // ONE window, whatever the prompt: changing it makes ollama evict and
+        // reload the model, so a per-prompt size would pay a multi-gigabyte
+        // reload every time a transcript crossed a threshold.
+        assert_eq!(context_window(None, 0), Some(FITTED_CONTEXT));
+        assert_eq!(context_window(None, 4_000), Some(FITTED_CONTEXT));
+        assert_eq!(context_window(None, 40_000), Some(FITTED_CONTEXT));
+        // Only a prompt that genuinely will not fit moves, and it moves once —
+        // straight to the ceiling, never up a ladder.
+        assert_eq!(context_window(None, 4_000_000), Some(MAX_FITTED_CONTEXT));
+        // Every size a session can ask for, across a full sweep of prompt
+        // sizes: two, so a conversation reloads the model at most once.
+        let asked: std::collections::BTreeSet<Option<i64>> = (0..400)
+            .map(|step| context_window(None, step * 2_000))
+            .collect();
+        assert!(asked.len() <= 2, "a sweep asked for {asked:?}");
+        // An explicit window is obeyed exactly, in either direction.
+        assert_eq!(context_window(Some(2_048), 4_000_000), Some(2_048));
+        assert_eq!(context_window(Some(262_144), 10), Some(262_144));
+    }
+
+    #[cfg(feature = "api")]
+    #[test]
+    fn only_a_failed_endpoint_falls_back_to_the_cli() {
+        // The server could not serve the request: `ollama run` may still work.
+        assert!(endpoint_failed("ollama http: connection refused"));
+        assert!(endpoint_failed("ollama: bad json: expected value"));
+        // The model answered, badly. Running it again through a subprocess
+        // costs a second full generation and ignores this call's sampling.
+        assert!(!endpoint_failed(
+            "ollama: the model spent its whole token budget thinking and never answered — \
+             raise the cap (num_predict) or shorten the prompt"
+        ));
+        assert!(!endpoint_failed(
+            "ollama: the reply was all reasoning, cut before any answer"
+        ));
+        assert!(!endpoint_failed("ollama: empty response: {}"));
+        // Slow is slow on either path.
+        assert!(!endpoint_failed("ollama http: request timed out"));
     }
 
     #[test]
@@ -1053,14 +1230,34 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("Fixing the inverted filter"));
 
+        // Every gesture carries a line UNDER it saying what it is. Unnarrated,
+        // that line is what the tool does — no step stands unexplained.
         let edit = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/a/b/todo/query.py","old_string":"if done","new_string":"if not done"}}]}}"#;
         let lines = claude_event_lines(edit);
         assert!(lines[0].contains("edit") && lines[0].contains("todo/query.py"));
-        assert!(lines[1].contains("- if done"));
-        assert!(lines[2].contains("+ if not done"));
+        assert!(lines[1].contains("changes one exact passage"));
+        assert!(lines[2].contains("- if done"));
+        assert!(lines[3].contains("+ if not done"));
 
         let bash = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"python3 tests.py"}}]}}"#;
-        assert!(claude_event_lines(bash)[0].contains("python3 tests.py"));
+        let lines = claude_event_lines(bash);
+        assert!(lines[0].contains("python3 tests.py"));
+        assert!(lines[1].contains("runs that command"));
+
+        // When the mind DID narrate, its own words explain the gesture — and
+        // they sit under it, not above.
+        let narrated = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Checking the tests still pass."},{"type":"tool_use","name":"Bash","input":{"command":"pytest"}}]}}"#;
+        let lines = claude_event_lines(narrated);
+        assert!(lines[0].contains("pytest"));
+        assert!(lines[1].contains("Checking the tests still pass"));
+        assert_eq!(lines.len(), 2, "the narration is not repeated above");
+
+        // One sentence, five gestures: the rest explain themselves rather than
+        // echoing it or standing bare.
+        let chain = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Reading both files."},{"type":"tool_use","name":"Read","input":{"file_path":"a.py"}},{"type":"tool_use","name":"Read","input":{"file_path":"b.py"}}]}}"#;
+        let lines = claude_event_lines(chain);
+        assert!(lines[1].contains("Reading both files"));
+        assert!(lines[3].contains("reads b.py into what it knows"));
 
         // Plumbing stays silent; garbage passes through.
         assert!(claude_event_lines(r#"{"type":"system","subtype":"init"}"#).is_empty());

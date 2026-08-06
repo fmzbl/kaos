@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (remote)",
+      "options": { "baseURL": "http://192.168.10.197:11434/v1" },
+      "models": { "qwen3.6:35b": { "name": "qwen3.6:35b" } }
+    }
+  },
+  "model": "ollama/qwen3.6:35b"
+}

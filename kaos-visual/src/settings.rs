@@ -100,13 +100,40 @@ pub(crate) fn is_tristate(key: &str) -> bool {
     documentation(key).is_some_and(|doc| doc.kind == kaos_core::config::ValueKind::TriState)
 }
 
+/// Match one persistent setting against the Settings search query.
+///
+/// The query deliberately covers the same text a person sees in the row: the
+/// exact key, its summary, operational details, and copyable example. Keeping
+/// this predicate here makes the search section and the grouped editor use the
+/// same inventory rather than maintaining two subtly different filters.
+pub(crate) fn matches(key: &str, query: &str) -> bool {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    key.to_ascii_lowercase().contains(&query)
+        || documentation(key).is_some_and(|doc| {
+            doc.summary.to_ascii_lowercase().contains(&query)
+                || doc.details.to_ascii_lowercase().contains(&query)
+                || doc.example.to_ascii_lowercase().contains(&query)
+        })
+}
+
+/// Match one environment-only entry against the Settings search query.
+pub(crate) fn matches_environment(doc: &kaos_core::config::EnvironmentDoc, query: &str) -> bool {
+    let query = query.trim().to_ascii_lowercase();
+    query.is_empty()
+        || doc.key.to_ascii_lowercase().contains(&query)
+        || doc.details.to_ascii_lowercase().contains(&query)
+}
+
 /// Variables intentionally kept out of the persistent config file.
 ///
 pub(crate) use kaos_core::config::ENVIRONMENT_DOCS;
 
 #[derive(Default)]
 pub(crate) struct SettingsPane {
-    pub(crate) filter: String,
+    pub(crate) search: String,
     pub(crate) values: BTreeMap<String, String>,
     /// Provider/model selectors shared with the terminal palette. Ollama
     /// entries are discovered from the active `ollama ls` catalog.
@@ -279,5 +306,25 @@ mod tests {
             kaos_core::config::default_value("theme").as_deref(),
             Some("dark")
         );
+    }
+
+    #[test]
+    fn configuration_search_covers_keys_and_documentation() {
+        assert!(matches("KAOS_MODEL", "model"));
+        assert!(matches("KAOS_MODEL", "ollama"));
+        assert!(matches("KAOS_MODEL", "provider and model binding"));
+        assert!(!matches("KAOS_MODEL", "does-not-exist"));
+        assert!(matches("KAOS_MODEL", ""));
+    }
+
+    #[test]
+    fn configuration_search_covers_environment_only_entries() {
+        let doc = ENVIRONMENT_DOCS
+            .iter()
+            .find(|doc| doc.key == "OPENAI_API_KEY")
+            .expect("OpenAI credential should be documented");
+        assert!(matches_environment(doc, "openai"));
+        assert!(matches_environment(doc, "credential"));
+        assert!(!matches_environment(doc, "does-not-exist"));
     }
 }

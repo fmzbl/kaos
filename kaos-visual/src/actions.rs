@@ -9,6 +9,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use kaos_core::chat::{EMPTY_TURN_NOTICE, STOPPED_MARK};
 use kaos_core::retained::RetainedLog;
 use kaos_core::run_model::{Lane, State};
 
@@ -282,7 +283,6 @@ impl Desk {
             ("KAOS_RAW_CHAT_TASK_STDIN".to_string(), "1".to_string()),
             ("KAOS_CHAT_OUTPUT".to_string(), "1".to_string()),
             ("KAOS_CHAT_TRACE".to_string(), "1".to_string()),
-            ("KAOS_REBIS_CONTEXT".to_string(), "1".to_string()),
             ("KAOS_SESSION".to_string(), session.clone()),
             (
                 "KAOS_RESUME".to_string(),
@@ -824,33 +824,38 @@ impl Desk {
                 continue;
             }
             task.delivered = true;
-            if task.state != State::Complete {
-                task.output.clear();
-                task.output
-                    .push("reply       not delivered · chat turn was stopped".to_string());
-                continue;
-            }
+            let stopped = task.state != State::Complete;
             let text = task
                 .output
                 .iter()
-                .filter(|line| !line.starts_with("started") && !line.starts_with("complete"))
+                .filter(|line| {
+                    !line.starts_with("started")
+                        && !line.starts_with("complete")
+                        && !line.starts_with("cancelled")
+                })
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n");
             let trace = kaos_core::chat::extract_chat_trace(&text);
             let text = kaos_core::chat::extract_chat_reply(&text);
             task.output.clear();
-            task.output
-                .push("reply       delivered to durable session".to_string());
-            replies.push((
-                session,
-                if text.trim().is_empty() {
-                    "(the task ended without output)".to_string()
-                } else {
-                    text
-                },
-                trace,
-            ));
+            // A stopped turn is delivered too. Interrupting a model is a way of
+            // steering it, not of undoing it: dropping the turn left the reader
+            // with their own question and no reply beneath it, and threw away
+            // however long the model had already worked. What it managed is
+            // kept, marked as stopped so it reads as what it is.
+            let body = match (stopped, text.trim().is_empty()) {
+                (true, true) => format!("{STOPPED_MARK} before the model answered"),
+                (true, false) => format!("{text}\n\n{STOPPED_MARK} mid-answer"),
+                (false, true) => EMPTY_TURN_NOTICE.to_string(),
+                (false, false) => text,
+            };
+            task.output.push(if stopped {
+                "reply       partial turn delivered · stopped".to_string()
+            } else {
+                "reply       delivered to durable session".to_string()
+            });
+            replies.push((session, body, trace));
         }
         replies
     }
@@ -889,6 +894,83 @@ mod tests {
         let framed = desk.with_attachments("answer");
         assert_eq!(framed.matches("Attached files for context").count(), 1);
         assert!(framed.ends_with("answer"));
+    }
+
+    /// A finished chat task in a given state, as the poller would leave one.
+    fn finished_chat_task(state: State, output: &[&str]) -> Desk {
+        let mut desk = Desk::default();
+        desk.tasks.push(Task {
+            id: 1,
+            kind: Kind::Chat,
+            label: "chat".to_string(),
+            state,
+            lane: Lane::Serial,
+            output: output
+                .iter()
+                .map(|line| (*line).to_string())
+                .collect::<Vec<_>>()
+                .into(),
+            queued_at: Instant::now(),
+            started_at: Some(Instant::now()),
+            elapsed: Some(Duration::ZERO),
+            command: Vec::new(),
+            stdin: None,
+            env: Vec::new(),
+            session: Some("s1".to_string()),
+            delivered: false,
+        });
+        desk
+    }
+
+    #[test]
+    fn a_stopped_chat_turn_still_delivers_what_the_model_had_said() {
+        // Stopping the model is steering, not undoing: the partial answer and
+        // its work trace reach the conversation, marked as stopped, so the
+        // reader is never left with their own question and silence.
+        let mut desk = finished_chat_task(
+            State::Cancelled,
+            &[
+                "started",
+                "\u{1e}FOLD_OPEN\u{1f}model turn 1",
+                "model    reading the file",
+                "\u{1e}FOLD_CLOSE",
+                "chat    final answer",
+                "It parses the header",
+                "cancelled   by user",
+            ],
+        );
+        let replies = desk.take_chat_replies();
+        assert_eq!(replies.len(), 1, "the stopped turn is delivered");
+        let (session, body, trace) = &replies[0];
+        assert_eq!(session, "s1");
+        assert!(body.contains("It parses the header"), "{body:?}");
+        assert!(body.contains("stopped mid-answer"), "{body:?}");
+        assert!(trace.contains("reading the file"), "the work survives");
+    }
+
+    #[test]
+    fn a_turn_stopped_before_the_model_spoke_says_exactly_that() {
+        let mut desk = finished_chat_task(State::Cancelled, &["started", "cancelled   by user"]);
+        let replies = desk.take_chat_replies();
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].1.contains("stopped before the model answered"));
+    }
+
+    #[test]
+    fn a_completed_turn_is_unchanged_by_the_stop_path() {
+        let mut desk = finished_chat_task(
+            State::Complete,
+            &[
+                "started",
+                "chat    final answer",
+                "the whole answer",
+                "complete",
+            ],
+        );
+        let replies = desk.take_chat_replies();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].1, "the whole answer");
+        assert!(!replies[0].1.contains("stopped"));
     }
 
     #[test]

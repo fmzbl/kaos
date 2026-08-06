@@ -60,6 +60,10 @@ pub const ENVIRONMENT_DOCS: &[EnvironmentDoc] = &[
         details: "Overrides the model the conformance suite runs against; a test-harness setting rather than a preference, so it is not persisted.",
     },
     EnvironmentDoc {
+        key: "KAOS_SESSION_DIR",
+        details: "Redirects the saved-conversation store away from `~/.kaos/sessions`. Not a preference — it is what keeps a test suite, or a throwaway experiment, out of a real chat history.",
+    },
+    EnvironmentDoc {
         key: "KAOS_BIN",
         details: "Optional visual-editor override for the Kaos executable used to launch terminal runs.",
     },
@@ -74,10 +78,6 @@ pub const ENVIRONMENT_DOCS: &[EnvironmentDoc] = &[
     EnvironmentDoc {
         key: "KAOS_RESUME",
         details: "Private child-process flag selecting resume versus create for a chat session.",
-    },
-    EnvironmentDoc {
-        key: "KAOS_REBIS_CONTEXT",
-        details: "Private flag that injects Rebis authoring and validation guidance into a coding chat.",
     },
     EnvironmentDoc {
         key: "KAOS_RAW_CHAT_TASK_STDIN",
@@ -123,6 +123,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "KAOS_CHAT_TIMEOUT_S",
     "KAOS_MAX_TOKENS",
     "KAOS_NUM_PREDICT",
+    "KAOS_NUM_CTX",
     "KAOS_FABLE_FALLBACK_MODEL",
     "KAOS_PROVIDER_SORT",
     "KAOS_PROVIDER_ONLY",
@@ -266,15 +267,22 @@ pub const CONFIG_DOCS: &[ConfigDoc] = &[
         key: "KAOS_MAX_TOKENS",
         kind: ValueKind::Integer,
         summary: "Maximum response-token budget for hosted providers.",
-        details: "Sent as `max_tokens` to OpenAI-compatible APIs. Local Ollama generation uses `KAOS_NUM_PREDICT` instead; this value still governs hosted model calls.",
-        example: "KAOS_MAX_TOKENS = 16384",
+        details: "Sent as `max_tokens` to OpenAI-compatible APIs, defaulting to 32768. It is a guard against a runaway generation that would buffer past the read timeout, not a budget to spend down — a reasoning model can spend thousands of tokens thinking before it writes anything, so a low value cuts off ordinary answers. Local Ollama generation uses `KAOS_NUM_PREDICT` instead; this value still governs hosted model calls.",
+        example: "KAOS_MAX_TOKENS = 32768",
     },
     ConfigDoc {
         key: "KAOS_NUM_PREDICT",
         kind: ValueKind::Integer,
         summary: "Optional Ollama generation-token cap.",
-        details: "When non-empty, sends Ollama's `num_predict` option. Leave it empty to let Ollama choose its own generation limit; this does not configure hosted providers.",
+        details: "Empty means NO cap, which is the right default — Ollama imposes none of its own, and what actually bounds a long reply is the context window, not permission to keep going. Set it only to stop a small model that loops from burning the whole timeout. See `KAOS_NUM_CTX` for the limit that governs how much room a reply really has; this does not configure hosted providers.",
         example: "KAOS_NUM_PREDICT = 4096",
+    },
+    ConfigDoc {
+        key: "KAOS_NUM_CTX",
+        kind: ValueKind::Integer,
+        summary: "Optional Ollama context window, in tokens.",
+        details: "Empty is the right setting for almost everyone: Kaos then fits the window to each prompt, because Ollama's own 4096 default silently drops the front of a longer one and leaves an agent no room to answer in. Set it to pin a window your hardware can hold — larger for very long transcripts, smaller to bound the KV cache on a small machine.",
+        example: "KAOS_NUM_CTX = 32768",
     },
     ConfigDoc {
         key: "KAOS_FABLE_FALLBACK_MODEL",
@@ -551,9 +559,11 @@ KAOS_TIMEOUT_S = 120
 # Seconds for one model turn inside a tool-using chat or coding agent.
 KAOS_CHAT_TIMEOUT_S = 600
 # Maximum generated tokens for OpenAI-compatible providers.
-KAOS_MAX_TOKENS = 8192
+KAOS_MAX_TOKENS = 32768
 # Optional Ollama `num_predict`; empty keeps Ollama's own default.
 KAOS_NUM_PREDICT =
+# Optional Ollama context window; empty fits the window to each prompt.
+KAOS_NUM_CTX =
 # Optional Claude model used when the Fable route refuses a request.
 KAOS_FABLE_FALLBACK_MODEL =
 # Optional OpenRouter routing sort: throughput, latency, or price.
@@ -640,11 +650,12 @@ KAOS_DEBUG = 0
 #   OPENAI_API_KEY  ANTHROPIC_API_KEY  OPENROUTER_API_KEY   — credentials
 #   REBIS_COLLECTION_PATH                                   — collection root
 #   KAOS_BIN  KAOS_SESSION  KAOS_RESUME  KAOS_FOLD          — child process
-#   KAOS_CHAT_OUTPUT  KAOS_CHAT_TRACE  KAOS_REBIS_CONTEXT   — child process
+#   KAOS_CHAT_OUTPUT  KAOS_CHAT_TRACE                         — child process
 #   KAOS_RAW_CHAT_TASK_STDIN  KAOS_CONFORMANCE_MODEL        — child / harness
 #   KAOS_PAUSE_ON_TRANSIENT  KAOS_RUN_PROCESS_GROUP         — run transport
 #   KAOS_REBIS_CHECKPOINT  KAOS_REBIS_DIRECTIVE             — run transport
 #   KAOS_REBIS_INLET                                        — run transport
+#   KAOS_SESSION_DIR                                        — session store
 "#;
 
 /// `~/.config/kaos/config`, honouring `XDG_CONFIG_HOME`.

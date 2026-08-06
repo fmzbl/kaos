@@ -16,14 +16,15 @@ whose body is a prompt.
 `(^ E)` purely dualizes syntax orientation by recursively exchanging `->` and
 `<-`; it makes no model call and applying it twice returns `E`.
 
-Kaos compiles the rules and the complex, nested examples in
-[`REBIS_CHAT_CONTEXT.md`](REBIS_CHAT_CONTEXT.md) into both `/chat` and every
-executing Rebis agent. Chat can therefore explain, debug, and write
-Rebis, while executing nodes understand the surrounding language without
-depending on the selected model's prior knowledge. That reference is also the
-concise example cookbook for higher-order macros, deep mediators,
-standard-library strategies, `%`-based lazy routing, and bounded recursive
-refinement.
+The complex, nested examples in [`REBIS_CHAT_CONTEXT.md`](REBIS_CHAT_CONTEXT.md)
+are an explicit authoring reference for people and documentation tooling. Kaos
+does not inject that prose into `/chat` or an executing Rebis node. Every direct
+chat turn is instead one quoted Rebis prompt, and every provider-backed node
+receives a visible `KAOS_REBIS_AGENT_CONTEXT` data envelope containing the
+immutable source, initial record/input, branch scope, model, workspace,
+attachments, and exact node prompt. Rebis's own `+`, arrows, squares, ports,
+and flashbacks remain the mechanisms that carry program context; sibling
+branches do not receive one another's private answers.
 
 Rebis is the default Kaos screen. Press `Ctrl-K` to open the command palette.
 The legacy `Ctrl-/` chord is still recognized too (including the `Ctrl-_` and

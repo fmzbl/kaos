@@ -4,28 +4,26 @@ What building and running the conformance suite turned up. Kept as a file
 rather than a message because the next person to run this will hit the same
 things, and two of them cost an afternoon each.
 
-## 1. Every Rebis node call carried the whole language reference · **fixed**
+## 1. Every Rebis node call carried the whole language reference · **removed**
 
-`RebisOracle` builds its system prompt with
-`kaos_agent::conductor::rebis_agent_system_prompt()`, which embeds
-`REBIS_AUTHORING_CONTEXT` — the entire contents of `docs/REBIS_CHAT_CONTEXT.md`,
-**~18 KB, roughly 4,500 tokens**. On the ollama path
-(`provider.rs:253`) system and user are concatenated into one prompt, so every
-node of every program pays those tokens before its own words.
+Older builds appended `REBIS_AUTHORING_CONTEXT` — the entire contents of
+`docs/REBIS_CHAT_CONTEXT.md`, **~18 KB, roughly 4,500 tokens** — to every node
+system prompt. On the Ollama path, system and user are concatenated into one
+prompt, so every node paid for hidden authoring instructions before its own
+words.
 
 On a hosted model this is invisible: it caches, and the latency is dominated by
 the network. On a small local model on CPU it is the whole cost — a one-word
 answer takes minutes, and a fifty-program suite never finishes.
 
-The content is also wrong for the job. The authoring context teaches a model how
-to *write* Rebis. A node executing `"Answer with exactly the word: alpha"` is not
-authoring anything, and the prompt itself says so two paragraphs later: *"You are
-now executing one node, not authoring the surrounding program."* We are sending
-4,500 tokens of instructions and then telling the model to ignore them.
+The content was also wrong for the job. A node executing `"Answer with exactly
+the word: alpha"` is not authoring anything. Current builds keep the reference
+as explicit documentation and derive composition from actual Rebis source.
 
-**Fixed** in `rebis_agent_system_prompt`: a node now gets its contract and
-nothing else, and the reference stays on the chat path where a model actually
-authors Rebis. The node prompt went from ~18 KB to under 600 bytes.
+**Removed** from the automatic path: a node gets only its explicit transport
+contract, and the reference is not attached to chat or node requests. The
+chaos composer is a real `($ …)` Rebis expression and generated output crosses
+the host boundary only after parsing.
 
 **Honesty about the evidence.** This was found by reading the code while
 diagnosing a timeout, and it is a genuine defect on its own terms — 4,500

@@ -3287,7 +3287,32 @@ impl Mandala {
                 }
                 acc
             });
+        // A nested boundary is a new surface. Paint the outer surface before
+        // the inner one regardless of insertion order, so the inner circle or
+        // brace can fully occlude the parent's edge where the two overlap.
+        // Without this, dragging a boundary into another made their outlines
+        // interpolate through one another simply because the later-created
+        // node happened to be painted last.
+        let mut containers = containers;
+        containers.sort_by_key(|id| self.containment_depth(*id));
         containers.into_iter().chain(forms).collect()
+    }
+
+    /// Number of visual container walls between a node and the open canvas.
+    /// Cycles are rejected by [`Self::hold`], but the visited set keeps this
+    /// presentation ordering defensive when loading older documents.
+    fn containment_depth(&self, id: NodeId) -> usize {
+        let mut depth = 0;
+        let mut cursor = id;
+        let mut seen = HashSet::new();
+        while seen.insert(cursor) {
+            let Some(parent) = self.holder(cursor) else {
+                break;
+            };
+            depth += 1;
+            cursor = parent;
+        }
+        depth
     }
 
     /// Every node drawn inside `id`'s boundary.
@@ -8497,6 +8522,29 @@ mod tests {
         let mut expected = held.nodes().iter().map(|n| n.id).collect::<Vec<_>>();
         expected.sort();
         assert_eq!(all, expected, "no node painted twice or dropped");
+    }
+
+    #[test]
+    fn nested_container_surfaces_are_painted_outer_before_inner() {
+        // Insert the inner circle first on purpose. Containment, not creation
+        // order, decides the z-order of surfaces.
+        let mut mandala = Mandala::new();
+        let circle = mandala.add(Form::Compose, "", 0.0, 0.0);
+        let brace = mandala.add(Form::Imaginary, "", 0.0, 0.0);
+        let root = mandala.add(Form::Program, "", 0.0, 0.0);
+        assert!(mandala.hold(root, brace));
+        assert!(mandala.hold(brace, circle));
+
+        let order = mandala.paint_order(true);
+        let outer = order
+            .iter()
+            .position(|id| *id == brace)
+            .expect("outer brace is painted");
+        let inner = order
+            .iter()
+            .position(|id| *id == circle)
+            .expect("inner circle is painted");
+        assert!(outer < inner, "outer surface must precede inner: {order:?}");
     }
 
     #[test]

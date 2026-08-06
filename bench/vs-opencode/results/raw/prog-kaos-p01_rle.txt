@@ -1,0 +1,91 @@
+stub
+===== GATE =====
+FFFFF                                                                    [100%]
+=================================== FAILURES ===================================
+__________________________________ test_basic __________________________________
+
+>   def test_basic(): assert encode("aaabbc") == "a3b2c1"
+                             ^^^^^^^^^^^^^^^^
+
+test_sol.py:2: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = 'aaabbc'
+
+    def encode(s):
+        """Run-length encode: 'aaabbc' -> 'a3b2c1'. Empty string -> ''."""
+>       raise NotImplementedError
+E       NotImplementedError
+
+sol.py:3: NotImplementedError
+__________________________________ test_empty __________________________________
+
+>   def test_empty(): assert encode("") == ""
+                             ^^^^^^^^^^
+
+test_sol.py:3: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = ''
+
+    def encode(s):
+        """Run-length encode: 'aaabbc' -> 'a3b2c1'. Empty string -> ''."""
+>       raise NotImplementedError
+E       NotImplementedError
+
+sol.py:3: NotImplementedError
+_________________________________ test_single __________________________________
+
+>   def test_single(): assert encode("z") == "z1"
+                              ^^^^^^^^^^^
+
+test_sol.py:4: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = 'z'
+
+    def encode(s):
+        """Run-length encode: 'aaabbc' -> 'a3b2c1'. Empty string -> ''."""
+>       raise NotImplementedError
+E       NotImplementedError
+
+sol.py:3: NotImplementedError
+_______________________________ test_alternating _______________________________
+
+>   def test_alternating(): assert encode("ababab") == "a1b1a1b1a1b1"
+                                   ^^^^^^^^^^^^^^^^
+
+test_sol.py:5: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = 'ababab'
+
+    def encode(s):
+        """Run-length encode: 'aaabbc' -> 'a3b2c1'. Empty string -> ''."""
+>       raise NotImplementedError
+E       NotImplementedError
+
+sol.py:3: NotImplementedError
+________________________________ test_long_run _________________________________
+
+>   def test_long_run(): assert encode("x"*12) == "x12"
+                                ^^^^^^^^^^^^^^
+
+test_sol.py:6: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = 'xxxxxxxxxxxx'
+
+    def encode(s):
+        """Run-length encode: 'aaabbc' -> 'a3b2c1'. Empty string -> ''."""
+>       raise NotImplementedError
+E       NotImplementedError
+
+sol.py:3: NotImplementedError
+=========================== short test summary info ============================
+FAILED test_sol.py::test_basic - NotImplementedError
+FAILED test_sol.py::test_empty - NotImplementedError
+FAILED test_sol.py::test_single - NotImplementedError
+FAILED test_sol.py::test_alternating - NotImplementedError
+FAILED test_sol.py::test_long_run - NotImplementedError
+5 failed in 0.04s

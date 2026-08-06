@@ -1,0 +1,59 @@
+chat Rebis program · the harness around your prompt · 296 bytes
+chat      "KAOS_CHAT_DATA\nMODE=direct\nHISTORY_BYTES=0\n(first turn)\nQUESTION_BYTES=210\nJosh buys a house for $80,000 and puts in $50,000 in repairs. This increased the value of the house by 150% over its original price. How much profit did he make, in dollars?\n\nAnswer with the final integer only.\n"
+chat node prompt · exactly what the model receives · 843 bytes
+chat      KAOS_REBIS_AGENT_CONTEXT
+chat      VERSION=1
+chat      SCOPE_BYTES=4
+chat      root
+chat      MODEL_BYTES=18
+chat      ollama:qwen3.6:35b
+chat      WORKSPACE_BYTES=38
+chat      /home/facu/code/kaos/bench/vs-opencode
+chat      PROGRAM_BYTES=296
+chat      "KAOS_CHAT_DATA\nMODE=direct\nHISTORY_BYTES=0\n(first turn)\nQUESTION_BYTES=210\nJosh buys a house for $80,000 and puts in $50,000 in repairs. This increased the value of the house by 150% over its original price. How much profit did he make, in dollars?\n\nAnswer with the final integer only.\n"
+chat      INITIAL_RECORD_BYTES=0
+chat      
+chat      SUPERVISOR_DIRECTIVE_BYTES=0
+chat      
+chat      ATTACHMENT_COUNT=0
+chat      NODE_PROMPT_BYTES=286
+chat      KAOS_CHAT_DATA
+chat      MODE=direct
+chat      HISTORY_BYTES=0
+chat      (first turn)
+chat      QUESTION_BYTES=210
+chat      Josh buys a house for $80,000 and puts in $50,000 in repairs. This increased the value of the house by 150% over its original price. How much profit did he make, in dollars?
+chat      
+chat      Answer with the final integer only.
+chat      
+chat    chat model turn 1 · working · ollama:qwen3.6:35b · limit 600s
+chat    chat model turn 1 · complete response
+chat      <act tool="bash">
+chat      <arg name="cmd">cd /home/facu/code/kaos/bench/vs-opencode && python3 -c "
+chat      # Calculate the profit
+chat      original_price = 80000
+chat      repairs_cost = 50000
+chat      total_investment = original_price + repairs_cost
+chat      
+chat      # The value increased by 150% over its original price
+chat      increase_amount = original_price * 1.5
+chat      new_value = original_price + increase_amount
+chat      
+chat      profit = new_value - total_investment
+chat      print(int(profit))
+chat      "</arg>
+chat      </act>
+  [2;48;2;0;0;0;38;2;126;136;152m 1[0m [1;48;2;0;0;0;38;2;96;154;255m$[0m [48;2;0;0;0;38;2;255;255;255mcd /home/facu/code/kaos/bench/vs-opencode && python3 -c " ↵ # Calculate the profit ↵…[0m
+     [2;48;2;0;0;0;38;2;96;154;255m☽ runs that command in the project and reads what it prints[0m
+     [48;2;0;0;0;38;2;96;154;255m→[0m [2;48;2;0;0;0;38;2;126;136;152mexit 0 · 70000[0m
+chat    chat model turn 2 · working · ollama:qwen3.6:35b · limit 600s
+chat    chat model turn 2 · complete response
+chat      <act tool="finish">
+chat      <arg name="message">70000</arg>
+chat      </act>
+  [2;48;2;0;0;0;38;2;126;136;152m 2[0m [1;48;2;0;0;0;38;2;96;154;255m⚑ finish[0m
+     [2;48;2;0;0;0;38;2;96;154;255m☽ the work is done and verified; this is what the run returns[0m
+     [48;2;0;0;0;38;2;255;255;255m70000[0m
+chat    final answer
+70000
+

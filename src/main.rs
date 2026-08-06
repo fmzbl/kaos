@@ -264,6 +264,7 @@ fn run() {
                 code_task(&session, &rest, true);
             }
         }
+        "info" => println!("{}", kaos_core::info::APP_INFO),
         "request" => request_cmd(&session, &rest),
         "cast" | "summon" => cast(&mut session, &rest),
         "attach" | "file" => attach_cmd(&mut session, &rest),
@@ -349,6 +350,7 @@ fn dispatch(session: &mut Session, line: &str) -> bool {
             "models" | "minds" => models_cmd(session, arg),
             "model" | "backend" | "bind" => model_cmd(session, arg),
             "think" => think_cmd(arg),
+            "info" => println!("{}", kaos_core::info::APP_INFO),
             "banish" => banish_session(session),
             "rays" | "magics" => print_rays(),
             "quit" | "exit" | "q" => return false,
@@ -885,7 +887,7 @@ fn finish_conclave<C: kaos::myth::Cast>(
             println!(
                 "  {} {}",
                 bold(GREEN(), "\u{25c9} verdict"),
-                bone(&kaos::solve::render_verdict(&answer))
+                bone(&kaos::solve::render_verdict(answer))
             );
             println!("  {}", ash(&gate.summary()));
         }
@@ -900,7 +902,7 @@ fn finish_conclave<C: kaos::myth::Cast>(
             );
             if !work.trim().is_empty() {
                 println!("  {}", dim(ASH(), "what it produced, unverified:"));
-                for line in kaos::solve::render_verdict(&work).lines() {
+                for line in kaos::solve::render_verdict(work).lines() {
                     println!("  {}", dim(ASH(), line));
                 }
             }
@@ -1312,6 +1314,11 @@ fn max_steps() -> usize {
 struct RebisOracle<'a> {
     model: &'a Spec,
     root: &'a std::path::Path,
+    /// Immutable run context shared with every node agent. Dynamic Rebis
+    /// values still arrive through the language's `INPUT`/`RESULT` transport;
+    /// this snapshot covers facts outside one node's prompt value.
+    program_source: &'a str,
+    initial_record: &'a str,
     allow_tools: bool,
     chaos: bool,
     /// In a hosted run this is a renewable slice: reaching it pauses before
@@ -1562,7 +1569,6 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
         let selected_model = model_selector.map(Spec::parse);
         let model = selected_model.as_ref().unwrap_or(self.model);
         let model_key = model.canonical();
-        let checkpoint_prompt = format!("MODEL {model_key}\n{prompt}");
         let branch_seed = if scope.is_root() {
             String::new()
         } else {
@@ -1577,6 +1583,33 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             .display_sequence
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
+        // Rebis assembled `prompt` is kept intact. This data envelope gives
+        // every provider-backed node the same immutable source/record/scope
+        // facts, while dynamic values still arrive through `INPUT`/`RESULT`.
+        // The supervisor directive is intentionally excluded from the
+        // checkpoint key so replayed prompts remain immutable.
+        let workspace = match &self.worktrees {
+            Some(worktrees) => worktrees.workspace(scope)?,
+            None => std::fs::canonicalize(self.root).unwrap_or_else(|_| self.root.to_path_buf()),
+        };
+        let attachment_context: Vec<(&str, &str)> = attached
+            .iter()
+            .map(|file| (file.name.as_str(), file.media_type.as_str()))
+            .collect();
+        let scope_label = scope.to_string();
+        let workspace_label = workspace.display().to_string();
+        let checkpoint_agent_prompt =
+            kaos_core::chat::render_rebis_agent_context(kaos_core::chat::RebisAgentContext {
+                source: self.program_source,
+                record: self.initial_record,
+                scope: &scope_label,
+                model: &model_key,
+                workspace: &workspace_label,
+                directive: None,
+                attachments: &attachment_context,
+                node_prompt: prompt,
+            });
+        let checkpoint_prompt = format!("MODEL {model_key}\n{checkpoint_agent_prompt}");
         if let kaos::rebis_checkpoint::Replay::Hit(answer) =
             self.journal.replay_scoped(scope, call, &checkpoint_prompt)
         {
@@ -1597,8 +1630,17 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             .directive_path
             .as_deref()
             .and_then(kaos::rebis_supervisor::read_directive);
-        let effective_prompt =
-            kaos::rebis_supervisor::directed_prompt(prompt, directive.as_deref());
+        let agent_prompt =
+            kaos_core::chat::render_rebis_agent_context(kaos_core::chat::RebisAgentContext {
+                source: self.program_source,
+                record: self.initial_record,
+                scope: &scope_label,
+                model: &model_key,
+                workspace: &workspace_label,
+                directive: directive.as_deref(),
+                attachments: &attachment_context,
+                node_prompt: prompt,
+            });
         if directive.is_some() {
             println!("supervisor directive active · Rebis run guidance attached");
             let _ = std::io::stdout().flush();
@@ -1619,22 +1661,25 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
         }
         kaos::fold::open(&format!(
             "Rebis agent {agent} · {}",
-            effective_prompt.lines().next().unwrap_or("working")
+            prompt.lines().next().unwrap_or("working")
         ));
         let timeout_s = rebis_timeout_s();
         let model_label = model.label();
         if !self.allow_tools {
             println!("model    generating turn 1 · {model_label} · NORMAL · limit {timeout_s}s");
             let _ = std::io::stdout().flush();
-            let system = kaos::conductor::rebis_agent_system_prompt();
+            // A direct Rebis node is already a complete prompt value. Do not
+            // prepend a hidden natural-language contract; the only host
+            // addition is the explicit length-delimited data context above.
+            let system = "";
             let response = loop {
                 // Files in scope go on the wire; whatever this provider
                 // cannot carry is reported rather than dropped, so an answer
                 // about a picture the model never saw is never mistaken for
                 // one about a picture it did.
                 let (answer, refused) = model.complete_attached(
-                    &system,
-                    &effective_prompt,
+                    system,
+                    &agent_prompt,
                     attached,
                     std::time::Duration::from_secs(timeout_s),
                     Some(sampling),
@@ -1678,10 +1723,7 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
             );
         }
 
-        let root = match &self.worktrees {
-            Some(worktrees) => worktrees.workspace(scope)?,
-            None => std::fs::canonicalize(self.root).unwrap_or_else(|_| self.root.to_path_buf()),
-        };
+        let root = workspace;
         let worktree_contract = (!scope.is_root() && self.worktrees.is_some()).then(|| {
             format!(
                 "\n\nThis is isolated Rebis branch {scope}. Do not create Git commits, \
@@ -1694,7 +1736,7 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
                 "{}\n\nYou are operating directly in this workspace:\n{}\n\nUse your native \
                  file and command tools to perform every requested change. Do not merely describe \
                  edits. Complete only this Rebis node, then return the value that should flow to \
-                 the next node.{}\n\nNODE PROMPT:\n{effective_prompt}",
+                 the next node.{}\n\n{agent_prompt}",
                 kaos::conductor::rebis_agent_system_prompt(),
                 root.display(),
                 worktree_contract.as_deref().unwrap_or_default(),
@@ -1751,7 +1793,7 @@ impl rebis_lang::Oracle for RebisOracle<'_> {
              command requested by the instruction. Do not merely describe changes that the \
              instruction asks you to make. Complete the work in this launch directory, verify it \
              when appropriate, and finish with the value that should flow to the next Rebis \
-             node:{}\n\n{effective_prompt}",
+             node:{}\n\n{agent_prompt}",
             root.display(),
             worktree_contract.as_deref().unwrap_or_default(),
         );
@@ -2120,6 +2162,7 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
     let dream = kaos_core::dream::Dream::here();
     let mut seed = dream.texts();
     seed.push(input);
+    let initial_record = seed.join("\n");
     let mut record = rebis_lang::Record::from_texts(&seed);
     let mut stream = |event: &rebis_lang::ExecutionEvent| {
         use rebis_lang::{ExecutionEvent, FlowDirection};
@@ -2301,6 +2344,8 @@ fn rebis_run_cmd(session: &Session, arg: &str) {
         let oracle = RebisOracle {
             model: &session.model,
             root: &root,
+            program_source: &source,
+            initial_record: &initial_record,
             allow_tools,
             chaos,
             model_call_slice,
@@ -2466,6 +2511,221 @@ fn request_cmd(session: &Session, arg: &str) {
     }
 }
 
+/// The oracle used by the one-prompt Rebis program behind an ordinary chat
+/// turn. Keeping provider transport here means direct chat, a Rebis prompt,
+/// and a generated chaos program all cross the same language boundary; the
+/// model never receives a hidden authoring contract.
+struct DirectChatOracle<'a> {
+    root: &'a std::path::Path,
+    spec: &'a Spec,
+    trace: bool,
+    /// The actual `Prompt` expression and its seed record. Keeping these in
+    /// the oracle lets a chat-backed tool agent see the same Rebis context as
+    /// a node fired from an explicit run.
+    program_source: &'a str,
+    initial_record: &'a str,
+}
+
+impl rebis_lang::Oracle for DirectChatOracle<'_> {
+    fn fire(&self, prompt: &str) -> Option<String> {
+        self.try_fire(prompt).ok().flatten()
+    }
+
+    fn try_fire(&self, prompt: &str) -> Result<Option<String>, String> {
+        let model_key = self.spec.canonical();
+        let workspace = std::fs::canonicalize(self.root)
+            .unwrap_or_else(|_| self.root.to_path_buf())
+            .display()
+            .to_string();
+        let agent_prompt =
+            kaos_core::chat::render_rebis_agent_context(kaos_core::chat::RebisAgentContext {
+                source: self.program_source,
+                record: self.initial_record,
+                scope: "root",
+                model: &model_key,
+                workspace: &workspace,
+                directive: None,
+                attachments: &[],
+                node_prompt: prompt,
+            });
+        if self.trace {
+            // The other half of the harness: what the NODE is handed once the
+            // program fires — the program itself, the record, the scope, the
+            // workspace, and the prompt in its final rendered form. Between
+            // this and the program above, nothing about the turn is hidden.
+            kaos::fold::open(&format!(
+                "chat node prompt \u{00b7} exactly what the model receives \u{00b7} {} bytes",
+                agent_prompt.len()
+            ));
+            for line in agent_prompt.lines() {
+                println!("chat      {line}");
+            }
+            kaos::fold::close();
+            let _ = io::stdout().flush();
+        }
+        if self.spec.kind == Kind::ClaudeCli {
+            let mut emit = |line: &str| {
+                if !self.trace {
+                    return;
+                }
+                for rendered in kaos::backend::claude_event_lines(line) {
+                    if kaos::fold::enabled() {
+                        kaos::fold::open("claude · visible model/tool work");
+                    }
+                    println!("chat    {rendered}");
+                    if kaos::fold::enabled() {
+                        kaos::fold::close();
+                    }
+                }
+                let _ = io::stdout().flush();
+            };
+            return kaos::backend::run_claude_chat_with_result_stream(
+                self.root,
+                &agent_prompt,
+                self.spec.claude_tag(),
+                &mut emit,
+            )
+            .map(Some);
+        }
+
+        let model_label = self.spec.label();
+        let timeout_s = chat_timeout_s();
+        let model_fold_open = std::cell::Cell::new(false);
+        let mut on_model_call = |turn: usize| {
+            if !self.trace {
+                return;
+            }
+            let title =
+                format!("chat model turn {turn} · working · {model_label} · limit {timeout_s}s");
+            if kaos::fold::enabled() {
+                kaos::fold::open(&title);
+                model_fold_open.set(true);
+            } else {
+                println!("chat    {title}");
+            }
+            let _ = io::stdout().flush();
+        };
+        let mut on_model_reply = |turn: usize, response: &str| {
+            if !self.trace {
+                return;
+            }
+            if model_fold_open.replace(false) && kaos::fold::enabled() {
+                kaos::fold::close();
+            }
+            let title = format!("chat model turn {turn} · complete response");
+            if kaos::fold::enabled() {
+                kaos::fold::open(&title);
+            } else {
+                println!("chat    {title}");
+            }
+            for line in response.lines() {
+                println!("chat      {line}");
+            }
+            if response.is_empty() {
+                println!("chat      (empty response)");
+            }
+            if kaos::fold::enabled() {
+                kaos::fold::close();
+            }
+            let _ = io::stdout().flush();
+        };
+        let mut step = 0usize;
+        let mut on_step = |event: &kaos::conductor::Step| {
+            if self.trace {
+                step += 1;
+                render_step(step, event);
+                let _ = io::stdout().flush();
+            }
+        };
+        let session = run_session_with_timeout(
+            self.root,
+            &agent_prompt,
+            self.spec,
+            kaos::backend::Sampling::default(),
+            max_steps(),
+            timeout_s,
+            None,
+            SessionObservers {
+                on_model_call: &mut on_model_call,
+                on_model_reply: &mut on_model_reply,
+                on_step: &mut on_step,
+            },
+        );
+        if model_fold_open.replace(false) && kaos::fold::enabled() {
+            kaos::fold::close();
+        }
+        match (session.error, session.final_message) {
+            (Some(error), _) => Err(error),
+            (None, answer) if !answer.trim().is_empty() => Ok(Some(answer)),
+            (None, _) => Err("the chat mind returned no answer".to_string()),
+        }
+    }
+}
+
+/// Run one direct chat turn as a real, minimal Rebis program. The input is a
+/// quoted prompt expression, so delimiters and model text remain data; the
+/// normal Rebis orchestrator still owns firing, diagnostics, and the result.
+fn run_direct_rebis_chat(
+    root: &std::path::Path,
+    task: &str,
+    spec: &Spec,
+    trace: bool,
+) -> Result<String, String> {
+    let data = if task.starts_with("KAOS_CHAT_DATA\n") || task.starts_with("KAOS_RUN_CHAT_DATA\n") {
+        task.to_string()
+    } else {
+        kaos_core::chat::DEFAULT_CONTEXT.render_chat("", task)
+    };
+    let source = kaos_core::chat::chat_program_source(&data);
+    let expression = rebis_lang::parse(&source)
+        .map_err(|error| format!("direct chat Rebis prompt did not parse: {error}"))?;
+    if trace {
+        // A chat turn is not a hidden call to a model — it is a real Rebis
+        // program, and this is that program. Showing only its byte count was
+        // asking the reader to take the harness on faith: what context was
+        // attached, how their words were quoted, what the node will actually
+        // receive. It goes in a fold, so the trace stays a trace and the whole
+        // thing is one keypress away.
+        kaos::fold::open(&format!(
+            "chat Rebis program \u{00b7} the harness around your prompt \u{00b7} {} bytes",
+            source.len()
+        ));
+        for line in source.lines() {
+            println!("chat      {line}");
+        }
+        kaos::fold::close();
+        let _ = io::stdout().flush();
+    }
+    let oracle = DirectChatOracle {
+        root,
+        spec,
+        trace,
+        program_source: &source,
+        initial_record: "",
+    };
+    let mut record = rebis_lang::Record::from_texts::<&str>(&[]);
+    let result = rebis_lang::orchestrate(&expression, &mut record, &oracle);
+    if !result.diagnostics.is_empty() {
+        return Err(result
+            .diagnostics
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
+    result
+        .output
+        .or_else(|| {
+            result
+                .firings
+                .iter()
+                .rev()
+                .find_map(|firing| firing.answer.clone())
+        })
+        .filter(|answer| !answer.trim().is_empty())
+        .ok_or_else(|| "the chat mind returned no answer".to_string())
+}
+
 /// Render one literal chat task. Shell callers receive a flushed live trace and
 /// then the cleaned assistant answer; interactive front ends additionally set
 /// `KAOS_CHAT_TRACE` so they can render the same visible work while still
@@ -2484,122 +2744,54 @@ fn chat_task(root: &std::path::Path, task: &str, spec: &Spec) {
             Ok("1") | Ok("true") | Ok("yes")
         );
 
-    // Chaos mode is applied HERE rather than only at each frontend, so that
-    // `kaos chat "…"` from a shell, `kaos request chat`, and a scripted pipe
-    // all get the stance too — those callers pass a bare intent with no
-    // envelope, and there is no other place they pass through.
-    //
-    // The guard is what makes that safe: a frontend that already rendered the
-    // turn with `render_chaos_chat` has the contract in the text, and wrapping
-    // it again would tell the model to compose its own composer. Presence of
-    // the contract is the test, so the two paths cannot both fire.
-    let composed;
-    let task = if kaos_core::chaos::enabled() && !task.contains(kaos_core::chaos::COMPOSE_CONTRACT)
-    {
-        composed = kaos_core::chat::DEFAULT_CONTEXT.render_chaos_chat("", task);
+    // Chaos composition is a real Rebis program. The composer builds a `($ …)`
+    // source, evaluates it once through the normal Rebis model seam, and then
+    // validates the returned source before showing it. There is no second,
+    // hidden natural-language contract appended to this task.
+    if kaos_core::chaos::enabled() {
         if trace {
-            println!("chat    chaos mode · composing the intent as a Rebis program first");
+            // The composer is a Rebis program too, and it is the one whose
+            // output becomes the answer — so it is shown on the same terms as
+            // the direct path's harness. Without this, chaos mode presented a
+            // generated program with no way to see what asked for it.
+            let harness = kaos_core::chaos::composition_source(task);
+            kaos::fold::open(&format!(
+                "chat chaos composer \u{00b7} the Rebis that writes your program \u{00b7} {} bytes",
+                harness.len()
+            ));
+            for line in harness.lines() {
+                println!("chat      {line}");
+            }
+            kaos::fold::close();
+            if kaos::fold::enabled() {
+                kaos::fold::open("chat chaos · composing a Rebis program");
+            } else {
+                println!("chat    chaos · composing a Rebis program");
+            }
             let _ = io::stdout().flush();
         }
-        composed.as_str()
-    } else {
-        task
-    };
-    let result = if spec.kind == Kind::ClaudeCli {
-        if trace {
-            let mut emit = |line: &str| {
-                for rendered in kaos::backend::claude_event_lines(line) {
-                    if kaos::fold::enabled() {
-                        kaos::fold::open("claude · visible model/tool work");
-                    }
-                    println!("chat    {rendered}");
-                    if kaos::fold::enabled() {
-                        kaos::fold::close();
-                    }
-                }
-                let _ = io::stdout().flush();
-            };
-            kaos::backend::run_claude_chat_with_result_stream(
-                root,
-                task,
-                spec.claude_tag(),
-                &mut emit,
-            )
-        } else {
-            kaos::backend::run_claude_chat_with_result(root, task, spec.claude_tag())
-        }
-    } else {
-        let model_label = spec.label();
-        let timeout_s = chat_timeout_s();
-        let model_fold_open = std::cell::Cell::new(false);
-        let mut on_model_call = |turn: usize| {
-            if trace {
-                let title = format!(
-                    "chat model turn {turn} · working · {model_label} · limit {timeout_s}s"
-                );
-                if kaos::fold::enabled() {
-                    kaos::fold::open(&title);
-                    model_fold_open.set(true);
-                } else {
-                    println!("chat    {title}");
-                }
-                let _ = io::stdout().flush();
-            }
-        };
-        let mut on_model_reply = |turn: usize, response: &str| {
-            if trace {
-                if model_fold_open.replace(false) {
-                    kaos::fold::close();
-                }
-                let title = format!("chat model turn {turn} · complete response");
-                if kaos::fold::enabled() {
-                    kaos::fold::open(&title);
-                } else {
-                    println!("chat    {title}");
-                }
-                for line in response.lines() {
-                    println!("chat      {line}");
-                }
-                if response.is_empty() {
-                    println!("chat      (empty response)");
-                }
-                if kaos::fold::enabled() {
-                    kaos::fold::close();
-                }
-                let _ = io::stdout().flush();
-            }
-        };
-        let mut step = 0usize;
-        let mut on_step = |event: &kaos::conductor::Step| {
-            if trace {
-                step += 1;
-                render_step(step, event);
-                let _ = io::stdout().flush();
-            }
-        };
-        let session = run_session_with_timeout(
-            root,
-            task,
+        let result = kaos::composer::compose_program(
             spec,
+            task,
+            std::time::Duration::from_secs(chat_timeout_s()),
             kaos::backend::Sampling::default(),
-            max_steps(),
-            timeout_s,
-            None,
-            SessionObservers {
-                on_model_call: &mut on_model_call,
-                on_model_reply: &mut on_model_reply,
-                on_step: &mut on_step,
-            },
         );
-        if model_fold_open.replace(false) && kaos::fold::enabled() {
+        if trace && kaos::fold::enabled() {
             kaos::fold::close();
         }
-        match (session.error, session.final_message) {
-            (Some(error), _) => Err(error),
-            (None, answer) if !answer.trim().is_empty() => Ok(answer),
-            (None, _) => Err("the chat mind returned no answer".to_string()),
+        match result {
+            Ok(source) => {
+                if trace {
+                    println!("chat    final answer");
+                }
+                println!("```rebis\n{source}\n```");
+            }
+            Err(error) => println!("chat error: {error}"),
         }
-    };
+        let _ = io::stdout().flush();
+        return;
+    }
+    let result = run_direct_rebis_chat(root, task, spec, trace);
     match result {
         Ok(answer) => {
             let answer = kaos_core::chat::clean_chat_reply(&answer);
@@ -3344,25 +3536,6 @@ fn code_conclave(
 /// condensed result. Everything is one-lined and truncated so it streams tightly.
 fn render_step(n: usize, step: &Step) {
     let idx = dim(ASH(), &format!("{n:>2}"));
-    // The adept's narration — what it says it is doing — streams LIVE above the
-    // action, so the reader follows the work as it happens (the full text stays
-    // in the step's fold). Two lines at most; the compact trace stays a trace.
-    if !step.thought.is_empty() {
-        for line in step
-            .thought
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(2)
-        {
-            println!(
-                "     {}",
-                dim(
-                    GREEN(),
-                    &format!("\u{263d} {}", trunc_line(line.trim(), 92))
-                )
-            );
-        }
-    }
     match &step.tool {
         Tool::ReadFile { path } => {
             println!(
@@ -3371,6 +3544,7 @@ fn render_step(n: usize, step: &Step) {
                 fg(GREEN(), "\u{25cb} read"),
                 dim(ASH(), path)
             );
+            explain(step);
         }
         Tool::EditFile {
             path,
@@ -3384,6 +3558,7 @@ fn render_step(n: usize, step: &Step) {
                 bold(PURPLE(), "\u{00b1} edit"),
                 bone(path)
             );
+            explain(step);
             inline_diff(find, '-', PURPLE());
             inline_diff(replace, '+', GREEN());
         }
@@ -3396,6 +3571,7 @@ fn render_step(n: usize, step: &Step) {
                 bone(path),
                 dim(GREEN(), &one_line(step.observation.trim(), 60)),
             );
+            explain(step);
             // A created/rewritten file shows its head inline, like a diff.
             inline_diff(contents, '+', GREEN());
         }
@@ -3407,6 +3583,7 @@ fn render_step(n: usize, step: &Step) {
                 bold(GREEN(), "$"),
                 bone(&one_line(cmd, 84))
             );
+            explain(step);
             let (exit, tail) = bash_result(&step.observation);
             let colour = if exit == "exit 0" { GREEN() } else { RED() };
             let line = if tail.is_empty() {
@@ -3429,6 +3606,7 @@ fn render_step(n: usize, step: &Step) {
                 fg(PURPLE(), "\u{2315} search"),
                 bone(&one_line(query, 72))
             );
+            explain(step);
             let found = step
                 .observation
                 .lines()
@@ -3447,6 +3625,7 @@ fn render_step(n: usize, step: &Step) {
                 fg(PURPLE(), "\u{2913} fetch"),
                 dim(ASH(), &one_line(url, 84))
             );
+            explain(step);
             println!(
                 "     {} {}",
                 dim(ASH(), "\u{2192}"),
@@ -3465,6 +3644,7 @@ fn render_step(n: usize, step: &Step) {
                 fg(GREEN(), "\u{2325} rebis run"),
                 bone(&one_line(note, 70))
             );
+            explain(step);
             println!(
                 "     {} {}",
                 dim(ASH(), "\u{2192}"),
@@ -3480,6 +3660,7 @@ fn render_step(n: usize, step: &Step) {
                 fg(PURPLE(), "\u{23f0} timer"),
                 bone(&one_line(after, 12))
             );
+            explain(step);
             println!(
                 "     {} {}",
                 dim(ASH(), "\u{2192}"),
@@ -3489,12 +3670,86 @@ fn render_step(n: usize, step: &Step) {
         Tool::Finish { message } => {
             // The final message is the deliverable — as long as it needs to be.
             println!("  {} {}", idx, bold(GREEN(), "\u{2691} finish"));
+            explain(step);
             for line in message.lines().filter(|l| !l.trim().is_empty()) {
                 println!("     {}", bone(line));
             }
         }
     }
     render_step_detail(n, step);
+}
+
+/// The narration printed under the LAST step, so a chain of gestures cast in one
+/// breath does not repeat the single sentence the mind said about all of them.
+static LAST_NARRATION: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Print the line that explains the step above it.
+///
+/// Every step gets one — that is the point of it. The mind's own narration is
+/// the best explanation there is, so it goes first when there is one; but a
+/// model that narrates nothing, or narrates once for a chain of five gestures,
+/// must not leave the reader guessing what the line above them means. So the
+/// fallback says what the gesture IS, from the gesture itself. Nothing here is
+/// invented: it is either what the mind said or what the tool does.
+fn explain(step: &Step) {
+    let spoken = step
+        .thought
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let mut last = LAST_NARRATION.lock().unwrap_or_else(|e| e.into_inner());
+    let line = if spoken.is_empty() || *last == spoken {
+        // Said nothing, or said it already one gesture ago.
+        gesture_of(step)
+    } else {
+        last.clone_from(&spoken);
+        spoken
+    };
+    drop(last);
+    println!(
+        "     {}",
+        dim(GREEN(), &format!("\u{263d} {}", trunc_line(&line, 92)))
+    );
+}
+
+/// What this kind of step is, in one plain sentence — the explanation of last
+/// resort, true of the gesture whether or not the mind described it.
+fn gesture_of(step: &Step) -> String {
+    match &step.tool {
+        Tool::ReadFile { path } => format!("reads {path} into what it knows"),
+        Tool::EditFile { path, .. } => {
+            format!("changes one exact passage of {path} — the diff below is it")
+        }
+        Tool::WriteFile { path, contents } => format!(
+            "writes {} lines to {path}",
+            contents
+                .lines()
+                .count()
+                .max(usize::from(!contents.is_empty()))
+        ),
+        Tool::Bash { .. } => {
+            "runs that command in the project and reads what it prints".to_string()
+        }
+        Tool::Search { .. } => {
+            "searches the open web — this returns a ranked list of pages, not an answer".to_string()
+        }
+        Tool::Fetch { url } => format!(
+            "reads that page as text{}",
+            url.split('/')
+                .nth(2)
+                .map(|host| format!(" from {host}"))
+                .unwrap_or_default()
+        ),
+        Tool::Rebis { .. } => "opens a Rebis program as a run nested under this one".to_string(),
+        Tool::Timer { after, .. } => {
+            format!("sets the work aside for {after} and is handed the note back when it comes due")
+        }
+        Tool::Finish { .. } => {
+            "the work is done and verified; this is what the run returns".to_string()
+        }
+    }
 }
 
 /// Stream up to 6 lines of a change block inline, opencode-style, with a count

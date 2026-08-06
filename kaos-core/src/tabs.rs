@@ -40,16 +40,46 @@ impl<T> Tabs<T> {
 
     /// Open a tab and make it active — opening something you cannot see would
     /// never be what was meant.
+    ///
+    /// The title is made unique against the tabs already open: a second `chat`
+    /// becomes `chat 2`, a third `chat 3`. Tabs are how you tell one piece of
+    /// work from another, so two called the same thing is a bar you cannot
+    /// navigate — you click one and hope. Numbering belongs here rather than at
+    /// each call site because every front end opening a tab wants it, and one
+    /// of them getting it wrong is invisible until the day you have two.
     pub fn open(&mut self, title: impl Into<String>, content: T) -> TabId {
         let id = TabId(self.next_id);
         self.next_id += 1;
-        self.items.push(Tab {
-            id,
-            title: title.into(),
-            content,
-        });
+        let title = self.unique_title(&title.into());
+        self.items.push(Tab { id, title, content });
         self.active = self.items.len() - 1;
         id
+    }
+
+    /// `wanted`, or the first free `wanted N` after it.
+    ///
+    /// A title that already ends in a number keeps its stem, so re-opening
+    /// `chat 2` gives `chat 3` and never `chat 2 2`. Closing a tab frees its
+    /// name again: the numbers label what is open now, not everything that ever
+    /// was, so a bar that has been used all day still reads `chat`, `chat 2`.
+    fn unique_title(&self, wanted: &str) -> String {
+        let taken = |name: &str| self.items.iter().any(|t| t.title == name);
+        if !taken(wanted) {
+            return wanted.to_string();
+        }
+        // Split a trailing count off the stem: "chat 2" is the second chat, not
+        // a thing named "chat 2".
+        let (stem, from) = match wanted.rsplit_once(' ') {
+            Some((stem, count)) => match count.parse::<u32>() {
+                Ok(n) if !stem.is_empty() && n > 1 => (stem, n),
+                _ => (wanted, 1),
+            },
+            None => (wanted, 1),
+        };
+        (from.saturating_add(1)..)
+            .map(|n| format!("{stem} {n}"))
+            .find(|candidate| !taken(candidate))
+            .unwrap_or_else(|| wanted.to_string())
     }
 
     /// Close a tab.
@@ -319,6 +349,66 @@ mod tests {
         assert_eq!(t.get(id).unwrap(), "first edited");
         t.active_mut().unwrap().push('!');
         assert_eq!(t.get(id).unwrap(), "first edited!");
+    }
+
+    #[test]
+    fn a_second_tab_of_the_same_name_is_numbered() {
+        let mut t: Tabs<()> = Tabs::new();
+        t.open("chat", ());
+        t.open("chat", ());
+        t.open("chat", ());
+        let names: Vec<&str> = t.iter().map(|tab| tab.title.as_str()).collect();
+        assert_eq!(names, vec!["chat", "chat 2", "chat 3"]);
+    }
+
+    #[test]
+    fn only_a_clash_is_numbered() {
+        let mut t: Tabs<()> = Tabs::new();
+        t.open("chat", ());
+        t.open("runs", ());
+        t.open("chat", ());
+        let names: Vec<&str> = t.iter().map(|tab| tab.title.as_str()).collect();
+        assert_eq!(names, vec!["chat", "runs", "chat 2"]);
+    }
+
+    #[test]
+    fn a_numbered_title_keeps_its_stem_instead_of_stacking() {
+        // Re-opening "chat 2" must give "chat 3", never "chat 2 2".
+        let mut t: Tabs<()> = Tabs::new();
+        t.open("chat", ());
+        t.open("chat 2", ());
+        t.open("chat 2", ());
+        let names: Vec<&str> = t.iter().map(|tab| tab.title.as_str()).collect();
+        assert_eq!(names, vec!["chat", "chat 2", "chat 3"]);
+    }
+
+    #[test]
+    fn closing_a_tab_frees_its_name_again() {
+        // The numbers label what is OPEN, so a bar used all day still reads
+        // "chat", "chat 2" rather than climbing to "chat 47".
+        let mut t: Tabs<()> = Tabs::new();
+        let first = t.open("chat", ());
+        t.open("chat", ());
+        t.close(first);
+        t.open("chat", ());
+        let names: Vec<&str> = t.iter().map(|tab| tab.title.as_str()).collect();
+        assert_eq!(names, vec!["chat 2", "chat"]);
+    }
+
+    #[test]
+    fn a_title_that_merely_ends_in_a_word_is_left_alone() {
+        // "run #7 chat" is a name, not a numbered series; and a trailing 1 is
+        // not a count anyone wrote.
+        let mut t: Tabs<()> = Tabs::new();
+        t.open("run #7 chat", ());
+        t.open("run #7 chat", ());
+        t.open("step 1", ());
+        t.open("step 1", ());
+        let names: Vec<&str> = t.iter().map(|tab| tab.title.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["run #7 chat", "run #7 chat 2", "step 1", "step 1 2"]
+        );
     }
 
     #[test]

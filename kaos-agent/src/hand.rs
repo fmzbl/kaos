@@ -217,6 +217,40 @@ pub fn render_messages(system: &str, history: &[Msg]) -> serde_json::Value {
     serde_json::Value::Array(out)
 }
 
+/// Ollama's chat endpoint keeps function arguments as a JSON object when an
+/// assistant tool call is replayed. OpenAI-compatible endpoints use the same
+/// field as a JSON string, so the shared history renderer retains that portable
+/// shape and this small wire adapter performs the provider-specific conversion.
+pub fn render_ollama_messages(messages: &serde_json::Value) -> serde_json::Value {
+    let mut messages = messages.clone();
+    let Some(items) = messages.as_array_mut() else {
+        return messages;
+    };
+    for message in items {
+        let Some(calls) = message
+            .get_mut("tool_calls")
+            .and_then(|value| value.as_array_mut())
+        else {
+            continue;
+        };
+        for call in calls {
+            let Some(arguments) = call
+                .get_mut("function")
+                .and_then(|function| function.get_mut("arguments"))
+            else {
+                continue;
+            };
+            let serde_json::Value::String(raw) = arguments else {
+                continue;
+            };
+            if let Ok(parsed) = serde_json::from_str(raw) {
+                *arguments = parsed;
+            }
+        }
+    }
+    messages
+}
+
 /// A [`Tool`] back into the OpenAI tool_call wire shape (for history replay).
 fn tool_call_json(id: &str, t: &Tool) -> serde_json::Value {
     let (name, args) = match t {
@@ -427,5 +461,27 @@ mod tests {
         assert!(last.len() >= 3000);
         // assistant turns replay their tool_calls
         assert!(arr[2]["tool_calls"].is_array());
+    }
+
+    #[test]
+    fn ollama_replays_tool_arguments_as_objects() {
+        let messages = render_messages(
+            "sys",
+            &[Msg::assistant(
+                "",
+                vec![(
+                    "call_1".to_string(),
+                    Tool::ReadFile {
+                        path: "a.txt".into(),
+                    },
+                )],
+            )],
+        );
+        assert!(messages[1]["tool_calls"][0]["function"]["arguments"].is_string());
+        let ollama = render_ollama_messages(&messages);
+        assert_eq!(
+            ollama[1]["tool_calls"][0]["function"]["arguments"]["path"],
+            "a.txt"
+        );
     }
 }
